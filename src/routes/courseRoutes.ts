@@ -13,6 +13,7 @@ import {
   generateLessonController,
   getLessonContentController,
   executeCodeController,
+  streamLessonContentController,
   chatStreamController,
   getChatHistoryController,
 } from '@controlers/course';
@@ -42,6 +43,7 @@ router.post('/:courseId/generate-structure', protect, validateObjectId('courseId
 router.post('/:courseId/depth-previews', protect, validateObjectId('courseId'), generateDepthPreviewsController);
 router.post('/:courseId/refine-structure', protect, validateObjectId('courseId'), refineStructureController);
 router.post('/:courseId/generate-lesson', protect, validateObjectId('courseId'), generateLessonController);
+router.post('/:courseId/stream-lesson', protect, validateObjectId('courseId'), streamLessonContentController);
 router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', protect, validateObjectId('courseId'), getLessonContentController);
 
 export { router as courseRoutes };

@@ -284,9 +284,9 @@ const formatBlocksForContext = (blocks: ILessonBlock[]) => {
     .join('\n\n');
 };
 
-// ── Main function ──────────────────────────────────────
+// ── Build prompts (shared) ─────────────────────────────
 
-export const generateLessonContent = async (params: LessonGenerationInput): Promise<LessonOutput> => {
+const buildLessonPrompts = (params: LessonGenerationInput) => {
   const { answers, depth, structure, moduleIndex, lessonIndex } = params;
   const goal = sanitizePromptInput(params.goal);
 
@@ -294,7 +294,6 @@ export const generateLessonContent = async (params: LessonGenerationInput): Prom
   const lesson = mod.lessons[lessonIndex];
   const courseOutline = formatCourseOutline(structure, moduleIndex, lessonIndex);
 
-  // Build context about position in course
   const positionContext: string[] = [];
   if (moduleIndex > 0 || lessonIndex > 0) {
     const prevLessons: string[] = [];
@@ -339,32 +338,26 @@ ${positionContext.length > 0 ? `## Position context\n\n${positionContext.join('\
 
 Generate the full lesson content as structured blocks.`;
 
-  // ── Call 1: Content generation (Sonnet 4.6) ──────────
+  return { goal, mod, lesson, humanMessage };
+};
 
-  console.log(`[LessonService] Generating content blocks...`.cyan);
-  const contentModel = getLessonModel().withStructuredOutput(contentOutputSchema);
+const buildInteractivePrompt = (
+  contentBlocks: ILessonBlock[],
+  lessonName: string,
+  lessonDescription: string,
+  depth: string,
+) => {
+  const summaryBlock = contentBlocks.find((b) => b.type === 'summary');
+  const maxContentOrder = Math.max(...contentBlocks.map((b) => b.order));
 
-  const contentResult = await withRetry(() =>
-    contentModel.invoke([new SystemMessage(LESSON_SYSTEM_PROMPT), new HumanMessage(humanMessage)]),
-  );
+  return `## Lesson content
 
-  // ── Call 2 + 3: Interactive elements + Hero image (parallel) ──
-
-  console.log(`[LessonService] Generating interactive elements + hero image (parallel)...`.cyan);
-  const interactiveModelInstance = getInteractiveModel().withStructuredOutput(interactiveOutputSchema);
-
-  // Find the summary block's order so we can position exercise before it
-  const summaryBlock = contentResult.blocks.find((b) => b.type === 'summary');
-  const maxContentOrder = Math.max(...contentResult.blocks.map((b) => b.order));
-
-  const interactiveHumanMessage = `## Lesson content
-
-${formatBlocksForContext(contentResult.blocks)}
+${formatBlocksForContext(contentBlocks)}
 
 ## Lesson info
 
-Title: ${lesson.name}
-Description: ${lesson.description}
+Title: ${lessonName}
+Description: ${lessonDescription}
 Course depth: ${depth}
 
 ## Positioning instructions
@@ -374,29 +367,115 @@ The content blocks use order values 0 through ${maxContentOrder}.
 - Place the exercise block at order ${summaryBlock ? summaryBlock.order - 0.5 : maxContentOrder + 1} (just before the summary).
 
 Generate 1-2 quiz blocks and 1 exercise block.`;
+};
 
-  // Run in parallel — interactive elements, hero image, and links don't depend on each other
-  const [interactiveResult, heroImageUrl, linksBlock] = await Promise.all([
-    withRetry(() =>
-      interactiveModelInstance.invoke([new SystemMessage(INTERACTIVE_SYSTEM_PROMPT), new HumanMessage(interactiveHumanMessage)]),
-    ),
-    generateHeroImage(lesson.name, mod.name, goal),
-    generateCuratedLinks(lesson.name, mod.name, goal),
-  ]);
-
-  // ── Merge blocks ─────────────────────────────────────
-
-  const allBlocks = [...contentResult.blocks, ...interactiveResult.blocks];
-
-  // Place links block after summary (very last)
+const mergeAllBlocks = (
+  contentBlocks: ILessonBlock[],
+  interactiveBlocks: ILessonBlock[],
+  linksBlock: ILessonBlock | null,
+): ILessonBlock[] => {
+  const allBlocks = [...contentBlocks, ...interactiveBlocks];
   if (linksBlock) {
     const maxOrder = Math.max(...allBlocks.map((b) => b.order));
     linksBlock.order = maxOrder + 1;
     allBlocks.push(linksBlock);
   }
+  return allBlocks;
+};
+
+// ── Non-streaming (used by jobRunner) ──────────────────
+
+export const generateLessonContent = async (params: LessonGenerationInput): Promise<LessonOutput> => {
+  const { goal, mod, lesson, humanMessage } = buildLessonPrompts(params);
+
+  console.log(`[LessonService] Generating content blocks...`.cyan);
+  const contentResult = await withRetry(() =>
+    getLessonModel().withStructuredOutput(contentOutputSchema).invoke([
+      new SystemMessage(LESSON_SYSTEM_PROMPT),
+      new HumanMessage(humanMessage),
+    ]),
+  );
+
+  console.log(`[LessonService] Generating interactive + hero image + links (parallel)...`.cyan);
+  const interactivePrompt = buildInteractivePrompt(contentResult.blocks, lesson.name, lesson.description, params.depth);
+
+  const [interactiveResult, heroImageUrl, linksBlock] = await Promise.all([
+    withRetry(() =>
+      getInteractiveModel().withStructuredOutput(interactiveOutputSchema).invoke([
+        new SystemMessage(INTERACTIVE_SYSTEM_PROMPT),
+        new HumanMessage(interactivePrompt),
+      ]),
+    ),
+    generateHeroImage(lesson.name, mod.name, goal),
+    generateCuratedLinks(lesson.name, mod.name, goal),
+  ]);
 
   return {
-    blocks: allBlocks,
+    blocks: mergeAllBlocks(contentResult.blocks, interactiveResult.blocks, linksBlock),
+    summary: contentResult.summary,
+    heroImageUrl,
+  };
+};
+
+// ── Streaming (used by SSE controller) ─────────────────
+
+export interface StreamCallbacks {
+  onContentBlocks: (blocks: ILessonBlock[], summary: string) => void;
+  onInteractiveBlocks: (blocks: ILessonBlock[]) => void;
+  onHeroImage: (url: string) => void;
+  onLinksBlock: (block: ILessonBlock) => void;
+}
+
+export const generateLessonContentStreaming = async (
+  params: LessonGenerationInput,
+  callbacks: StreamCallbacks,
+): Promise<LessonOutput> => {
+  const { goal, mod, lesson, humanMessage } = buildLessonPrompts(params);
+
+  // ── Phase 1: Content (sequential) ────────────────────
+  console.log(`[LessonService] [stream] Generating content blocks...`.cyan);
+  const contentResult = await withRetry(() =>
+    getLessonModel().withStructuredOutput(contentOutputSchema).invoke([
+      new SystemMessage(LESSON_SYSTEM_PROMPT),
+      new HumanMessage(humanMessage),
+    ]),
+  );
+
+  // Emit content blocks immediately — client sees content now
+  callbacks.onContentBlocks(contentResult.blocks, contentResult.summary);
+
+  // ── Phase 2: Parallel (fire callbacks as each resolves) ──
+  console.log(`[LessonService] [stream] Generating interactive + hero image + links (parallel)...`.cyan);
+  const interactivePrompt = buildInteractivePrompt(contentResult.blocks, lesson.name, lesson.description, params.depth);
+
+  const interactivePromise = withRetry(() =>
+    getInteractiveModel().withStructuredOutput(interactiveOutputSchema).invoke([
+      new SystemMessage(INTERACTIVE_SYSTEM_PROMPT),
+      new HumanMessage(interactivePrompt),
+    ]),
+  ).then((result) => {
+    callbacks.onInteractiveBlocks(result.blocks);
+    return result;
+  });
+
+  const imagePromise = generateHeroImage(lesson.name, mod.name, goal).then((url) => {
+    if (url) callbacks.onHeroImage(url);
+    return url;
+  });
+
+  const linksPromise = generateCuratedLinks(lesson.name, mod.name, goal).then((block) => {
+    if (block) callbacks.onLinksBlock(block);
+    return block;
+  });
+
+  const [interactiveResult, heroImageUrl, linksBlock] = await Promise.all([
+    interactivePromise,
+    imagePromise,
+    linksPromise,
+  ]);
+
+  return {
+    blocks: mergeAllBlocks(contentResult.blocks, interactiveResult.blocks, linksBlock),
     summary: contentResult.summary,
     heroImageUrl,
   };
