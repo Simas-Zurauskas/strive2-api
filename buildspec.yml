@@ -1,0 +1,25 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+  pre_build:
+    commands:
+      - yarn install
+  build:
+    commands:
+      - yarn build
+artifacts:
+  files:
+    - build/**/*
+    - fonts/**/*
+    - package.json
+    - .platform/**/*
+# artifacts:
+#   files:
+#     - '**/*'
+#     - '!node_modules/**/*'
+#     - build/**/*
+#     - package.json
+#     - .platform/**/*
