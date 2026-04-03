@@ -20,6 +20,7 @@ import mongoose from 'mongoose';
 import { getIO, initSocketIO } from '@lib/socket';
 import { initJobSocketBridge } from '@lib/jobSocketBridge';
 import { jobLimit } from '@services/jobRunner';
+import { printGraphImages } from '@lib/ai/agents/printGraphImages';
 
 mt.tz.setDefault('UTC');
 
@@ -87,6 +88,7 @@ initJobSocketBridge();
 
 server.listen(PORT, () => {
   console.log(`Server running on: ${API_URL}`.bgCyan);
+  printGraphImages();
 });
 
 // ── Graceful shutdown ───────────────────────────────────

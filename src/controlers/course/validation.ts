@@ -30,4 +30,6 @@ export const refineStructureSchema = z.object({
 export const generateLessonSchema = z.object({
   moduleIndex: z.number().int().min(0, 'moduleIndex must be a non-negative integer'),
   lessonIndex: z.number().int().min(0, 'lessonIndex must be a non-negative integer'),
+  includeImage: z.boolean().optional().default(true),
+  includeLinks: z.boolean().optional().default(true),
 });

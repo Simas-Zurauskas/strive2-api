@@ -217,23 +217,36 @@ const generateCuratedLinks = async (lessonName: string, moduleName: string, cour
     const query = `${lessonName} ${moduleName} tutorial documentation official guide`;
     const results = await tavilySearch.invoke({ query });
 
-    // Parse Tavily results — can be a string or structured
-    let parsed: Array<{ title?: string; url?: string; content?: string }> = [];
-    if (typeof results === 'string') {
-      // TavilySearch sometimes returns a formatted string — skip in that case
-      return null;
+    console.log(`[LessonService] Tavily result type: ${typeof results}, isArray: ${Array.isArray(results)}`.gray);
+    console.log(`[LessonService] Tavily result keys: ${typeof results === 'object' && results ? Object.keys(results as object).join(', ') : 'N/A'}`.gray);
+    console.log(`[LessonService] Tavily result preview: ${JSON.stringify(results).slice(0, 500)}`.gray);
+
+    // Tavily returns different shapes depending on the wrapper:
+    // - Raw API object: { results: [{ url, title, content }], ... }
+    // - LangChain array: [{ url, title, content }]
+    // - Formatted string: plain text with URLs
+    let links: CuratedLink[] = [];
+    const raw = results as Record<string, unknown>;
+
+    let items: Array<{ title?: string; url?: string; content?: string }> = [];
+    if (raw && Array.isArray(raw.results)) {
+      items = raw.results;
     } else if (Array.isArray(results)) {
-      parsed = results;
+      items = results;
     }
 
-    const links: CuratedLink[] = parsed
-      .filter((r) => r.url && r.title)
-      .slice(0, 5)
-      .map((r) => ({
-        title: r.title ?? '',
-        url: r.url ?? '',
-        description: (r.content ?? '').slice(0, 150).trim(),
-      }));
+    if (items.length > 0) {
+      links = items
+        .filter((r) => r.url && r.title)
+        .slice(0, 5)
+        .map((r) => ({
+          title: r.title ?? '',
+          url: r.url ?? '',
+          description: (r.content ?? '').slice(0, 150).trim(),
+        }));
+    }
+
+    console.log(`[LessonService] Parsed ${links.length} links`.gray);
 
     if (links.length === 0) return null;
 

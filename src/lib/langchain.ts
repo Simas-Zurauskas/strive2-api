@@ -17,6 +17,7 @@ const structureModel = new ChatAnthropic({
   anthropicApiKey: ANTHROPIC_API_KEY,
   maxTokens: 16384,
   clientOptions: { timeout: 600000 }, // 10 minutes
+  invocationKwargs: { cache_control: { type: 'ephemeral' } },
 });
 
 // Agent chat — not used directly for LLM calls (chat node uses raw Anthropic SDK
@@ -37,15 +38,17 @@ const lessonModel = new ChatAnthropic({
   anthropicApiKey: ANTHROPIC_API_KEY,
   maxTokens: 16384,
   clientOptions: { timeout: 600000 }, // 10 minutes
+  invocationKwargs: { cache_control: { type: 'ephemeral' } },
 });
 
 // Interactive element generation (quizzes, exercises) — fast, structured extraction
 const interactiveModel = new ChatAnthropic({
-  model: 'claude-haiku-4-5-20251001',
+  model: 'claude-haiku-4-5',
   temperature: 0,
   anthropicApiKey: ANTHROPIC_API_KEY,
   maxTokens: 4096,
   clientOptions: { timeout: 60000 },
+  invocationKwargs: { cache_control: { type: 'ephemeral' } },
 });
 
 export const getClarifyModel = () => clarifyModel;

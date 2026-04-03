@@ -9,7 +9,7 @@ const getEnv = (key: string): string => {
   return value;
 };
 
-export const ENVIRONMENT = getEnv('ENVIRONMENT'); // development|test|production
+export const ENVIRONMENT = getEnv('ENVIRONMENT'); // development|production
 export const OPENAI_API_KEY = getEnv('OPENAI_API_KEY');
 export const ANTHROPIC_API_KEY = getEnv('ANTHROPIC_API_KEY');
 export const MONGO_URI = getEnv('MONGO_URI');

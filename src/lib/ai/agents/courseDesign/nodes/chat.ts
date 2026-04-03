@@ -117,19 +117,31 @@ export const chat: NodeFunction = async (state, config) => {
   console.log('[agent:chat] ── Invoking Anthropic (raw streaming) ──'.cyan);
   console.log(`[agent:chat] Message count: ${state.messages.length}`.gray);
 
-  const systemPrompt = COURSE_DESIGN_SYSTEM_PROMPT + buildStructureSummary(state);
+  const structureSummary = buildStructureSummary(state);
   const anthropicMessages = toAnthropicMessages(state.messages);
 
   // Get the token emitter and abort signal from configurable context (set by the endpoint)
   const tokenEmitter = config?.configurable?.tokenEmitter as EventEmitter | undefined;
   const abortSignal = config?.configurable?.abortSignal as AbortSignal | undefined;
 
+  // System prompt with cache_control — static prompt + course context cached separately
+  const systemBlocks: Anthropic.Messages.TextBlockParam[] = [
+    { type: 'text', text: COURSE_DESIGN_SYSTEM_PROMPT },
+  ];
+  if (structureSummary) {
+    // Course context changes per course but stays stable within a conversation
+    systemBlocks.push({ type: 'text', text: structureSummary, cache_control: { type: 'ephemeral' } });
+  } else {
+    // No structure yet — cache the system prompt itself
+    systemBlocks[0].cache_control = { type: 'ephemeral' };
+  }
+
   const stream = anthropic.messages.stream(
     {
       model: 'claude-sonnet-4-6',
       max_tokens: 4096,
       temperature: 0.7,
-      system: systemPrompt,
+      system: systemBlocks,
       messages: anthropicMessages,
       tools: ANTHROPIC_TOOLS,
     },
@@ -149,6 +161,12 @@ export const chat: NodeFunction = async (state, config) => {
   });
 
   const response = await stream.finalMessage();
+
+  // Log cache usage
+  const usage = response.usage as unknown as Record<string, number>;
+  if (usage.cache_read_input_tokens || usage.cache_creation_input_tokens) {
+    console.log(`[agent:chat] Cache: read=${usage.cache_read_input_tokens ?? 0}, write=${usage.cache_creation_input_tokens ?? 0}, uncached=${usage.input_tokens}`.yellow);
+  }
 
   // Convert Anthropic response to LangChain AIMessage
   let textContent = '';

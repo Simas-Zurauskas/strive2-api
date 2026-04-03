@@ -1,7 +1,8 @@
 import asyncHandler from 'express-async-handler';
 import { Types } from 'mongoose';
 import { getUserCourse } from '@services/courseDbService';
-import { generateLessonContentStreaming } from '@services/lessonService';
+import { jobEvents } from '@services/jobEvents';
+import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import CourseModel from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
 import { generateLessonSchema } from './validation';
@@ -10,7 +11,7 @@ import { generateLessonSchema } from './validation';
  * @swagger
  * /api/course/{courseId}/stream-lesson:
  *   post:
- *     summary: Generate and stream lesson content via SSE
+ *     summary: Generate and stream lesson content via SSE (block-by-block)
  *     tags:
  *       - Course
  *     security:
@@ -46,7 +47,7 @@ import { generateLessonSchema } from './validation';
 export const streamLessonContentController = asyncHandler(async (req, res) => {
   const courseId = req.params.courseId as string;
   const userId = req.userId!;
-  const { moduleIndex, lessonIndex } = generateLessonSchema.parse(req.body);
+  const { moduleIndex, lessonIndex, includeImage, includeLinks } = generateLessonSchema.parse(req.body);
 
   const course = await getUserCourse({ userId, courseId });
 
@@ -87,66 +88,107 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
-  console.log(`[API] Streaming lesson generation, courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
+  console.log(`[API] Streaming lesson generation (LangGraph), courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
 
   try {
-    const result = await generateLessonContentStreaming(
-      {
-        goal: course.goal,
-        answers: formatCourseAnswers(course),
-        depth: course.depth ?? 'comprehensive',
-        structure: course.structure as {
-          modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
-        },
-        moduleIndex,
-        lessonIndex,
+    // Invoke the LangGraph agent with custom stream mode
+    // Nodes emit events via config.writer → writeSSE → client
+    const input = {
+      goal: course.goal,
+      answers: formatCourseAnswers(course),
+      depth: course.depth ?? 'comprehensive',
+      structure: course.structure as {
+        modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
       },
-      {
-        onContentBlocks: (blocks, summary) => {
-          writeSSE({ type: 'blocks', blocks });
-        },
-        onInteractiveBlocks: (blocks) => {
-          writeSSE({ type: 'blocks', blocks });
-        },
-        onHeroImage: (url) => {
-          writeSSE({ type: 'hero_image', url });
-        },
-        onLinksBlock: (block) => {
-          writeSSE({ type: 'blocks', blocks: [block] });
-        },
-      },
-    );
+      moduleIndex,
+      lessonIndex,
+      includeImage,
+      includeLinks,
+    };
 
-    // ── Save to DB ────────────────────────────────────
-    const existing = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
-    await LessonContentModel.findOneAndUpdate(
-      { courseId, moduleIndex, lessonIndex },
-      {
-        courseId,
-        moduleIndex,
-        lessonIndex,
-        blocks: result.blocks,
-        summary: result.summary,
-        heroImageUrl: result.heroImageUrl,
-        version: existing ? existing.version + 1 : 1,
+    // Track all blocks for incremental DB save
+    const allBlocks: unknown[] = [];
+    let savedHeroImageUrl: string | null = null;
+    let savedSummary = '';
+
+    // Save to DB — called after each block arrives so content survives page reload
+    const saveToDb = async () => {
+      await LessonContentModel.findOneAndUpdate(
+        { courseId, moduleIndex, lessonIndex },
+        {
+          courseId,
+          moduleIndex,
+          lessonIndex,
+          blocks: allBlocks,
+          summary: savedSummary,
+          heroImageUrl: savedHeroImageUrl,
+        },
+        { upsert: true, returnDocument: 'after' },
+      );
+    };
+
+    // Debounce DB saves — don't save on every single block (too many writes)
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+    let savePromise: Promise<void> = Promise.resolve();
+    const debouncedSave = () => {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        savePromise = saveToDb().catch((e) => console.error('[API] DB save failed:', e));
+      }, 500);
+    };
+
+    // Writer that both sends SSE AND tracks blocks for DB
+    const trackingWriter = (event: Record<string, unknown>) => {
+      writeSSE(event);
+
+      if (event.type === 'block') {
+        allBlocks.push(event.block);
+        debouncedSave();
+      } else if (event.type === 'hero_image') {
+        savedHeroImageUrl = event.url as string;
+        debouncedSave();
+      }
+    };
+
+    // Stream with updates mode
+    for await (const chunk of await lessonGenerationAgent.stream(input, {
+      streamMode: 'updates',
+      configurable: {
+        writer: trackingWriter,
       },
-      { upsert: true, returnDocument: 'after' },
-    );
+    })) {
+      // Capture summary from content generation node
+      if (chunk.contentGeneration) {
+        const { contentSummary } = chunk.contentGeneration as { contentSummary?: string };
+        if (contentSummary) savedSummary = contentSummary;
+      }
+    }
+
+    // Final save — ensure everything is persisted (flush any pending debounce)
+    if (saveTimer) clearTimeout(saveTimer);
+    await savePromise;
+    await saveToDb();
+    console.log(`[API] Final save: ${allBlocks.length} blocks, image: ${!!savedHeroImageUrl}`.gray);
 
     writeSSE({ type: 'complete' });
     console.log(`[API] Lesson stream complete, courseId: ${courseId}`.green);
+
+    // Notify other clients (e.g. reloaded tabs) via WebSocket
+    await CourseModel.findByIdAndUpdate(courseId, { activeJobId: null });
+    jobEvents.emit('update', { jobId: 'stream', status: 'completed', courseId, type: 'generate_lesson', userId });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[API] Lesson stream failed: ${message}`.red);
     writeSSE({ type: 'error', message });
-  } finally {
-    // Always clear the guard
+
     await CourseModel.findByIdAndUpdate(courseId, { activeJobId: null });
+    jobEvents.emit('update', { jobId: 'stream', status: 'failed', error: message, courseId, type: 'generate_lesson', userId });
+  } finally {
     res.end();
   }
 });
 
-// ── Helper (duplicated from jobRunner to avoid circular import) ──
+// ── Helper ───────────────────────────────────────────
 
 const formatCourseAnswers = (course: { answers?: Record<string, unknown> | null; clarifyData?: { questions: { id: string; question: string }[] } | null }): { questionId: string; answer: string }[] => {
   if (!course.answers || !course.clarifyData?.questions) return [];

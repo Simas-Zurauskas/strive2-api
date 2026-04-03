@@ -2,10 +2,27 @@
 # yarn lockfile v1
 
 
+"@ai-sdk/anthropic@^3.0.64":
+  version "3.0.64"
+  resolved "https://registry.yarnpkg.com/@ai-sdk/anthropic/-/anthropic-3.0.64.tgz#755e310e74a4ab364108df39e491d7fa9c5f6bd3"
+  integrity sha512-rwLi/Rsuj2pYniQXIrvClHvXDzgM4UQHHnvHTWEF14efnlKclG/1ghpNC+adsRujAbCTr6gRsSbDE2vEqriV7g==
+  dependencies:
+    "@ai-sdk/provider" "3.0.8"
+    "@ai-sdk/provider-utils" "4.0.21"
+
 "@ai-sdk/gateway@3.0.80":
   version "3.0.80"
   resolved "https://registry.yarnpkg.com/@ai-sdk/gateway/-/gateway-3.0.80.tgz#fbd43e14395f013dea49f427020b882be8840af2"
   integrity sha512-uM7kpZB5l977lW7+2X1+klBUxIZQ78+1a9jHlaHFEzcOcmmslTl3sdP0QqfuuBcO0YBM2gwOiqVdp8i4TRQYcw==
+  dependencies:
+    "@ai-sdk/provider" "3.0.8"
+    "@ai-sdk/provider-utils" "4.0.21"
+    "@vercel/oidc" "3.1.0"
+
+"@ai-sdk/gateway@3.0.85":
+  version "3.0.85"
+  resolved "https://registry.yarnpkg.com/@ai-sdk/gateway/-/gateway-3.0.85.tgz#3adf1421a3a0d9f2141677ab2496d1f69084f2fc"
+  integrity sha512-oPvs3bYnxndBY/O0gFSFuc5aA/QKCJbk/CaJaRnKgA/ZPH17jeVvEtiUBE6/N8hWhK7XgX53NFI7F3CGmDfm1g==
   dependencies:
     "@ai-sdk/provider" "3.0.8"
     "@ai-sdk/provider-utils" "4.0.21"
@@ -1195,12 +1212,22 @@ agent-base@^7.1.2:
   resolved "https://registry.yarnpkg.com/agent-base/-/agent-base-7.1.4.tgz#e3cd76d4c548ee895d3c3fd8dc1f6c5b9032e7a8"
   integrity sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==
 
-ai@6.0.138, ai@^6.0.138:
+ai@6.0.138:
   version "6.0.138"
   resolved "https://registry.yarnpkg.com/ai/-/ai-6.0.138.tgz#96bfa9ebdd9748bc72862d14d6c4fc8e28070f10"
   integrity sha512-49OfPe0f5uxJ6jUdA5BBXjIinP6+ZdYfAtpF2aEH64GA5wPcxH2rf/TBUQQ0bbamBz/D+TLMV18xilZqOC+zaA==
   dependencies:
     "@ai-sdk/gateway" "3.0.80"
+    "@ai-sdk/provider" "3.0.8"
+    "@ai-sdk/provider-utils" "4.0.21"
+    "@opentelemetry/api" "1.9.0"
+
+ai@^6.0.143:
+  version "6.0.143"
+  resolved "https://registry.yarnpkg.com/ai/-/ai-6.0.143.tgz#a74774bb4403853e01ade0a29d15180dd8bd7cf8"
+  integrity sha512-wVDb7StQ1EPQ9GDAOmi1AsuAXQRSii+zZT2sFK+MCisH4vV7XNEAdzXL+sKsUAFhhq+EtVFWWlB4mCk4hcoIMw==
+  dependencies:
+    "@ai-sdk/gateway" "3.0.85"
     "@ai-sdk/provider" "3.0.8"
     "@ai-sdk/provider-utils" "4.0.21"
     "@opentelemetry/api" "1.9.0"
