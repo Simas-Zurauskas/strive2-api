@@ -4,32 +4,7 @@ name: 'Knowledge Base: Rebuild'
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   rebuild:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install dependencies
-        working-directory: .github/scripts
-        run: npm install
-
-      - name: Rebuild documentation
-        working-directory: .github/scripts
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_TECHNICAL_ROOT_ID: ${{ secrets.NOTION_TECHNICAL_ROOT_ID }}
-          SKIP_PAGE_IDS: ${{ secrets.SKIP_PAGE_IDS }}
-        run: node rebuild-docs.js
+    uses: Simas-Zurauskas/strive2-ci/.github/workflows/notion-rebuild.yml@master
+    secrets: inherit

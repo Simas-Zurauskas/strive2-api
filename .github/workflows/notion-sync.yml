@@ -7,66 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  sync-to-notion:
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Collect change context
-        id: pr_info
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Base SHA: use github.event.before for push/PR, fall back to HEAD~1 for manual dispatch
-          BASE="${{ github.event.before }}"
-          if [ -z "$BASE" ] || echo "$BASE" | grep -qE '^0+$'; then
-            BASE="HEAD~1"
-          fi
-
-          # Diff: compare all new commits since last sync
-          git diff "$BASE"..HEAD -- . \
-            ':(exclude)package-lock.json' \
-            ':(exclude)yarn.lock' \
-            ':(exclude)*.snap' \
-            ':(exclude).github' | head -c 15000 > /tmp/pr_diff.txt
-
-          # Changed files across all new commits
-          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
-          git diff --name-only "$BASE"..HEAD -- . | head -60 >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          # Use commit info for context
-          echo "pr_title=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
-          echo "pr_author=${{ github.actor }}" >> $GITHUB_OUTPUT
-          echo "pr_number=0" >> $GITHUB_OUTPUT
-          echo "pr_body<<EOF" >> $GITHUB_OUTPUT
-          echo "Push to master" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install sync dependencies
-        working-directory: .github/scripts
-        run: npm install
-
-      - name: Sync documentation
-        working-directory: .github/scripts
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_TECHNICAL_ROOT_ID: ${{ secrets.NOTION_TECHNICAL_ROOT_ID }}
-          PR_TITLE: ${{ steps.pr_info.outputs.pr_title }}
-          PR_AUTHOR: ${{ steps.pr_info.outputs.pr_author }}
-          PR_BODY: ${{ steps.pr_info.outputs.pr_body }}
-          CHANGED_FILES: ${{ steps.pr_info.outputs.changed_files }}
-          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
-          REPO_NAME: ${{ github.repository }}
-          REPO_LABEL: ${{ github.event.repository.name }}
-        run: node notion-sync.js
+  sync:
+    uses: Simas-Zurauskas/strive2-ci/.github/workflows/notion-sync.yml@master
+    secrets: inherit
