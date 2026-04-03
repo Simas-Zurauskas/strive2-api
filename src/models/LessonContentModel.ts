@@ -22,6 +22,7 @@ export interface ILessonContent {
   lessonIndex: number;
   blocks: ILessonBlock[];
   heroImageUrl: string | null;
+  includeHeroImage: boolean;
   audioUrl: string | null;
   summary: string | null;
   version: number;
@@ -55,6 +56,7 @@ const schema = new Schema<ILessonContent>(
     lessonIndex: { type: Number, required: true },
     blocks: { type: [blockSchema], default: [] },
     heroImageUrl: { type: String, default: null },
+    includeHeroImage: { type: Boolean, default: true },
     audioUrl: { type: String, default: null },
     summary: { type: String, default: null },
     version: { type: Number, default: 1 },

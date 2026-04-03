@@ -1,6 +1,6 @@
 import { OpenAPIV3 } from 'openapi-types';
 import { ERROR_CODES } from '@middleware/errorMiddleware';
-import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, QUESTION_TYPES } from '@lib/constants';
+import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES } from '@lib/constants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
@@ -182,6 +182,67 @@ export const schemas: SchemaMap = {
       version: { type: 'integer' },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  QuizResponse: {
+    type: 'object',
+    required: ['blockId', 'selectedOption', 'correct'],
+    properties: {
+      blockId: { type: 'string' },
+      selectedOption: { type: 'integer' },
+      correct: { type: 'boolean' },
+      answeredAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  ExerciseAttempt: {
+    type: 'object',
+    required: ['blockId', 'code', 'passed'],
+    properties: {
+      blockId: { type: 'string' },
+      code: { type: 'string' },
+      passed: { type: 'boolean' },
+      attemptedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  UserLessonProgress: {
+    type: 'object',
+    required: ['_id', 'userId', 'courseId', 'moduleIndex', 'lessonIndex', 'status'],
+    properties: {
+      _id: { type: 'string' },
+      userId: { type: 'string' },
+      courseId: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+      status: { type: 'string', enum: [...LESSON_PROGRESS_STATUSES] },
+      completedAt: { type: 'string', format: 'date-time', nullable: true },
+      lastAccessedAt: { type: 'string', format: 'date-time' },
+      timeSpentSeconds: { type: 'integer' },
+      quizResponses: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/QuizResponse' },
+      },
+      exerciseAttempts: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/ExerciseAttempt' },
+      },
+      notes: { type: 'string', nullable: true },
+      bookmarked: { type: 'boolean' },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  CourseProgressStats: {
+    type: 'object',
+    required: ['total', 'completed', 'percentage'],
+    properties: {
+      total: { type: 'integer' },
+      completed: { type: 'integer' },
+      inProgress: { type: 'integer' },
+      percentage: { type: 'integer' },
     },
   },
 

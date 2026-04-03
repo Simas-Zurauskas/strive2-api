@@ -24,6 +24,11 @@ export type QuestionType = (typeof QUESTION_TYPES)[number];
 export const CHAT_ROLES = ['user', 'assistant'] as const;
 export type ChatRole = (typeof CHAT_ROLES)[number];
 
+// ── Progress ─────────────────────────────────────────────
+
+export const LESSON_PROGRESS_STATUSES = ['not_started', 'in_progress', 'completed'] as const;
+export type LessonProgressStatus = (typeof LESSON_PROGRESS_STATUSES)[number];
+
 // ── Auth ──────────────────────────────────────────────────
 
 export const AUTH_PROVIDERS = ['GOOGLE', 'CREDENTIALS'] as const;

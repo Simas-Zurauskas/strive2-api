@@ -73,6 +73,21 @@ Not every page needs every section — omit sections that would be empty or forc
 - **Gotchas** — Non-obvious behavior, limitations, edge cases, known issues.
 `.trim();
 
+const LINK_STANDARDS = `
+## Link Standards (Notion compatibility)
+
+The markdown you produce is converted to Notion blocks. Notion rejects any link that is
+not a valid absolute URL (with protocol).
+
+- **Do NOT use markdown links for file paths.** Use inline code instead.
+  - Bad: \`[UserModel](src/models/User.ts)\`
+  - Good: \`\`src/models/User.ts\`\`
+- **Do NOT use relative links** like \`[text](./path)\` or \`[text](#anchor)\`
+- **Only use markdown links for real absolute URLs** — e.g. \`[Docs](https://example.com)\`
+- Use inline code (\\\`backticks\\\`) for file paths, function names, environment variables,
+  and any other code references
+`.trim();
+
 const UPDATE_RULES = `
 ## When to Update Documentation
 
@@ -92,5 +107,6 @@ module.exports = {
   WRITING_STANDARDS,
   QUALITY_CRITERIA,
   PAGE_STRUCTURE,
+  LINK_STANDARDS,
   UPDATE_RULES,
 };

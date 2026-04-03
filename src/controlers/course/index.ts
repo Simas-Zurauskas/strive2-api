@@ -14,3 +14,8 @@ export { streamLessonContentController } from './streamLessonContent';
 export { getLessonContentController } from './getLessonContent';
 export { chatStreamController } from './chatStream';
 export { getChatHistoryController } from './getChatHistory';
+export { upsertLessonProgressController } from './upsertLessonProgress';
+export { getCourseProgressController } from './getCourseProgress';
+export { getContinueLearningController } from './getContinueLearning';
+export { getGeneratedLessonsController } from './getGeneratedLessons';
+export { getProgressSummaryController } from './getProgressSummary';

@@ -324,6 +324,8 @@ ${DOC_STANDARDS.QUALITY_CRITERIA}
 
 ${DOC_STANDARDS.PAGE_STRUCTURE}
 
+${DOC_STANDARDS.LINK_STANDARDS}
+
 ## Output
 
 Your structured output must contain:

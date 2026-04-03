@@ -16,6 +16,11 @@ import {
   streamLessonContentController,
   chatStreamController,
   getChatHistoryController,
+  upsertLessonProgressController,
+  getCourseProgressController,
+  getContinueLearningController,
+  getGeneratedLessonsController,
+  getProgressSummaryController,
 } from '@controlers/course';
 import { protect } from '@middleware/authMiddleware';
 import { validateObjectId } from '@middleware/validateObjectId';
@@ -25,6 +30,8 @@ const router = Router();
 // Static paths (must be before /:id to avoid route conflict)
 router.get('/job/:jobId', protect, validateObjectId('jobId'), getJobStatusController);
 router.post('/execute-code', protect, executeCodeController);
+router.get('/continue', protect, getContinueLearningController);
+router.get('/progress-summary', protect, getProgressSummaryController);
 
 // Course CRUD
 router.post('/', protect, createCourseController);
@@ -45,5 +52,10 @@ router.post('/:courseId/refine-structure', protect, validateObjectId('courseId')
 router.post('/:courseId/generate-lesson', protect, validateObjectId('courseId'), generateLessonController);
 router.post('/:courseId/stream-lesson', protect, validateObjectId('courseId'), streamLessonContentController);
 router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', protect, validateObjectId('courseId'), getLessonContentController);
+
+// Progress tracking
+router.get('/:courseId/progress', protect, validateObjectId('courseId'), getCourseProgressController);
+router.post('/:courseId/progress/:moduleIndex/:lessonIndex', protect, validateObjectId('courseId'), upsertLessonProgressController);
+router.get('/:courseId/generated-lessons', protect, validateObjectId('courseId'), getGeneratedLessonsController);
 
 export { router as courseRoutes };

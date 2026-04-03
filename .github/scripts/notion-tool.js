@@ -20,6 +20,19 @@ const { markdownToBlocks } = require('@tryfabric/martian');
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
 // ---------------------------------------------------------------------------
+// Markdown sanitization — strip links that Notion will reject
+// ---------------------------------------------------------------------------
+
+function sanitizeMarkdownLinks(markdown) {
+  // Replace markdown links whose URL is not an absolute http(s) URL
+  // [text](bad-url) → `text` (or just text if already in backticks)
+  return markdown.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
+    if (/^https?:\/\//i.test(url)) return match; // valid absolute URL — keep
+    return `\`${text}\``; // convert to inline code
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Notion operations
 // ---------------------------------------------------------------------------
 
@@ -63,7 +76,7 @@ async function appendBlocks(pageId, blocks) {
 }
 
 async function rewritePage(pageId, markdownFile) {
-  const markdown = fs.readFileSync(markdownFile, 'utf8');
+  const markdown = sanitizeMarkdownLinks(fs.readFileSync(markdownFile, 'utf8'));
   const blocks = markdownToBlocks(markdown);
 
   // Delete all existing blocks
@@ -89,14 +102,14 @@ async function rewritePage(pageId, markdownFile) {
 }
 
 async function appendToPage(pageId, markdownFile) {
-  const markdown = fs.readFileSync(markdownFile, 'utf8');
+  const markdown = sanitizeMarkdownLinks(fs.readFileSync(markdownFile, 'utf8'));
   const blocks = markdownToBlocks(markdown);
   await appendBlocks(pageId, blocks);
   console.log(`✓ Appended to page ${pageId} (${blocks.length} blocks)`);
 }
 
 async function createPage(parentId, title, markdownFile) {
-  const markdown = fs.readFileSync(markdownFile, 'utf8');
+  const markdown = sanitizeMarkdownLinks(fs.readFileSync(markdownFile, 'utf8'));
   const blocks = markdownToBlocks(markdown);
 
   // Notion limits children in create to 100
