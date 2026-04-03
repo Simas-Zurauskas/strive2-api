@@ -12,6 +12,9 @@ const SKIP_PAGE_IDS = new Set(
   (process.env.SKIP_PAGE_IDS?.split(',') || []).map((id) => id.replace(/-/g, ''))
 );
 
+if (SKIP_PAGE_IDS.size) console.log(`Will skip page IDs: ${[...SKIP_PAGE_IDS].join(', ')}`);
+else console.warn('⚠ SKIP_PAGE_IDS is empty — all pages will be fetched');
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------

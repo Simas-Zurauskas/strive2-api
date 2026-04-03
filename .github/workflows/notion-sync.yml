@@ -2,19 +2,12 @@
 name: "Knowledge Base: Sync"
 
 on:
-  pull_request:
-    types: [closed]
-    branches: [master]
   push:
     branches: [master]
   workflow_dispatch:
 
 jobs:
   sync-to-notion:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -46,22 +39,13 @@ jobs:
           git diff --name-only "$BASE"..HEAD -- . | head -60 >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          # PR-specific metadata (falls back to commit info for push/dispatch)
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "pr_title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-            echo "pr_author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
-            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-            echo "pr_body<<EOF" >> $GITHUB_OUTPUT
-            echo "${{ github.event.pull_request.body }}" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "pr_title=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
-            echo "pr_author=${{ github.actor }}" >> $GITHUB_OUTPUT
-            echo "pr_number=0" >> $GITHUB_OUTPUT
-            echo "pr_body<<EOF" >> $GITHUB_OUTPUT
-            echo "Direct push or manual trigger" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
+          # Use commit info for context
+          echo "pr_title=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
+          echo "pr_author=${{ github.actor }}" >> $GITHUB_OUTPUT
+          echo "pr_number=0" >> $GITHUB_OUTPUT
+          echo "pr_body<<EOF" >> $GITHUB_OUTPUT
+          echo "Push to master" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Setup Node
         uses: actions/setup-node@v4

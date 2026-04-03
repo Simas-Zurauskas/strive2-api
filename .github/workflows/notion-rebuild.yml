@@ -31,4 +31,5 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_TECHNICAL_ROOT_ID: ${{ secrets.NOTION_TECHNICAL_ROOT_ID }}
+          SKIP_PAGE_IDS: ${{ secrets.SKIP_PAGE_IDS }}
         run: node rebuild-docs.js
