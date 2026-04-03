@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES } from '@lib/constants';
+import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES, LESSON_PROGRESS_STATUSES } from '@lib/constants';
 import LessonContentModel from '@models/LessonContentModel';
 
 export const createCourseSchema = z.object({
@@ -33,6 +33,27 @@ export const generateLessonSchema = z.object({
   lessonIndex: z.number().int().min(0, 'lessonIndex must be a non-negative integer'),
   includeImage: z.boolean().optional().default(true),
   includeLinks: z.boolean().optional().default(true),
+});
+
+export const upsertProgressSchema = z.object({
+  status: z.enum(LESSON_PROGRESS_STATUSES).optional(),
+  notes: z.string().max(10000).nullable().optional(),
+  bookmarked: z.boolean().optional(),
+  timeSpentDelta: z.number().int().min(0).max(3600).optional(),
+  quizResponse: z
+    .object({
+      blockId: z.string(),
+      selectedOption: z.number().int().min(0),
+      correct: z.boolean(),
+    })
+    .optional(),
+  exerciseAttempt: z
+    .object({
+      blockId: z.string(),
+      code: z.string().max(50000),
+      passed: z.boolean(),
+    })
+    .optional(),
 });
 
 /**

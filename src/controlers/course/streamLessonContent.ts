@@ -126,6 +126,7 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
           blocks: allBlocks,
           summary: savedSummary,
           heroImageUrl: savedHeroImageUrl,
+          includeHeroImage: includeImage,
         },
         { upsert: true, returnDocument: 'after' },
       );

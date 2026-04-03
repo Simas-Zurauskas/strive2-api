@@ -7,6 +7,13 @@ const DOC_STANDARDS = require('./doc-standards');
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const DELAY_MS = 350; // stay under Notion's 3 req/s limit
+
+function sanitizeMarkdownLinks(markdown) {
+  return markdown.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
+    if (/^https?:\/\//i.test(url)) return match;
+    return `\`${text}\``;
+  });
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const REPO_LABEL = process.env.REPO_LABEL;
@@ -139,7 +146,7 @@ async function rewritePage(pageId, content) {
   } while (cursor);
 
   // Convert markdown to Notion blocks (preserves formatting)
-  const children = markdownToBlocks(content);
+  const children = markdownToBlocks(sanitizeMarkdownLinks(content));
   children.push(metaBlock(`Rewritten: ${changeMeta()}`));
 
   // Notion limits appending to 100 blocks at a time
@@ -226,6 +233,8 @@ ${DOC_STANDARDS.WRITING_STANDARDS}
 ${DOC_STANDARDS.QUALITY_CRITERIA}
 
 ${DOC_STANDARDS.PAGE_STRUCTURE}
+
+${DOC_STANDARDS.LINK_STANDARDS}
 
 DOCUMENTATION STRUCTURE
 All documentation lives in Notion under two top-level sections:
