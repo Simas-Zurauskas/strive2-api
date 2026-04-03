@@ -308,6 +308,7 @@ Respond ONLY in valid JSON (no markdown fences):
   console.log('Asking Claude to assess documentation impact…');
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
+    max_tokens: 16384,
     messages: [{ role: 'user', content: prompt }],
   });
 
