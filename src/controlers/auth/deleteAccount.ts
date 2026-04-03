@@ -4,6 +4,9 @@ import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
 import ChatSessionModel from '@models/ChatSessionModel';
+import UserLessonProgressModel from '@models/UserLessonProgressModel';
+import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
+import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { deleteByPrefix } from '@services/s3Service';
 import { deleteAccountSchema } from './validation';
 
@@ -72,10 +75,15 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
   // Collect course IDs before deletion for S3 cleanup
   const courseIds = await CourseModel.find({ userId: user._id }).distinct('_id');
 
-  await JobModel.deleteMany({ userId: user._id });
-  await LessonContentModel.deleteMany({ courseId: { $in: courseIds } });
+  await Promise.all([
+    JobModel.deleteMany({ userId: user._id }),
+    LessonContentModel.deleteMany({ courseId: { $in: courseIds } }),
+    ChatSessionModel.deleteMany({ userId: user._id }),
+    UserLessonProgressModel.deleteMany({ userId: user._id }),
+    UserModuleQuizProgressModel.deleteMany({ userId: user._id }),
+    ModuleQuizContentModel.deleteMany({ courseId: { $in: courseIds } }),
+  ]);
   await CourseModel.deleteMany({ userId: user._id });
-  await ChatSessionModel.deleteMany({ userId: user._id });
   await UserModel.findByIdAndDelete(userId);
 
   // Clean up S3 files for all courses — fire and forget

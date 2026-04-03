@@ -1,7 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourse } from '@services/courseDbService';
 import { upsertLessonProgress } from '@services/progressService';
-import { upsertProgressSchema } from './validation';
+import { upsertProgressSchema, parseIndexParam } from './validation';
 
 /**
  * @swagger
@@ -63,8 +63,8 @@ import { upsertProgressSchema } from './validation';
 export const upsertLessonProgressController = asyncHandler(async (req, res) => {
   const courseId = req.params.courseId as string;
   const userId = req.userId!;
-  const moduleIndex = Number(req.params.moduleIndex);
-  const lessonIndex = Number(req.params.lessonIndex);
+  const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
+  const lessonIndex = parseIndexParam(req.params.lessonIndex, 'lessonIndex');
 
   // Verify ownership
   await getUserCourse({ userId, courseId });

@@ -21,6 +21,11 @@ import {
   getContinueLearningController,
   getGeneratedLessonsController,
   getProgressSummaryController,
+  generateModuleQuizController,
+  getModuleQuizContentController,
+  submitQuizAttemptController,
+  getModuleQuizProgressController,
+  getReviewsDueController,
 } from '@controlers/course';
 import { protect } from '@middleware/authMiddleware';
 import { validateObjectId } from '@middleware/validateObjectId';
@@ -32,6 +37,7 @@ router.get('/job/:jobId', protect, validateObjectId('jobId'), getJobStatusContro
 router.post('/execute-code', protect, executeCodeController);
 router.get('/continue', protect, getContinueLearningController);
 router.get('/progress-summary', protect, getProgressSummaryController);
+router.get('/reviews-due', protect, getReviewsDueController);
 
 // Course CRUD
 router.post('/', protect, createCourseController);
@@ -57,5 +63,11 @@ router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', protect, valid
 router.get('/:courseId/progress', protect, validateObjectId('courseId'), getCourseProgressController);
 router.post('/:courseId/progress/:moduleIndex/:lessonIndex', protect, validateObjectId('courseId'), upsertLessonProgressController);
 router.get('/:courseId/generated-lessons', protect, validateObjectId('courseId'), getGeneratedLessonsController);
+
+// Module quizzes
+router.post('/:courseId/module-quiz/:moduleIndex/generate', protect, validateObjectId('courseId'), generateModuleQuizController);
+router.get('/:courseId/module-quiz/:moduleIndex', protect, validateObjectId('courseId'), getModuleQuizContentController);
+router.post('/:courseId/module-quiz/:moduleIndex/submit', protect, validateObjectId('courseId'), submitQuizAttemptController);
+router.get('/:courseId/module-quiz/:moduleIndex/progress', protect, validateObjectId('courseId'), getModuleQuizProgressController);
 
 export { router as courseRoutes };
