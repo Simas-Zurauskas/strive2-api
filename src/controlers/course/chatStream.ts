@@ -177,7 +177,7 @@ export const chatStreamController = asyncHandler(async (req, res) => {
   res.on('close', () => {
     clientConnected = false;
     abortController.abort();
-    tokenEmitter.removeAllListeners();
+    if (tokenEmitter) tokenEmitter.removeAllListeners();
   });
 
   // ── Token streaming via EventEmitter ─────────────────────

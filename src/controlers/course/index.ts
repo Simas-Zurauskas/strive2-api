@@ -19,3 +19,8 @@ export { getCourseProgressController } from './getCourseProgress';
 export { getContinueLearningController } from './getContinueLearning';
 export { getGeneratedLessonsController } from './getGeneratedLessons';
 export { getProgressSummaryController } from './getProgressSummary';
+export { generateModuleQuizController } from './generateModuleQuiz';
+export { getModuleQuizContentController } from './getModuleQuizContent';
+export { submitQuizAttemptController } from './submitQuizAttempt';
+export { getModuleQuizProgressController } from './getModuleQuizProgress';
+export { getReviewsDueController } from './getReviewsDue';

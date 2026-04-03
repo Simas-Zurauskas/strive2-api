@@ -8,7 +8,7 @@ export type CourseStatus = (typeof COURSE_STATUSES)[number];
 
 // ── Jobs ──────────────────────────────────────────────────
 
-export const JOB_TYPES = ['clarify', 'generate_structure', 'refine_structure', 'generate_lesson', 'generate_depth_previews'] as const;
+export const JOB_TYPES = ['clarify', 'generate_structure', 'refine_structure', 'generate_lesson', 'generate_depth_previews', 'generate_module_quiz'] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 export const JOB_STATUSES = ['pending', 'processing', 'completed', 'failed'] as const;
@@ -28,6 +28,28 @@ export type ChatRole = (typeof CHAT_ROLES)[number];
 
 export const LESSON_PROGRESS_STATUSES = ['not_started', 'in_progress', 'completed'] as const;
 export type LessonProgressStatus = (typeof LESSON_PROGRESS_STATUSES)[number];
+
+// ── Module Quiz ─────────────────────────────────────────
+
+export const QUIZ_MASTERY_TIERS = ['needs_review', 'passed', 'mastered'] as const;
+export type QuizMasteryTier = (typeof QUIZ_MASTERY_TIERS)[number];
+
+// ── Spaced Review ───────────────────────────────────────
+
+export const REVIEW_INITIAL_INTERVALS: Record<QuizMasteryTier, number> = {
+  mastered: 7,
+  passed: 3,
+  needs_review: 1,
+};
+
+export const REVIEW_PROGRESSION_GAPS: Record<QuizMasteryTier, number> = {
+  needs_review: 1,
+  passed: 2,
+  mastered: 3,
+};
+
+export const REVIEW_MAX_INTERVAL_DAYS = 90;
+export const REVIEW_MIN_INTERVAL_DAYS = 1;
 
 // ── Auth ──────────────────────────────────────────────────
 

@@ -2,6 +2,7 @@ import asyncHandler from 'express-async-handler';
 import { getUserCourse } from '@services/courseDbService';
 import { resolveImageUrl } from '@services/s3Service';
 import LessonContentModel from '@models/LessonContentModel';
+import { parseIndexParam } from './validation';
 
 /**
  * @swagger
@@ -44,8 +45,8 @@ import LessonContentModel from '@models/LessonContentModel';
 export const getLessonContentController = asyncHandler(async (req, res) => {
   const courseId = req.params.courseId as string;
   const userId = req.userId!;
-  const moduleIndex = Number(req.params.moduleIndex);
-  const lessonIndex = Number(req.params.lessonIndex);
+  const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
+  const lessonIndex = parseIndexParam(req.params.lessonIndex, 'lessonIndex');
 
   await getUserCourse({ userId, courseId });
 

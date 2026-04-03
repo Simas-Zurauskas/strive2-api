@@ -56,6 +56,30 @@ export const upsertProgressSchema = z.object({
     .optional(),
 });
 
+export const submitQuizAttemptSchema = z.object({
+  responses: z
+    .array(
+      z.object({
+        questionId: z.string(),
+        selectedOption: z.number().int().min(0).max(3),
+      }),
+    )
+    .min(1)
+    .max(10),
+});
+
+/**
+ * Parses a route param as a non-negative integer. Throws 400 if invalid.
+ */
+export const parseIndexParam = (value: string | string[] | undefined, name: string): number => {
+  if (Array.isArray(value)) value = value[0];
+  const num = Number(value);
+  if (!Number.isInteger(num) || num < 0) {
+    throw Object.assign(new Error(`Invalid ${name}: must be a non-negative integer`), { statusCode: 400 });
+  }
+  return num;
+};
+
 /**
  * Ensures the previous lesson in the course has been generated before allowing
  * generation of the current one. Enforces sequential lesson generation order.

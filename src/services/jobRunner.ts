@@ -5,6 +5,8 @@ import CourseModel, { CourseDocument } from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
 import { JobType, CourseDepth } from '@lib/constants';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
+import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
+import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews } from './courseService';
 import { jobEvents } from './jobEvents';
 
@@ -182,6 +184,43 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       await CourseModel.findByIdAndUpdate(courseId, { depthPreviews: result });
       return;
     }
+    case 'generate_module_quiz': {
+      const moduleIndex = (metadata?.moduleIndex as number) ?? 0;
+      const mod = course.structure?.modules?.[moduleIndex];
+      if (!mod) throw new Error(`Module not found: ${moduleIndex}`);
+
+      const lessonCount = mod.lessons?.length ?? 0;
+      const generatedCount = await LessonContentModel.countDocuments({ courseId, moduleIndex });
+      if (generatedCount < lessonCount) {
+        throw new Error(`Not all lessons generated for module ${moduleIndex} (${generatedCount}/${lessonCount})`);
+      }
+
+      console.log(`[JobRunner] generate_module_quiz — courseId: ${courseId}, module: ${moduleIndex}`.cyan);
+
+      const agentResult = await quizGenerationAgent.invoke({
+        courseId,
+        goal: course.goal,
+        answers: formatCourseAnswers(course),
+        depth: course.depth ?? 'comprehensive',
+        structure: course.structure as {
+          modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
+        },
+        moduleIndex,
+      });
+
+      const existing = await ModuleQuizContentModel.findOne({ courseId, moduleIndex });
+      await ModuleQuizContentModel.findOneAndUpdate(
+        { courseId, moduleIndex },
+        {
+          courseId,
+          moduleIndex,
+          questions: agentResult.questions,
+          version: existing ? existing.version + 1 : 1,
+        },
+        { upsert: true },
+      );
+      return;
+    }
     default:
       throw new Error(`Unknown job type: ${type}`);
   }
@@ -211,7 +250,8 @@ const processJob = async (jobId: string): Promise<void> => {
     // Use findByIdAndUpdate so this is a no-op if the job document was deleted (e.g. course/account deletion)
     await JobModel.findByIdAndUpdate(jobId, {
       status,
-      ...(status === 'completed' ? { completedAt: new Date() } : { error: errorMessage }),
+      completedAt: new Date(),
+      ...(status === 'failed' ? { error: errorMessage } : {}),
     });
 
     // Always clear activeJobId before emitting WS event so client refetch sees the updated state

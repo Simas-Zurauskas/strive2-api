@@ -2,6 +2,10 @@ import asyncHandler from 'express-async-handler';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
+import ChatSessionModel from '@models/ChatSessionModel';
+import UserLessonProgressModel from '@models/UserLessonProgressModel';
+import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
+import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { deleteByPrefix } from '@services/s3Service';
 
 /**
@@ -50,8 +54,14 @@ export const deleteCourseController = asyncHandler(async (req, res) => {
     throw new Error('Forbidden');
   }
 
-  await JobModel.deleteMany({ courseId: course._id });
-  await LessonContentModel.deleteMany({ courseId: course._id });
+  await Promise.all([
+    JobModel.deleteMany({ courseId: course._id }),
+    LessonContentModel.deleteMany({ courseId: course._id }),
+    ChatSessionModel.deleteMany({ courseId: course._id }),
+    UserLessonProgressModel.deleteMany({ courseId: course._id }),
+    UserModuleQuizProgressModel.deleteMany({ courseId: course._id }),
+    ModuleQuizContentModel.deleteMany({ courseId: course._id }),
+  ]);
   await CourseModel.findByIdAndDelete(courseId);
 
   // Clean up S3 files (hero images, future assets) — fire and forget

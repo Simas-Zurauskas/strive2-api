@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourse } from '@services/courseDbService';
-import { getCourseProgress } from '@services/progressService';
+import { getCourseProgress, getCourseQuizProgress } from '@services/progressService';
 
 /**
  * @swagger
@@ -41,7 +41,12 @@ export const getCourseProgressController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
 
   const course = await getUserCourse({ userId, courseId });
-  const lessons = await getCourseProgress({ userId, courseId });
+  const totalModules = course.structure?.modules?.length ?? 0;
+
+  const [lessons, quizzes] = await Promise.all([
+    getCourseProgress({ userId, courseId }),
+    getCourseQuizProgress({ userId, courseId, totalModules }),
+  ]);
 
   // Compute stats from course structure
   const totalLessons = course.structure?.modules?.reduce(
@@ -55,6 +60,7 @@ export const getCourseProgressController = asyncHandler(async (req, res) => {
   res.status(200).json({
     data: {
       lessons,
+      quizzes,
       stats: {
         total: totalLessons,
         completed,
