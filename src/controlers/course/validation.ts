@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES } from '@lib/constants';
+import LessonContentModel from '@models/LessonContentModel';
 
 export const createCourseSchema = z.object({
   goal: z.string().min(1, 'Goal is required').max(500, 'Goal must be at most 500 characters'),
@@ -33,3 +34,42 @@ export const generateLessonSchema = z.object({
   includeImage: z.boolean().optional().default(true),
   includeLinks: z.boolean().optional().default(true),
 });
+
+/**
+ * Ensures the previous lesson in the course has been generated before allowing
+ * generation of the current one. Enforces sequential lesson generation order.
+ * The very first lesson (module 0, lesson 0) is always allowed.
+ */
+export const assertPreviousLessonGenerated = async (
+  courseId: string,
+  moduleIndex: number,
+  lessonIndex: number,
+  structure: { modules: { lessons: unknown[] }[] },
+): Promise<void> => {
+  // First lesson in the course — always allowed
+  if (moduleIndex === 0 && lessonIndex === 0) return;
+
+  // Compute previous lesson coordinates
+  let prevModule: number;
+  let prevLesson: number;
+
+  if (lessonIndex > 0) {
+    prevModule = moduleIndex;
+    prevLesson = lessonIndex - 1;
+  } else {
+    // First lesson of this module → previous is last lesson of prior module
+    prevModule = moduleIndex - 1;
+    prevLesson = structure.modules[prevModule].lessons.length - 1;
+  }
+
+  const exists = await LessonContentModel.findOne(
+    { courseId, moduleIndex: prevModule, lessonIndex: prevLesson },
+  ).select('_id').lean();
+
+  if (!exists) {
+    throw Object.assign(
+      new Error(`Generate the previous lesson first (module ${prevModule + 1}, lesson ${prevLesson + 1})`),
+      { statusCode: 400 },
+    );
+  }
+};

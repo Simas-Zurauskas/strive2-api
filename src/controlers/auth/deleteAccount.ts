@@ -2,7 +2,9 @@ import asyncHandler from 'express-async-handler';
 import UserModel, { AuthProvider } from '@models/UserModel';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
+import LessonContentModel from '@models/LessonContentModel';
 import ChatSessionModel from '@models/ChatSessionModel';
+import { deleteByPrefix } from '@services/s3Service';
 import { deleteAccountSchema } from './validation';
 
 /**
@@ -67,10 +69,22 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
     }
   }
 
+  // Collect course IDs before deletion for S3 cleanup
+  const courseIds = await CourseModel.find({ userId: user._id }).distinct('_id');
+
   await JobModel.deleteMany({ userId: user._id });
+  await LessonContentModel.deleteMany({ courseId: { $in: courseIds } });
   await CourseModel.deleteMany({ userId: user._id });
   await ChatSessionModel.deleteMany({ userId: user._id });
   await UserModel.findByIdAndDelete(userId);
+
+  // Clean up S3 files for all courses — fire and forget
+  Promise.all(courseIds.map((id) => deleteByPrefix(`lessons/${id}/`))).then((counts) => {
+    const total = counts.reduce((sum, c) => sum + c, 0);
+    if (total > 0) console.log(`[API] S3 cleanup: deleted ${total} objects for user ${userId}`.gray);
+  }).catch((e) => {
+    console.warn(`[API] S3 cleanup failed for user ${userId}:`, e instanceof Error ? e.message : e);
+  });
 
   console.log(`[API] Account deleted: ${userId}`.green);
 

@@ -1,18 +1,25 @@
-import { ChatOpenAI } from '@langchain/openai';
 import { ChatAnthropic } from '@langchain/anthropic';
-import { OPENAI_API_KEY, ANTHROPIC_API_KEY } from '@conf/env';
+import { ANTHROPIC_API_KEY } from '@conf/env';
 
-// Clarify questions — needs good domain knowledge for discriminating questions
-const clarifyModel = new ChatOpenAI({
-  model: 'gpt-4o',
+// ── Model IDs (centralized for easy version pinning) ──
+export const MODEL_IDS = {
+  SONNET: 'claude-sonnet-4-6',
+  HAIKU: 'claude-haiku-4-5',
+} as const;
+
+// Clarify questions & depth previews — structured extraction with domain reasoning
+const clarifyModel = new ChatAnthropic({
+  model: MODEL_IDS.SONNET,
   temperature: 0.7,
-  apiKey: OPENAI_API_KEY,
-  timeout: 60000,
+  anthropicApiKey: ANTHROPIC_API_KEY,
+  maxTokens: 4096,
+  clientOptions: { timeout: 60000 },
+  invocationKwargs: { cache_control: { type: 'ephemeral' } },
 });
 
 // Structure generation — needs strong reasoning, long output, complex constraint adherence
 const structureModel = new ChatAnthropic({
-  model: 'claude-sonnet-4-6',
+  model: MODEL_IDS.SONNET,
   temperature: 0.7,
   anthropicApiKey: ANTHROPIC_API_KEY,
   maxTokens: 16384,
@@ -20,20 +27,9 @@ const structureModel = new ChatAnthropic({
   invocationKwargs: { cache_control: { type: 'ephemeral' } },
 });
 
-// Agent chat — not used directly for LLM calls (chat node uses raw Anthropic SDK
-// for proper per-token streaming). Kept for potential non-streaming fallback.
-const agentModel = new ChatAnthropic({
-  model: 'claude-sonnet-4-6',
-  temperature: 0.7,
-  anthropicApiKey: ANTHROPIC_API_KEY,
-  maxTokens: 4096,
-  streaming: true,
-  clientOptions: { timeout: 120000 },
-});
-
 // Lesson content generation — best long-form educational writing, slight creativity
 const lessonModel = new ChatAnthropic({
-  model: 'claude-sonnet-4-6',
+  model: MODEL_IDS.SONNET,
   temperature: 0.3,
   anthropicApiKey: ANTHROPIC_API_KEY,
   maxTokens: 16384,
@@ -41,9 +37,19 @@ const lessonModel = new ChatAnthropic({
   invocationKwargs: { cache_control: { type: 'ephemeral' } },
 });
 
-// Interactive element generation (quizzes, exercises) — fast, structured extraction
+// Quiz & exercise generation — needs strong reasoning for understanding-based questions
 const interactiveModel = new ChatAnthropic({
-  model: 'claude-haiku-4-5',
+  model: MODEL_IDS.SONNET,
+  temperature: 0.2,
+  anthropicApiKey: ANTHROPIC_API_KEY,
+  maxTokens: 4096,
+  clientOptions: { timeout: 120000 }, // 2 minutes (Sonnet is slower than Haiku)
+  invocationKwargs: { cache_control: { type: 'ephemeral' } },
+});
+
+// Fast structured extraction (link curation, lightweight tasks)
+const utilityModel = new ChatAnthropic({
+  model: MODEL_IDS.HAIKU,
   temperature: 0,
   anthropicApiKey: ANTHROPIC_API_KEY,
   maxTokens: 4096,
@@ -53,6 +59,6 @@ const interactiveModel = new ChatAnthropic({
 
 export const getClarifyModel = () => clarifyModel;
 export const getStructureModel = () => structureModel;
-export const getAgentModel = () => agentModel;
 export const getLessonModel = () => lessonModel;
 export const getInteractiveModel = () => interactiveModel;
+export const getUtilityModel = () => utilityModel;

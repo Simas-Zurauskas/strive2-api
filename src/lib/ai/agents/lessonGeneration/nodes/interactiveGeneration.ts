@@ -7,7 +7,7 @@ import { interactiveOutputSchema, INTERACTIVE_SYSTEM_PROMPT } from '../prompts';
 
 const formatBlocksForContext = (blocks: LessonState['contentBlocks']) => {
   return blocks
-    .map((b) => `[order=${b.order}] [${b.type}] ${b.content.slice(0, 300)}${b.content.length > 300 ? '...' : ''}`)
+    .map((b) => `[order=${b.order}] [${b.type}] ${b.content}`)
     .join('\n\n');
 };
 

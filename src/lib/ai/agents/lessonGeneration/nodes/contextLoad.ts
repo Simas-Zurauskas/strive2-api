@@ -1,5 +1,6 @@
 import { RunnableConfig } from '@langchain/core/runnables';
 import { sanitizePromptInput } from '@lib/sanitize';
+import LessonContentModel from '@models/LessonContentModel';
 import { LessonState } from '../state';
 
 const formatAnswers = (answers: { questionId: string; answer: string }[]) =>
@@ -44,6 +45,19 @@ export const contextLoad = async (state: LessonState, _config?: RunnableConfig):
     }
     if (prevLessons.length > 0) {
       positionContext.push(`Previous lessons already covered: ${prevLessons.join(', ')}. Do NOT repeat content from these lessons.`);
+    }
+
+    // Load the immediately preceding lesson's summary for content coherence
+    const prevModuleIndex = lessonIndex > 0 ? moduleIndex : moduleIndex - 1;
+    const prevLessonIndex = lessonIndex > 0 ? lessonIndex - 1 : (structure.modules[moduleIndex - 1]?.lessons.length ?? 1) - 1;
+    if (prevModuleIndex >= 0) {
+      const prevContent = await LessonContentModel.findOne(
+        { courseId: state.courseId, moduleIndex: prevModuleIndex, lessonIndex: prevLessonIndex },
+      ).select('summary').lean();
+      if (prevContent?.summary) {
+        const prevName = structure.modules[prevModuleIndex].lessons[prevLessonIndex]?.name ?? 'previous lesson';
+        positionContext.push(`Summary of the previous lesson ("${prevName}"): ${prevContent.summary}\n\nBuild on this knowledge — reference concepts the learner already learned and use consistent terminology.`);
+      }
     }
   }
 

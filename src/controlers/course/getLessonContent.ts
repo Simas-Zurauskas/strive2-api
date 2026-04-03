@@ -1,5 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourse } from '@services/courseDbService';
+import { resolveImageUrl } from '@services/s3Service';
 import LessonContentModel from '@models/LessonContentModel';
 
 /**
@@ -55,5 +56,8 @@ export const getLessonContentController = asyncHandler(async (req, res) => {
     return;
   }
 
-  res.status(200).json({ data: content });
+  const data = content.toJSON();
+  data.heroImageUrl = await resolveImageUrl(content.heroImageUrl);
+
+  res.status(200).json({ data });
 });

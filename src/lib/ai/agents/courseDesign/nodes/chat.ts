@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { AIMessage } from '@langchain/core/messages';
 import { ANTHROPIC_API_KEY } from '@conf/env';
+import { MODEL_IDS } from '@lib/langchain';
 import { COURSE_DESIGN_SYSTEM_PROMPT } from '../prompts';
 import { NodeFunction } from '../types';
 import { EventEmitter } from 'events';
@@ -125,9 +126,7 @@ export const chat: NodeFunction = async (state, config) => {
   const abortSignal = config?.configurable?.abortSignal as AbortSignal | undefined;
 
   // System prompt with cache_control — static prompt + course context cached separately
-  const systemBlocks: Anthropic.Messages.TextBlockParam[] = [
-    { type: 'text', text: COURSE_DESIGN_SYSTEM_PROMPT },
-  ];
+  const systemBlocks: Anthropic.Messages.TextBlockParam[] = [{ type: 'text', text: COURSE_DESIGN_SYSTEM_PROMPT }];
   if (structureSummary) {
     // Course context changes per course but stays stable within a conversation
     systemBlocks.push({ type: 'text', text: structureSummary, cache_control: { type: 'ephemeral' } });
@@ -138,7 +137,7 @@ export const chat: NodeFunction = async (state, config) => {
 
   const stream = anthropic.messages.stream(
     {
-      model: 'claude-sonnet-4-6',
+      model: MODEL_IDS.SONNET,
       max_tokens: 4096,
       temperature: 0.7,
       system: systemBlocks,
@@ -165,7 +164,10 @@ export const chat: NodeFunction = async (state, config) => {
   // Log cache usage
   const usage = response.usage as unknown as Record<string, number>;
   if (usage.cache_read_input_tokens || usage.cache_creation_input_tokens) {
-    console.log(`[agent:chat] Cache: read=${usage.cache_read_input_tokens ?? 0}, write=${usage.cache_creation_input_tokens ?? 0}, uncached=${usage.input_tokens}`.yellow);
+    console.log(
+      `[agent:chat] Cache: read=${usage.cache_read_input_tokens ?? 0}, write=${usage.cache_creation_input_tokens ?? 0}, uncached=${usage.input_tokens}`
+        .yellow,
+    );
   }
 
   // Convert Anthropic response to LangChain AIMessage

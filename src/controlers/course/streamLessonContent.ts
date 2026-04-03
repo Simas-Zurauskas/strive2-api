@@ -5,7 +5,7 @@ import { jobEvents } from '@services/jobEvents';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import CourseModel from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
-import { generateLessonSchema } from './validation';
+import { generateLessonSchema, assertPreviousLessonGenerated } from './validation';
 
 /**
  * @swagger
@@ -61,6 +61,9 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
   const lesson = mod.lessons?.[lessonIndex];
   if (!lesson) { res.status(400); throw new Error(`Lesson ${lessonIndex} does not exist in module ${moduleIndex}`); }
 
+  // Enforce sequential generation — previous lesson must exist
+  await assertPreviousLessonGenerated(courseId, moduleIndex, lessonIndex, course.structure as { modules: { lessons: unknown[] }[] });
+
   // ── Atomic guard: one generation at a time per course ──
   const guarded = await CourseModel.findOneAndUpdate(
     { _id: courseId, $or: [{ activeJobId: null }, { activeJobId: { $exists: false } }] },
@@ -94,6 +97,7 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     // Invoke the LangGraph agent with custom stream mode
     // Nodes emit events via config.writer → writeSSE → client
     const input = {
+      courseId,
       goal: course.goal,
       answers: formatCourseAnswers(course),
       depth: course.depth ?? 'comprehensive',
@@ -145,7 +149,7 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
         allBlocks.push(event.block);
         debouncedSave();
       } else if (event.type === 'hero_image') {
-        savedHeroImageUrl = event.url as string;
+        savedHeroImageUrl = (event.s3Key as string) || (event.url as string);
         debouncedSave();
       }
     };

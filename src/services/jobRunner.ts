@@ -4,8 +4,8 @@ import JobModel from '@models/JobModel';
 import CourseModel, { CourseDocument } from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
 import { JobType, CourseDepth } from '@lib/constants';
+import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews } from './courseService';
-import { generateLessonContent } from './lessonService';
 import { jobEvents } from './jobEvents';
 
 // ── Concurrency & timeout ───────────────────────────────
@@ -138,16 +138,23 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
 
       console.log(`[JobRunner] generate_lesson — courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
 
-      const result = await generateLessonContent({
-        goal: course.goal,
-        answers: formatCourseAnswers(course),
-        depth: course.depth ?? 'comprehensive',
-        structure: course.structure as {
-          modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
+      // Use the same LangGraph agent as the SSE streaming path (no-op writer for background jobs)
+      const agentResult = await lessonGenerationAgent.invoke(
+        {
+          courseId,
+          goal: course.goal,
+          answers: formatCourseAnswers(course),
+          depth: course.depth ?? 'comprehensive',
+          structure: course.structure as {
+            modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
+          },
+          moduleIndex,
+          lessonIndex,
+          includeImage: (metadata?.includeImage as boolean) ?? true,
+          includeLinks: (metadata?.includeLinks as boolean) ?? true,
         },
-        moduleIndex,
-        lessonIndex,
-      });
+        { configurable: { writer: () => {} } },
+      );
 
       // Upsert — handles both first generation and regeneration
       const existing = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
@@ -157,9 +164,9 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
           courseId,
           moduleIndex,
           lessonIndex,
-          blocks: result.blocks,
-          summary: result.summary,
-          heroImageUrl: result.heroImageUrl,
+          blocks: agentResult.contentBlocks,
+          summary: agentResult.contentSummary,
+          heroImageUrl: agentResult.heroImageUrl,
           version: existing ? existing.version + 1 : 1,
         },
         { upsert: true, returnDocument: 'after' },

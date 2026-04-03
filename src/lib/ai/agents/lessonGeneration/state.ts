@@ -3,6 +3,7 @@ import { ILessonBlock } from '@models/LessonContentModel';
 
 export const LessonStateAnnotation = Annotation.Root({
   // ── Input (set at invocation) ──────────────────────────
+  courseId: Annotation<string>(),
   goal: Annotation<string>(),
   answers: Annotation<{ questionId: string; answer: string }[]>(),
   depth: Annotation<string>(),

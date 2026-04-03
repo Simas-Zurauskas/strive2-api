@@ -1,49 +1,10 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { TavilySearch } from '@langchain/tavily';
-import { submitJob } from '@services/jobRunner';
-import { jobEvents } from '@services/jobEvents';
+import { refineCourseStructure } from '@services/courseService';
 import CourseModel from '@models/CourseModel';
 import { TAVILY_API_KEY } from '@conf/env';
-
-/** Wait for a job to complete via in-process EventEmitter (no DB polling). */
-const waitForJob = (
-  jobId: string,
-  timeoutMs = 120000,
-  abortSignal?: AbortSignal,
-): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timeout);
-      jobEvents.removeListener(`job:${jobId}`, handler);
-      abortSignal?.removeEventListener('abort', onAbort);
-    };
-
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('Job timed out'));
-    }, timeoutMs);
-
-    const handler = (payload: { status: string; error?: string }) => {
-      cleanup();
-      if (payload.status === 'completed') resolve();
-      else reject(new Error(payload.error ?? 'Job failed'));
-    };
-
-    const onAbort = () => {
-      cleanup();
-      reject(new Error('Client disconnected'));
-    };
-
-    if (abortSignal?.aborted) {
-      reject(new Error('Client disconnected'));
-      return;
-    }
-
-    abortSignal?.addEventListener('abort', onAbort, { once: true });
-    jobEvents.once(`job:${jobId}`, handler);
-  });
-};
+import { CourseDepth } from '@lib/constants';
 
 // ── modify_structure ──────────────────────────────────────
 
@@ -51,43 +12,47 @@ export const modifyStructure = tool(
   async (input, config) => {
     console.log('[tool:modify_structure] ── Called ──'.cyan);
     console.log(`[tool:modify_structure] instruction: ${input.instruction.slice(0, 120)}`.gray);
-    const { courseId, userId, goal, answers, depth, currentStructure, abortSignal } = config?.configurable ?? {};
+    const { courseId, goal, answers, depth, currentStructure } = config?.configurable ?? {};
 
-    if (!goal || !currentStructure || !courseId || !userId) {
+    if (!goal || !currentStructure || !courseId) {
       console.error('[tool:modify_structure] ✗ Missing course context'.red);
       return JSON.stringify({ success: false, error: 'Missing course context' });
     }
 
     try {
-      // Store feedback on Course for the job processor to read
-      await CourseModel.findByIdAndUpdate(courseId, { pendingFeedback: input.instruction });
+      // Load feedback history from course
+      const course = await CourseModel.findById(courseId).select('feedbackHistory').lean();
+      const feedbackHistory = (course?.feedbackHistory as string[]) ?? [];
 
-      // Submit a refine_structure job (reads all data from Course)
-      const jobId = await submitJob({
-        userId,
-        courseId,
-        type: 'refine_structure',
+      // Call refineCourseStructure directly (skip the job system for inline chat operations)
+      const result = await refineCourseStructure({
+        goal,
+        answers: answers ?? [],
+        depth: (depth as CourseDepth) ?? 'comprehensive',
+        currentStructure,
+        feedback: input.instruction,
+        feedbackHistory,
       });
 
-      console.log(`[tool:modify_structure] ✓ Job submitted: ${jobId}`.green);
+      // Persist the updated structure and feedback history
+      await CourseModel.findByIdAndUpdate(courseId, {
+        name: result.courseName,
+        structure: { reasoning: result.reasoning, modules: result.modules },
+        feedbackHistory: [...feedbackHistory, input.instruction],
+        pendingFeedback: null,
+      });
 
-      // Wait for job to complete (client receives status via WebSocket)
-      await waitForJob(jobId, 120000, abortSignal as AbortSignal | undefined);
-
-      // Read updated course from DB (result is written to Course during job execution)
-      const updatedCourse = await CourseModel.findById(courseId).select('name structure').lean();
-      const structure = updatedCourse?.structure as { reasoning?: unknown; modules?: unknown[] } | undefined;
-
-      if (structure && config?.configurable) {
-        config.configurable.currentStructure = structure;
+      // Update in-memory state for the next chat turn
+      if (config?.configurable) {
+        config.configurable.currentStructure = { reasoning: result.reasoning, modules: result.modules };
       }
 
-      console.log(`[tool:modify_structure] ✓ Job completed — ${structure?.modules?.length ?? 0} modules`.green);
+      console.log(`[tool:modify_structure] ✓ Done — ${result.modules.length} modules`.green);
       return JSON.stringify({
         success: true,
-        courseName: updatedCourse?.name,
-        modules: structure?.modules,
-        reasoning: structure?.reasoning,
+        courseName: result.courseName,
+        modules: result.modules,
+        reasoning: result.reasoning,
       });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

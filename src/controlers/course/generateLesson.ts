@@ -1,7 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import { submitJob } from '@services/jobRunner';
 import { getUserCourse } from '@services/courseDbService';
-import { generateLessonSchema } from './validation';
+import { generateLessonSchema, assertPreviousLessonGenerated } from './validation';
 
 /**
  * @swagger
@@ -71,6 +71,9 @@ export const generateLessonController = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error(`Lesson ${lessonIndex} does not exist in module ${moduleIndex}`);
   }
+
+  // Enforce sequential generation — previous lesson must exist
+  await assertPreviousLessonGenerated(courseId, moduleIndex, lessonIndex, course.structure as { modules: { lessons: unknown[] }[] });
 
   console.log(`[API] Submitting generate_lesson job, courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
   const jobId = await submitJob({

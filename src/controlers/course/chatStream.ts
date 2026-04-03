@@ -5,6 +5,7 @@ import { chatStreamSchema } from './validation';
 import { getUserCourse } from '@services/courseDbService';
 import { courseDesignAgent } from '@src/lib/ai/agents/courseDesign';
 import { sanitizePromptInput } from '@lib/sanitize';
+import { getUtilityModel } from '@lib/langchain';
 import ChatSessionModel from '@models/ChatSessionModel';
 
 const formatAnswersFromCourse = (answers: Record<string, unknown> | null) =>
@@ -12,6 +13,48 @@ const formatAnswersFromCourse = (answers: Record<string, unknown> | null) =>
     questionId,
     answer: String(answer),
   }));
+
+/** Max history messages before summarization kicks in. */
+const HISTORY_WINDOW = 10;
+/** Number of recent messages to keep verbatim. */
+const KEEP_RECENT = 4;
+
+/**
+ * Summarize older chat messages to prevent context window bloat.
+ * Returns a condensed history prefix + the recent verbatim messages.
+ */
+const compressHistory = async (
+  history: { role: string; content: string }[],
+): Promise<{ role: string; content: string }[]> => {
+  if (history.length <= HISTORY_WINDOW) return history;
+
+  const olderMessages = history.slice(0, history.length - KEEP_RECENT);
+  const recentMessages = history.slice(history.length - KEEP_RECENT);
+
+  const conversationText = olderMessages
+    .map((m) => `${m.role}: ${m.content.slice(0, 500)}`)
+    .join('\n\n');
+
+  try {
+    const model = getUtilityModel();
+    const result = await model.invoke([
+      new HumanMessage(
+        `Summarize this course design conversation in 3-5 bullet points. Focus on: what structural changes were requested, what was decided, and any important context. Be concise.\n\n${conversationText}`,
+      ),
+    ]);
+
+    const summary = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+    console.log(`[chatStream] Compressed ${olderMessages.length} older messages into summary`.gray);
+
+    return [
+      { role: 'assistant', content: `[Summary of earlier conversation]\n${summary}` },
+      ...recentMessages,
+    ];
+  } catch (e) {
+    console.warn(`[chatStream] History compression failed, using full history: ${e instanceof Error ? e.message : e}`);
+    return history;
+  }
+};
 
 /** Write a single SSE event compatible with Vercel AI SDK ui-message-stream v1. */
 const writeSSE = (res: import('express').Response, payload: Record<string, unknown>) => {
@@ -93,9 +136,10 @@ export const chatStreamController = asyncHandler(async (req, res) => {
     lastMessage.content = sanitizePromptInput(lastMessage.content);
   }
 
-  // Load persisted chat history
+  // Load persisted chat history (compress if long to prevent context window bloat)
   const chatSession = await ChatSessionModel.findOne({ courseId, userId }).lean();
-  const history = (chatSession?.messages ?? []) as { role: string; content: string }[];
+  const rawHistory = (chatSession?.messages ?? []) as { role: string; content: string }[];
+  const history = await compressHistory(rawHistory);
 
   const newUserMessage = rawMessages[rawMessages.length - 1];
 

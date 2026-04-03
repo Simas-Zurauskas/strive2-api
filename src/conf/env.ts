@@ -23,5 +23,10 @@ export const TAVILY_API_KEY = getEnv('TAVILY_API_KEY');
 export const JUDGE0_API_KEY = getEnv('JUDGE0_API_KEY');
 export const JUDGE0_API_URL = getEnv('JUDGE0_API_URL');
 
+export const AWS_S3_BUCKET = getEnv('AWS_S3_BUCKET');
+export const AWS_S3_REGION = getEnv('AWS_S3_REGION');
+export const AWS_ACCESS_KEY_ID = getEnv('AWS_ACCESS_KEY_ID');
+export const AWS_SECRET_ACCESS_KEY = getEnv('AWS_SECRET_ACCESS_KEY');
+
 export const PORT = process.env.PORT || 4000;
 export const API_URL = process.env.API_URL || `http://localhost:${PORT}`;

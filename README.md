@@ -31,6 +31,10 @@ For local development, you can optionally create a `.env.local` file to override
 - `GOOGLE_CLIENT_ID`: Google Client ID for OAuth
 - `MAILJET_API_KEY`: Mailjet API key for email sending
 - `MAILJET_API_SECRET`: Mailjet API secret for email sending
+- `AWS_S3_BUCKET`: AWS S3 bucket name
+- `AWS_S3_REGION`: AWS S3 region
+- `AWS_ACCESS_KEY_ID`: AWS Access Key ID
+- `AWS_SECRET_ACCESS_KEY`: AWS Secret Access Key
 
 ### Optional Variables
 

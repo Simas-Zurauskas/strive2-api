@@ -1,6 +1,7 @@
 import { RunnableConfig } from '@langchain/core/runnables';
 import { streamObject } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
+import { MODEL_IDS } from '@lib/langchain';
 import { LessonState } from '../state';
 import { contentOutputSchema, LESSON_SYSTEM_PROMPT } from '../prompts';
 
@@ -10,7 +11,7 @@ export const contentGeneration = async (state: LessonState, config?: RunnableCon
   console.log(`[contentGeneration] Starting block-by-block generation...`.cyan);
 
   const result = streamObject({
-    model: anthropic('claude-sonnet-4-6'),
+    model: anthropic(MODEL_IDS.SONNET),
     schema: contentOutputSchema,
     temperature: 0.3,
     messages: [

@@ -64,6 +64,40 @@ Your task: Generate the full content for a single lesson as structured blocks. E
    - Do NOT add diagrams just to have them — only when a visual representation genuinely reduces explanation burden
    - Keep diagrams focused — 5-15 nodes maximum
    - Do NOT wrap the mermaid code in markdown code fences — just the raw mermaid syntax
+   - ALWAYS quote node labels containing special characters (parentheses, colons, commas, brackets) with double quotes
+   - Do NOT use semicolons at the end of lines
+
+   Valid mermaid examples:
+
+   Flowchart:
+   flowchart TD
+     A["Client Request"] --> B{"Auth Check"}
+     B -->|Valid| C["Process Request"]
+     B -->|Invalid| D["Return 401"]
+     C --> E["Send Response"]
+
+   Sequence diagram:
+   sequenceDiagram
+     participant C as Client
+     participant S as Server
+     participant DB as Database
+     C->>S: POST /api/data
+     S->>DB: INSERT query
+     DB-->>S: Success
+     S-->>C: 201 Created
+
+   Mindmap:
+   mindmap
+     root("Design Patterns")
+       Creational
+         Factory
+         Singleton
+       Structural
+         Adapter
+         Decorator
+       Behavioral
+         Observer
+         Strategy
 
 5. **callout** (0-3): Info/tip/warning/important boxes for emphasis. Rules:
    - Set metadata.variant to one of: "info", "tip", "warning", "important"
@@ -84,6 +118,14 @@ Each block needs:
 
 A "summary" field (separate from the summary block) — a 1-2 sentence plain text summary of the entire lesson.
 
+## Adapting to non-technical topics
+
+For non-programming topics (business, humanities, science, arts, etc.):
+- Use 0 code blocks. Instead, rely on sections with rich examples, case studies, and scenarios.
+- Mermaid diagrams are still useful for processes, decision trees, concept maps, and relationships.
+- Callouts work well for key definitions, common misconceptions, and expert insights.
+- Sections should use real-world examples, historical cases, or concrete scenarios — not abstract definitions.
+
 ## Quality principles
 
 - PERSONALIZE: Reference the learner's stated goals, experience level, and chosen depth.
@@ -100,17 +142,25 @@ export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer 
    - Set metadata.options to an array of exactly 4 answer choices
    - Set metadata.correctIndex to the index (0-3) of the correct answer
    - Set metadata.explanation to a 1-2 sentence explanation shown after answering
-   - Questions should test UNDERSTANDING, not just recall
+   - Questions should test UNDERSTANDING, not just recall — ask "why" and "what happens when", not "what is the name of"
    - The content field should be empty string for quiz blocks (all data is in metadata)
+   - Distractors should be plausible (common misconceptions), not obviously wrong
 
 2. **exercise** block (exactly 1): A practical challenge the learner can do to apply what they learned. Rules:
    - Content is a markdown description of the exercise
    - Should be achievable in 5-10 minutes
    - For code topics, set these metadata fields:
      - metadata.language: the programming language
-     - metadata.starterCode: pre-filled code the learner will modify/extend
+     - metadata.starterCode: pre-filled code the learner will modify/extend (must be syntactically valid and runnable as-is, even if incomplete)
      - metadata.expectedOutput: the expected stdout when solved correctly
-   - For non-code topics: metadata should be null
+   - For non-code topics: write a thought exercise, analysis task, or application scenario as the content. Set metadata to null. The exercise should require the learner to apply concepts from the lesson to a concrete situation — not just summarize what they read.
+
+## Depth calibration
+
+Adjust difficulty based on the course depth:
+- **overview**: Questions test conceptual understanding and recognition. Exercise is a guided application or reflection task.
+- **comprehensive**: Questions test applied knowledge — "what would happen if..." or "which approach is best for...". Exercise involves hands-on implementation or structured analysis.
+- **deep_dive**: Questions test nuanced understanding of tradeoffs, edge cases, and design decisions. Exercise involves synthesis, optimization, or evaluating competing approaches.
 
 ## Block format
 
@@ -123,5 +173,48 @@ export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer 
 ## Positioning
 
 Place quiz blocks AFTER the section that covers the concept being tested (use decimal orders like 2.5). Place the exercise block just before the summary.
+
+## Examples
+
+Good quiz block (testing understanding, not recall):
+{
+  "id": "quiz-1",
+  "type": "quiz",
+  "content": "",
+  "metadata": {
+    "question": "A developer wraps a database call in a try/catch but the application still crashes on connection timeout. What is the most likely cause?",
+    "options": [
+      "The catch block is empty and doesn't handle the error",
+      "The database call returns a rejected Promise that isn't awaited inside the try block",
+      "try/catch cannot catch database errors",
+      "The timeout error is thrown before the try block executes"
+    ],
+    "correctIndex": 1,
+    "explanation": "If an async function returns a Promise that isn't awaited, the rejection won't be caught by the surrounding try/catch — it becomes an unhandled promise rejection."
+  },
+  "order": 2.5
+}
+
+Good code exercise block:
+{
+  "id": "exercise-1",
+  "type": "exercise",
+  "content": "## Filter and Transform\\n\\nGiven an array of user objects, write a function that returns only active users' email addresses in uppercase. Use array methods (filter + map) instead of a for loop.",
+  "metadata": {
+    "language": "javascript",
+    "starterCode": "const users = [\\n  { name: 'Alice', email: 'alice@example.com', active: true },\\n  { name: 'Bob', email: 'bob@example.com', active: false },\\n  { name: 'Carol', email: 'carol@example.com', active: true },\\n];\\n\\nfunction getActiveEmails(users) {\\n  // Your code here\\n}\\n\\nconsole.log(getActiveEmails(users));",
+    "expectedOutput": "[ 'ALICE@EXAMPLE.COM', 'CAROL@EXAMPLE.COM' ]"
+  },
+  "order": 5.5
+}
+
+Good non-code exercise block:
+{
+  "id": "exercise-1",
+  "type": "exercise",
+  "content": "## Pricing Strategy Analysis\\n\\nA SaaS startup currently charges $49/month flat. They're considering switching to usage-based pricing. Using the concepts from this lesson:\\n\\n1. List two specific customer segments that would benefit from usage-based pricing and two that would not\\n2. Identify the key metric you would base usage pricing on and justify why\\n3. Describe one risk of the transition and how you would mitigate it",
+  "metadata": null,
+  "order": 5.5
+}
 
 Return ONLY the quiz and exercise blocks.`;

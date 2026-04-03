@@ -1,0 +1,82 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: "Knowledge Base: Sync"
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  sync-to-notion:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect change context
+        id: pr_info
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Diff: compare last commit against its parent
+          git diff HEAD~1..HEAD -- . \
+            ':(exclude)package-lock.json' \
+            ':(exclude)yarn.lock' \
+            ':(exclude)*.snap' \
+            ':(exclude).github' | head -c 15000 > /tmp/pr_diff.txt
+
+          # Changed files from the last commit
+          echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+          git diff --name-only HEAD~1..HEAD -- . | head -60 >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # PR-specific metadata (falls back to commit info for push/dispatch)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "pr_title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+            echo "pr_author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "pr_body<<EOF" >> $GITHUB_OUTPUT
+            echo "${{ github.event.pull_request.body }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "pr_title=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
+            echo "pr_author=${{ github.actor }}" >> $GITHUB_OUTPUT
+            echo "pr_number=0" >> $GITHUB_OUTPUT
+            echo "pr_body<<EOF" >> $GITHUB_OUTPUT
+            echo "Direct push or manual trigger" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install sync dependencies
+        working-directory: .github/scripts
+        run: npm install
+
+      - name: Sync documentation
+        working-directory: .github/scripts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_TECHNICAL_ROOT_ID: ${{ secrets.NOTION_TECHNICAL_ROOT_ID }}
+          PR_TITLE: ${{ steps.pr_info.outputs.pr_title }}
+          PR_AUTHOR: ${{ steps.pr_info.outputs.pr_author }}
+          PR_BODY: ${{ steps.pr_info.outputs.pr_body }}
+          CHANGED_FILES: ${{ steps.pr_info.outputs.changed_files }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          REPO_NAME: ${{ github.repository }}
+          REPO_LABEL: ${{ github.event.repository.name }}
+        run: node notion-sync.js

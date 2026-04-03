@@ -4,7 +4,8 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import OpenAI from 'openai';
 import { TavilySearch } from '@langchain/tavily';
 import { OPENAI_API_KEY, TAVILY_API_KEY } from '@conf/env';
-import { getInteractiveModel } from '@lib/langchain';
+import { getUtilityModel } from '@lib/langchain';
+import { uploadBuffer, getPresignedUrl } from '@services/s3Service';
 import { ILessonBlock } from '@models/LessonContentModel';
 import { LessonState } from '../state';
 
@@ -17,7 +18,13 @@ const tavilySearch = new TavilySearch({
 
 // ── Hero image ─────────────────────────────────────────
 
-const generateHeroImage = async (lessonName: string, courseGoal: string): Promise<string | null> => {
+const generateHeroImage = async (
+  lessonName: string,
+  courseGoal: string,
+  courseId: string,
+  moduleIndex: number,
+  lessonIndex: number,
+): Promise<string | null> => {
   try {
     console.log(`[assetsGeneration] Generating hero image...`.cyan);
     const prompt = `Create an artistic, editorial-quality illustration that visually captures the essence of "${lessonName}" within the broader theme of "${courseGoal}".
@@ -42,8 +49,11 @@ Format: Wide banner composition (16:9), with visual weight distributed for use a
     const b64 = response.data?.[0]?.b64_json;
     if (!b64) return null;
 
-    console.log(`[assetsGeneration] ✓ Hero image generated`.green);
-    return `data:image/png;base64,${b64}`;
+    const key = `lessons/${courseId}/${moduleIndex}/${lessonIndex}/hero.png`;
+    await uploadBuffer(key, Buffer.from(b64, 'base64'), 'image/png');
+
+    console.log(`[assetsGeneration] ✓ Hero image uploaded to S3: ${key}`.green);
+    return key;
   } catch (e) {
     console.warn(`[assetsGeneration] ✗ Hero image failed: ${e instanceof Error ? e.message : e}`.yellow);
     return null;
@@ -117,7 +127,7 @@ const generateCuratedLinks = async (
     // Step 2: LLM curation — Haiku selects and describes the best resources
     console.log(`[linksGeneration] Curating ${searchResults.length} candidates with LLM...`.cyan);
 
-    const model = getInteractiveModel().withStructuredOutput(curatedLinksSchema);
+    const model = getUtilityModel().withStructuredOutput(curatedLinksSchema);
     const curationResult = await model.invoke([
       new SystemMessage(LINKS_CURATION_PROMPT),
       new HumanMessage(`## Lesson: ${lessonName}
@@ -164,13 +174,16 @@ export const imageGeneration = async (state: LessonState, config?: RunnableConfi
 
   const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
 
-  const heroImageUrl = await generateHeroImage(state.lessonName, state.goal);
+  const s3Key = await generateHeroImage(
+    state.lessonName, state.goal, state.courseId, state.moduleIndex, state.lessonIndex,
+  );
 
-  if (heroImageUrl) {
-    writer?.({ type: 'hero_image', url: heroImageUrl });
+  if (s3Key) {
+    const presignedUrl = await getPresignedUrl(s3Key);
+    writer?.({ type: 'hero_image', url: presignedUrl, s3Key });
   }
 
-  return { heroImageUrl };
+  return { heroImageUrl: s3Key };
 };
 
 // ── Node: curated links (runs at the end) ─────────────

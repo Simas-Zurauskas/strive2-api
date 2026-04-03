@@ -1,0 +1,10 @@
+{
+  "name": "notion-sync",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.90",
+    "@anthropic-ai/sdk": "^0.52.0",
+    "@notionhq/client": "^2.3.0",
+    "@tryfabric/martian": "^1.2.0"
+  }
+}

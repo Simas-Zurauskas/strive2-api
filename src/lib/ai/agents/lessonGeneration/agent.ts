@@ -1,22 +1,24 @@
 import { END, START, StateGraph } from '@langchain/langgraph';
 import { LessonStateAnnotation } from './state';
-import { contextLoad, contentGeneration, interactiveGeneration, imageGeneration, linksGeneration, merge } from './nodes';
+import { contextLoad, contentGeneration, contentValidation, interactiveGeneration, imageGeneration, linksGeneration, merge } from './nodes';
 
 // ── Graph construction ────────────────────────────────────
 //
 // Flow:
-//   START → contextLoad ─┬── contentGeneration → interactiveGeneration → linksGeneration ──┬── merge → END
-//                         └── imageGeneration ─────────────────────────────────────────────┘
+//   START → contextLoad ─┬── contentGeneration → contentValidation ─┬── interactiveGeneration ──┬── merge → END
+//                         │                                          └── linksGeneration ────────┘
+//                         └── imageGeneration ──────────────────────────────────────────────────┘
 //
 // imageGeneration starts immediately (parallel with content) — only needs lesson name
 // contentGeneration streams blocks one-by-one via config.writer()
-// interactiveGeneration runs after content (needs content blocks as context)
-// linksGeneration runs at the very end (after interactive)
-// merge waits for links + image to complete (fan-in)
+// contentValidation checks structural integrity (required blocks, metadata, mermaid syntax)
+// After validation: interactive + links run in parallel (both only need content blocks)
+// merge waits for interactive + links + image to complete (fan-in)
 
 const graph = new StateGraph(LessonStateAnnotation)
   .addNode('contextLoad', contextLoad)
   .addNode('contentGeneration', contentGeneration)
+  .addNode('contentValidation', contentValidation)
   .addNode('interactiveGeneration', interactiveGeneration)
   .addNode('imageGeneration', imageGeneration)
   .addNode('linksGeneration', linksGeneration)
@@ -25,10 +27,12 @@ const graph = new StateGraph(LessonStateAnnotation)
   // Fan-out: content + image start in parallel
   .addEdge('contextLoad', 'contentGeneration')
   .addEdge('contextLoad', 'imageGeneration')
-  // Sequential: content → interactive → links (links last)
-  .addEdge('contentGeneration', 'interactiveGeneration')
-  .addEdge('interactiveGeneration', 'linksGeneration')
-  // Fan-in: merge waits for links + image
+  // Content → validation → fan-out to interactive + links
+  .addEdge('contentGeneration', 'contentValidation')
+  .addEdge('contentValidation', 'interactiveGeneration')
+  .addEdge('contentValidation', 'linksGeneration')
+  // Fan-in: merge waits for interactive + links + image
+  .addEdge('interactiveGeneration', 'merge')
   .addEdge('linksGeneration', 'merge')
   .addEdge('imageGeneration', 'merge')
   .addEdge('merge', END);

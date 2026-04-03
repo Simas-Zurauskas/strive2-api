@@ -4,7 +4,7 @@ import mongoose, { HydratedDocument, Schema, Types } from 'mongoose';
 
 export const BLOCK_TYPES = [
   'intro', 'section', 'code', 'mermaid', 'callout',
-  'quiz', 'exercise', 'summary', 'links', 'image', 'latex',
+  'quiz', 'exercise', 'summary', 'links', 'image',
 ] as const;
 export type BlockType = (typeof BLOCK_TYPES)[number];
 
