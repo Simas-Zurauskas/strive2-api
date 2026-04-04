@@ -78,7 +78,7 @@ Return a JSON object with a "personas" array. Each persona has:
 export async function generatePersonas(count: number = 5): Promise<Persona[]> {
   const client = new OpenAI();
 
-  console.log(`[PersonaGen] Generating ${count} personas via GPT-4o...`);
+  console.log(`${'[PersonaGen]'.magenta} Generating ${count} personas via GPT-4o...`);
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
@@ -103,7 +103,7 @@ export async function generatePersonas(count: number = 5): Promise<Persona[]> {
     if (!p.wizardBehavior || !p.wizardBehavior.surveyStyle || !p.wizardBehavior.depthChoice || !p.wizardBehavior.structureReview) {
       throw new Error(`Persona "${p.name}" is missing wizardBehavior fields`);
     }
-    console.log(`[PersonaGen]   → ${p.name}`);
+    console.log(`${'[PersonaGen]'.magenta}   → ${p.name.bold}`);
   }
 
   return parsed.personas;

@@ -164,7 +164,9 @@ export async function runPersonaFlow(
   config: OrchestratorConfig,
   label: string,
 ): Promise<PersonaRun> {
-  const log = (msg: string) => console.log(`[${label}] ${msg}`);
+  const log = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`);
+  const logDone = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`.green);
+  const logDetail = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`.gray);
   const flowStart = Date.now();
   const steps: StepResult[] = [];
   let courseId = '';
@@ -182,7 +184,7 @@ export async function runPersonaFlow(
     steps.push(r1);
     recorder.setCourseId(courseId);
     recorder.addStep1_CreateCourse(r1, courseId);
-    log(`Step 1 done → courseId: ${courseId}`);
+    logDone(`Step 1 done → courseId: ${courseId}`);
 
     // ── Step 2: Clarify (Question Generation) ───────────
     log('Step 2: Generating clarify questions...');
@@ -196,7 +198,7 @@ export async function runPersonaFlow(
     const r2 = s2.finish(`${questions.length} questions generated`);
     steps.push(r2);
     recorder.addStep2_Clarify(r2, questions, pollDuration2);
-    log(`Step 2 done → ${questions.length} questions`);
+    logDone(`Step 2 done → ${questions.length} questions`);
 
     // ── Step 3: Answer Questions (AI as Persona) ────────
     log('Step 3: Answering questions as persona...');
@@ -206,7 +208,7 @@ export async function runPersonaFlow(
     const r3 = s3.finish(answerReasoning);
     steps.push(r3);
     recorder.addStep3_Answers(r3, answers, questions, answerReasoning);
-    log('Step 3 done → answers submitted');
+    logDone('Step 3 done → answers submitted');
 
     // ── Step 4: Depth Previews ──────────────────────────
     log('Step 4: Generating depth previews...');
@@ -220,7 +222,7 @@ export async function runPersonaFlow(
     const r4 = s4.finish(`recommended: ${depthPreviews.recommended}`);
     steps.push(r4);
     recorder.addStep4_DepthPreviews(r4, depthPreviews, pollDuration4);
-    log(`Step 4 done → recommended: ${depthPreviews.recommended}`);
+    logDone(`Step 4 done → recommended: ${depthPreviews.recommended}`);
 
     // ── Step 5: Select Depth (AI as Persona) ────────────
     log('Step 5: Selecting depth as persona...');
@@ -230,7 +232,7 @@ export async function runPersonaFlow(
     const r5 = s5.finish(depthReasoning);
     steps.push(r5);
     recorder.addStep5_DepthSelection(r5, depth, depthPreviews.recommended, depthReasoning);
-    log(`Step 5 done → selected: ${depth} (recommended: ${depthPreviews.recommended})`);
+    logDone(`Step 5 done → selected: ${depth}` + (depth !== depthPreviews.recommended ? ` (recommended: ${depthPreviews.recommended})`.yellow : ` (recommended: ${depthPreviews.recommended})`));
 
     // ── Step 6: Generate Structure ──────────────────────
     log('Step 6: Generating course structure...');
@@ -245,7 +247,7 @@ export async function runPersonaFlow(
     const r6 = s6.finish(`${structure.modules.length} modules, ${totalLessons} lessons`);
     steps.push(r6);
     recorder.addStep6_Structure(r6, structure, pollDuration6);
-    log(`Step 6 done → ${structure.modules.length} modules, ${totalLessons} lessons`);
+    logDone(`Step 6 done → ${structure.modules.length} modules, ${totalLessons} lessons`);
 
     // ── Step 7: Review Structure (AI as Persona) ────────
     log('Step 7: Reviewing structure...');
@@ -259,7 +261,7 @@ export async function runPersonaFlow(
 
       if (!review.satisfied && review.feedback) {
         feedback = review.feedback;
-        log(`Step 7: Sending feedback: "${feedback}"`);
+        logDetail(`Step 7: Sending feedback: "${feedback}"`);
 
         const structureBefore = JSON.stringify(course.structure?.modules);
         chatResponse = await client.postSSE(`/api/course/${courseId}/chat`, {
@@ -271,16 +273,16 @@ export async function runPersonaFlow(
         course = await client.getCourse(courseId);
         structureChanged = JSON.stringify(course.structure?.modules) !== structureBefore;
       } else {
-        log('Step 7: Persona satisfied with structure');
+        logDetail('Step 7: Persona satisfied with structure');
       }
     } else {
-      log('Step 7: Chat review disabled, skipping');
+      logDetail('Step 7: Chat review disabled, skipping');
     }
 
     const r7 = s7.finish(feedback ? `Feedback: ${feedback}` : 'Accepted as-is');
     steps.push(r7);
     recorder.addStep7_Review(r7, feedback, chatResponse, structureChanged);
-    log(`Step 7 done → ${feedback ? `feedback sent, structure ${structureChanged ? 'changed' : 'unchanged'}` : 'accepted as-is'}`);
+    logDone(`Step 7 done → ${feedback ? `feedback sent, structure ${structureChanged ? 'changed'.green : 'unchanged'.yellow}` : 'accepted as-is'}`);
 
     // ── Step 8: Accept Course ───────────────────────────
     log('Step 8: Accepting course...');
@@ -290,13 +292,13 @@ export async function runPersonaFlow(
     const r8 = s8.finish();
     steps.push(r8);
     recorder.addStep8_Accept(r8);
-    log('Step 8 done → course accepted');
+    logDone('Step 8 done → course accepted');
 
     // ── Write report ────────────────────────────────────
     const totalDurationMs = Date.now() - flowStart;
     recorder.addSummary(totalDurationMs, course, 'completed');
     const filepath = await recorder.writeToFile(config.outputDir);
-    log(`Report written → ${filepath}`);
+    logDetail(`Report written → ${filepath}`);
 
     return {
       persona,
@@ -308,7 +310,7 @@ export async function runPersonaFlow(
   } catch (error) {
     const totalDurationMs = Date.now() - flowStart;
     const errorMsg = error instanceof Error ? error.message : String(error);
-    log(`FAILED at step ${steps.length + 1}: ${errorMsg}`);
+    console.log(`[${label}]`.cyan + ` FAILED at step ${steps.length + 1}: ${errorMsg}`.red);
 
     // Write partial report
     if (course || courseId) {

@@ -264,6 +264,7 @@ Rules for refinement:
 - The previous refinements listed above have ALREADY been applied to the current structure. Do not undo them unless the current request explicitly asks to reverse a previous change.
 - If the feedback asks to remove, add, merge, or split modules/lessons, do exactly that.
 - Maintain pedagogical quality, Bloom's taxonomy progression, and specific lesson naming standards.
+- Consider whether additions are appropriate for the learner's experience level and the chosen depth tier. If adding content would push the course significantly beyond typical scope for its depth, prefer a focused addition over an expansive one, unless the learner explicitly requests more.
 - Update the reasoning fields to reflect the refined structure.
 - The result should feel like a thoughtful revision, not a complete regeneration.`;
 
