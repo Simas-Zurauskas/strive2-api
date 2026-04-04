@@ -11,18 +11,18 @@ export async function runAll(
 ): Promise<PersonaRun[]> {
   const limit = pLimit(config.concurrency);
 
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`Starting ${personas.length} persona flows (concurrency: ${config.concurrency})`);
-  console.log(`API: ${config.apiUrl}`);
-  console.log(`Chat review: ${config.enableChatReview ? 'enabled' : 'disabled'}`);
-  console.log(`Output: ${config.outputDir}`);
-  console.log(`${'='.repeat(60)}\n`);
+  console.log(`\n${'='.repeat(60).dim}`);
+  console.log(`Starting ${String(personas.length).bold} persona flows (concurrency: ${String(config.concurrency).bold})`.cyan);
+  console.log(`API: ${config.apiUrl}`.gray);
+  console.log(`Chat review: ${config.enableChatReview ? 'enabled'.green : 'disabled'.yellow}`.gray);
+  console.log(`Output: ${config.outputDir}`.gray);
+  console.log(`${'='.repeat(60).dim}\n`);
 
   const results = await Promise.allSettled(
     personas.map((persona, index) =>
       limit(async () => {
         const label = `Persona ${index + 1}/${personas.length} (${persona.name})`;
-        console.log(`[${label}] Starting...`);
+        console.log(`[${label}]`.cyan + ' Starting...');
 
         const client = createApiClient(config.apiUrl, token);
         const recorder = new MarkdownRecorder();
@@ -33,9 +33,9 @@ export async function runAll(
   );
 
   // Print summary
-  console.log(`\n${'='.repeat(60)}`);
-  console.log('ORCHESTRATOR COMPLETE');
-  console.log(`${'='.repeat(60)}`);
+  console.log(`\n${'='.repeat(60).dim}`);
+  console.log('ORCHESTRATOR COMPLETE'.cyan.bold);
+  console.log(`${'='.repeat(60).dim}`);
 
   const runs: PersonaRun[] = [];
   for (let i = 0; i < results.length; i++) {
@@ -44,17 +44,17 @@ export async function runAll(
     if (r.status === 'fulfilled') {
       const run = r.value;
       runs.push(run);
-      const icon = run.status === 'completed' ? 'OK' : 'FAIL';
-      console.log(`  [${icon}] ${persona.name} → ${(run.totalDurationMs / 1000).toFixed(1)}s (course: ${run.courseId})`);
+      const icon = run.status === 'completed' ? '[OK]'.green : '[FAIL]'.red;
+      console.log(`  ${icon} ${persona.name} → ${(run.totalDurationMs / 1000).toFixed(1)}s`.gray + ` (course: ${run.courseId})`.dim);
     } else {
-      console.log(`  [ERR] ${persona.name} → ${r.reason}`);
+      console.log(`  ${'[ERR]'.red.bold} ${persona.name} → ${r.reason}`);
     }
   }
 
   const succeeded = runs.filter((r) => r.status === 'completed').length;
   const failed = runs.filter((r) => r.status === 'failed').length;
   const errored = results.filter((r) => r.status === 'rejected').length;
-  console.log(`\nResults: ${succeeded} completed, ${failed} failed, ${errored} errored`);
+  console.log(`\nResults: ${String(succeeded).green} completed, ${String(failed).yellow} failed, ${String(errored).red} errored`);
 
   return runs;
 }

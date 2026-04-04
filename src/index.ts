@@ -37,16 +37,18 @@ app.use(
 );
 app.use(express.json({ limit: '1mb' }));
 
-app.use(
-  rateLimit({
-    windowMs: 60 * 1000,
-    limit: 100,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    message: { message: 'Too many requests, please try again later' },
-    validate: { keyGeneratorIpFallback: false },
-  }),
-);
+if (ENVIRONMENT !== 'development') {
+  app.use(
+    rateLimit({
+      windowMs: 60 * 1000,
+      limit: 100,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      message: { message: 'Too many requests, please try again later' },
+      validate: { keyGeneratorIpFallback: false },
+    }),
+  );
+}
 
 app.get('/', (req, res) => {
   res.json({ service: 'Strive API', version: '1.0.0' });

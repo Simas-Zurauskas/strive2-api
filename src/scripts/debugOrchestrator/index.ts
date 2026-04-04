@@ -1,3 +1,4 @@
+import 'colors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { authenticate } from './apiClient';
@@ -69,13 +70,13 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
 async function main() {
   const { personaCount, ...config } = parseArgs();
 
-  console.log('Debug Orchestrator — Course Creation Flow Testing');
-  console.log('─'.repeat(50));
+  console.log('Debug Orchestrator — Course Creation Flow Testing'.bold.cyan);
+  console.log('─'.repeat(50).dim);
 
   // Authenticate
-  console.log(`\nAuthenticating as ${config.email}...`);
+  console.log(`\nAuthenticating as ${config.email}...`.gray);
   const token = await authenticate(config.apiUrl, config.email, config.password);
-  console.log('Authenticated successfully.');
+  console.log('Authenticated successfully.'.green);
 
   // Generate personas
   const personas = await generatePersonas(personaCount);

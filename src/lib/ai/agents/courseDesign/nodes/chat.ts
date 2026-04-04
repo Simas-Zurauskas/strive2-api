@@ -45,12 +45,15 @@ const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
 const buildStructureSummary = (state: {
   goal?: string;
   depth?: string;
+  answers?: { questionId: string; answer: string }[];
   currentStructure?: {
     modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
   };
 }): string => {
   const modules = state.currentStructure?.modules ?? [];
   if (modules.length === 0) return '';
+
+  const totalLessons = modules.reduce((sum, m) => sum + m.lessons.length, 0);
 
   const structureText = modules
     .map(
@@ -59,7 +62,11 @@ const buildStructureSummary = (state: {
     )
     .join('\n\n');
 
-  return `\n\n## Current Course Context\n- Goal: ${state.goal ?? 'N/A'}\n- Depth: ${state.depth ?? 'N/A'}\n- Modules: ${modules.length}\n\n${structureText}`;
+  const answersText = state.answers?.length
+    ? `\n- Learner answers:\n${state.answers.map((a) => `  - ${a.questionId}: ${a.answer}`).join('\n')}`
+    : '';
+
+  return `\n\n## Current Course Context\n- Goal: ${state.goal ?? 'N/A'}\n- Depth: ${state.depth ?? 'N/A'}\n- Modules: ${modules.length}\n- Total lessons: ${totalLessons}${answersText}\n\n${structureText}`;
 };
 
 /** Convert LangChain messages to Anthropic format, handling tool calls and results. */
