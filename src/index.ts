@@ -99,7 +99,7 @@ const gracefulShutdown = async (signal: string) => {
   server.close();
   getIO().close();
 
-  const drainTimeout = 30_000;
+  const drainTimeout = 120_000; // Lesson generation takes 60-120s
   const start = Date.now();
   while (jobLimit.activeCount > 0 && Date.now() - start < drainTimeout) {
     console.log(`[Shutdown] Waiting for ${jobLimit.activeCount} active job(s) to finish...`.yellow);

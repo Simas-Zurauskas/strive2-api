@@ -56,6 +56,20 @@ export const contentValidation = async (state: LessonState, _config?: RunnableCo
     console.log(`[contentValidation] ✓ All checks passed (${blocks.length} blocks)`.green);
   }
 
-  // Pass through unchanged — validation is observational, not blocking
+  // Remove placeholder code blocks (LLM sometimes generates "no code needed" stubs for non-technical lessons)
+  const filtered = blocks.filter((b) => {
+    if (b.type !== 'code') return true;
+    const trimmed = b.content.trim().replace(/^#\s*/, '').toLowerCase();
+    if (trimmed.includes('no code') || trimmed.includes('not applicable') || trimmed.includes('no programming') || trimmed.length < 20) {
+      warnings.push(`Removed empty/placeholder code block ${b.id}: "${b.content.trim().slice(0, 60)}"`);
+      return false;
+    }
+    return true;
+  });
+
+  if (filtered.length !== blocks.length) {
+    return { contentBlocks: filtered };
+  }
+
   return {};
 };
