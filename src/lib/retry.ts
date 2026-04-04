@@ -25,8 +25,9 @@ export const withRetry = async <T>(fn: () => Promise<T>, options?: RetryOptions)
 
       if (attempt === maxRetries) break;
 
+      const reason = error instanceof Error ? error.message : String(error);
       const delay = Math.min(baseDelayMs * Math.pow(2, attempt) + Math.random() * 500, maxDelayMs);
-      console.log(`[Retry] Attempt ${attempt + 1}/${maxRetries} failed, retrying in ${Math.round(delay)}ms`.yellow);
+      console.log(`[Retry] Attempt ${attempt + 1}/${maxRetries} failed, retrying in ${Math.round(delay)}ms — ${reason}`.yellow);
       await sleep(delay);
     }
   }

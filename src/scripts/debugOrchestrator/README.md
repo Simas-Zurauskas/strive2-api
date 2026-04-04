@@ -1,6 +1,6 @@
 # Debug Orchestrator — Course Creation Flow Testing
 
-Generates AI personas with different learning needs, runs each through the full course creation wizard in parallel, and records every input/output to markdown reports.
+Generates AI personas with different learning needs, runs each through the full course creation wizard and optionally generates lesson content in parallel, recording every input/output to markdown reports.
 
 ## Prerequisites
 
@@ -13,14 +13,14 @@ Generates AI personas with different learning needs, runs each through the full 
 ```bash
 cd api
 
-# Basic run — 1 persona, no chat
-yarn debug:orchestrator --email user@example.com --password yourpass --concurrency 1 --personas 1
+# Basic run — 1 persona, structure only
+yarn debug:orchestrator --email user@example.com --password yourpass --concurrency 1 --personas 1 --lessons 0
 
-# Include the structure review chat step
-yarn debug:orchestrator --email user@example.com --password yourpass --concurrency 3 --personas 5 --chat
+# Include chat review + generate 2 lessons per persona
+yarn debug:orchestrator --email user@example.com --password yourpass --concurrency 3 --personas 5 --chat --lessons 2
 
-# Custom API URL
-yarn debug:orchestrator --email user@example.com --password yourpass --concurrency 2 --personas 3 --api-url http://localhost:4000
+# Full run — 5 personas, chat, 3 lessons each
+yarn debug:orchestrator --email user@example.com --password yourpass --concurrency 5 --personas 5 --chat --lessons 3
 ```
 
 ## Options
@@ -31,6 +31,7 @@ yarn debug:orchestrator --email user@example.com --password yourpass --concurren
 | `--password`    | required | User password                                       |
 | `--concurrency` | required | Max personas running simultaneously                 |
 | `--personas`    | required | Number of personas to generate                      |
+| `--lessons`     | required | Lessons to generate per persona (0 = skip)          |
 | `--api-url`     | optional | API base URL (default: `http://localhost:4000`)     |
 | `--chat`        | optional | Include structure review chat step (off by default) |
 
@@ -46,6 +47,8 @@ For each AI-generated persona, the orchestrator runs through the complete course
 6. **Generate Structure** — triggers course structure generation, polls until complete
 7. **Review Structure** — AI reviews and optionally sends one refinement via chat (SSE)
 8. **Accept Course** — sets course status to `ready`
+9. **Generate Lessons** — sequentially generates up to `--lessons` lessons via the job pipeline, fetches full content (blocks, quizzes, exercises, diagrams), and logs everything _(skipped if `--lessons 0`)_
+10. **Complete Lessons** — marks each generated lesson as completed via the progress API
 
 All personas use the same user account — each creates a separate course.
 
@@ -68,6 +71,7 @@ Reports include:
 - Depth previews and selection reasoning
 - Full course structure (modules, lessons, reasoning)
 - Chat feedback and AI response (if applicable)
+- Generated lesson content: block breakdown by type, quiz questions/answers, code snippets, mermaid diagrams, exercises (collapsible)
 
 ## Concurrency Notes
 
@@ -75,6 +79,7 @@ Reports include:
 - Server-side limit: 10 concurrent jobs globally (`jobRunner.ts`)
 - Default script concurrency of 3 stays well within this limit
 - All 5 personas at concurrency 5 is safe (5 < 10)
+- Lesson generation adds ~30-120s per lesson — plan concurrency accordingly
 
 ## Files
 
@@ -83,7 +88,7 @@ debugOrchestrator/
   index.ts              — Entry point, CLI args, auth
   orchestrator.ts       — p-limit concurrency wrapper
   personaGenerator.ts   — GPT-4o persona generation
-  courseFlow.ts         — 8-step pipeline + AI-as-persona functions
+  courseFlow.ts         — 10-step pipeline + AI-as-persona functions
   apiClient.ts          — HTTP client (fetch, job polling, SSE)
   markdownRecorder.ts   — Per-persona markdown report builder
   types.ts              — Shared TypeScript interfaces

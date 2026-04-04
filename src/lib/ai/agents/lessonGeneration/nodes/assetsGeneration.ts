@@ -12,7 +12,7 @@ import { LessonState } from '../state';
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 const tavilySearch = new TavilySearch({
-  maxResults: 5,
+  maxResults: 8,
   tavilyApiKey: TAVILY_API_KEY,
 });
 
@@ -102,7 +102,7 @@ const generateCuratedLinks = async (
     const keyTerms = `${lessonName} ${sectionContent}`.slice(0, 300);
 
     console.log(`[linksGeneration] Searching with lesson context...`.cyan);
-    const results = await tavilySearch.invoke({ query: `${keyTerms} official documentation tutorial guide` });
+    const results = await tavilySearch.invoke({ query: `${keyTerms} learn guide resource tutorial` });
 
     // Parse Tavily results
     const raw = results as Record<string, unknown>;

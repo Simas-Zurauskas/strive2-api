@@ -12,9 +12,10 @@ export async function runAll(
   const limit = pLimit(config.concurrency);
 
   console.log(`\n${'='.repeat(60).dim}`);
-  console.log(`Starting ${String(personas.length).bold} persona flows (concurrency: ${String(config.concurrency).bold})`.cyan);
+  console.log(`Starting ${personas.length} persona flows (concurrency: ${config.concurrency})`.cyan);
   console.log(`API: ${config.apiUrl}`.gray);
   console.log(`Chat review: ${config.enableChatReview ? 'enabled'.green : 'disabled'.yellow}`.gray);
+  console.log(`Lessons: ${config.maxLessons === 0 ? 'skipped'.yellow : String(config.maxLessons)}`.gray);
   console.log(`Output: ${config.outputDir}`.gray);
   console.log(`${'='.repeat(60).dim}\n`);
 
@@ -34,7 +35,7 @@ export async function runAll(
 
   // Print summary
   console.log(`\n${'='.repeat(60).dim}`);
-  console.log('ORCHESTRATOR COMPLETE'.cyan.bold);
+  console.log('ORCHESTRATOR COMPLETE'.cyan);
   console.log(`${'='.repeat(60).dim}`);
 
   const runs: PersonaRun[] = [];
@@ -47,7 +48,7 @@ export async function runAll(
       const icon = run.status === 'completed' ? '[OK]'.green : '[FAIL]'.red;
       console.log(`  ${icon} ${persona.name} → ${(run.totalDurationMs / 1000).toFixed(1)}s`.gray + ` (course: ${run.courseId})`.dim);
     } else {
-      console.log(`  ${'[ERR]'.red.bold} ${persona.name} → ${r.reason}`);
+      console.log(`  ${'[ERR]'.red} ${persona.name} → ${r.reason}`);
     }
   }
 

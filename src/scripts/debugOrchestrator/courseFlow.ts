@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import type { ApiClient } from './apiClient';
+import { LESSON_POLL_TIMEOUT_MS } from './apiClient';
 import { MarkdownRecorder } from './markdownRecorder';
 import type {
   Persona,
@@ -10,6 +11,7 @@ import type {
   DepthPreviews,
   CourseStructure,
   CourseData,
+  ILessonContent,
 } from './types';
 
 let _openai: OpenAI | null = null;
@@ -294,9 +296,68 @@ export async function runPersonaFlow(
     recorder.addStep8_Accept(r8);
     logDone('Step 8 done → course accepted');
 
+    // ── Steps 9+10: Generate & Complete Lessons ─────────
+    let lessonsGenerated = 0;
+    const lessonContents: {
+      moduleIndex: number;
+      lessonIndex: number;
+      moduleName: string;
+      lessonName: string;
+      content: ILessonContent;
+      generationMs: number;
+    }[] = [];
+
+    if (config.maxLessons > 0 && course.structure?.modules) {
+      const modules = course.structure.modules;
+      log(`Steps 9-10: Generating up to ${config.maxLessons} lessons...`);
+
+      for (let mi = 0; mi < modules.length && lessonsGenerated < config.maxLessons; mi++) {
+        const mod = modules[mi];
+        for (let li = 0; li < mod.lessons.length && lessonsGenerated < config.maxLessons; li++) {
+          const lesson = mod.lessons[li];
+          const lessonLabel = `[${mi}/${li}] ${mod.name} → ${lesson.name}`;
+
+          // ── Step 9: Generate & Log ──────────────
+          logDetail(`Generating lesson ${lessonLabel}...`);
+          const s9 = timedStep(9, `Generate Lesson ${mi}/${li}`);
+          const genStart = Date.now();
+
+          const jobId = await client.generateLesson(courseId, mi, li);
+          await client.pollJob(jobId, LESSON_POLL_TIMEOUT_MS);
+          const content = await client.getLessonContent(courseId, mi, li);
+
+          const generationMs = Date.now() - genStart;
+          const r9 = s9.finish(`${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s`);
+          steps.push(r9);
+
+          lessonContents.push({
+            moduleIndex: mi,
+            lessonIndex: li,
+            moduleName: mod.name,
+            lessonName: lesson.name,
+            content,
+            generationMs,
+          });
+
+          logDone(`Generated lesson ${lessonLabel} (${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s)`);
+
+          // ── Step 10: Complete Lesson ────────────
+          const s10 = timedStep(10, `Complete Lesson ${mi}/${li}`);
+          await client.completeLessonProgress(courseId, mi, li);
+          const r10 = s10.finish();
+          steps.push(r10);
+
+          lessonsGenerated++;
+        }
+      }
+
+      recorder.addStep9_LessonGeneration(lessonContents);
+      logDone(`Lesson generation complete: ${lessonsGenerated}/${config.maxLessons} lessons`);
+    }
+
     // ── Write report ────────────────────────────────────
     const totalDurationMs = Date.now() - flowStart;
-    recorder.addSummary(totalDurationMs, course, 'completed');
+    recorder.addSummary(totalDurationMs, course, 'completed', undefined, lessonsGenerated > 0 ? lessonsGenerated : undefined);
     const filepath = await recorder.writeToFile(config.outputDir);
     logDetail(`Report written → ${filepath}`);
 

@@ -23,6 +23,7 @@ export interface OrchestratorConfig {
   password: string;
   outputDir: string;
   enableChatReview: boolean;
+  maxLessons: number;
 }
 
 export interface StepResult {
@@ -73,3 +74,4 @@ export type CourseData = Pick<
 
 // Re-export for convenience
 export type { CourseDepth };
+export type { ILessonContent, ILessonBlock } from '@models/LessonContentModel';
