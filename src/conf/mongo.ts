@@ -38,7 +38,7 @@ const connectDB = async () => {
     mongoose.set('strictPopulate', false);
     const conn = await mongoose.connect(MONGO_URI, {
       maxPoolSize: 50,
-      minPoolSize: 5,
+      minPoolSize: 10,
     });
     console.log(colors.cyan(`MongoDB Connected - ${conn.connection.host}`.bgCyan));
 

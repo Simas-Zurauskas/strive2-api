@@ -103,7 +103,7 @@ Your task: Generate the full content for a single lesson as structured blocks. E
    - Set metadata.variant to one of: "info", "tip", "warning", "important"
    - Place callouts inline where they naturally belong — after the concept they relate to
 
-6. **summary** (exactly 1, last block): 4-6 bullet points of key takeaways. Each bullet states one concrete thing the learner now knows or can do.
+6. **summary** (exactly 1, last block): 4-6 bullet points of key takeaways. Each bullet states one concrete thing the learner now knows or can do. Output ONLY the bullet list — no heading, no title (e.g., no "What You Now Know"), no introductory text.
 
 ## Block format
 

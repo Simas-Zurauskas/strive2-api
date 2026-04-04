@@ -13,7 +13,7 @@ import { jobEvents } from './jobEvents';
 // ── Concurrency & timeout ───────────────────────────────
 
 
-const MAX_JOB_CONCURRENCY = 10;
+const MAX_JOB_CONCURRENCY = 50;
 const JOB_TIMEOUT_MS = 600_000; // 10 minutes
 
 export const jobLimit = pLimit(MAX_JOB_CONCURRENCY);

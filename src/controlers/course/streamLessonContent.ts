@@ -167,6 +167,31 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
         const { contentSummary } = chunk.contentGeneration as { contentSummary?: string };
         if (contentSummary) savedSummary = contentSummary;
       }
+
+      // Content is validated — send placeholders for interactive blocks so client can show skeletons
+      if (chunk.contentValidation) {
+        const contentBlocks = allBlocks as { type: string; order: number }[];
+        const sections = contentBlocks.filter((b) => b.type === 'section');
+        const summaryBlock = contentBlocks.find((b) => b.type === 'summary');
+        const maxOrder = Math.max(...contentBlocks.map((b) => b.order));
+
+        // Quiz placeholders: after the last 2 sections (or fewer if less sections)
+        const quizSections = sections.slice(-2);
+        const quizPlaceholders = quizSections.map((s, i) => ({
+          type: 'quiz' as const,
+          order: s.order + 0.5,
+          id: `placeholder-quiz-${i}`,
+        }));
+
+        // Exercise placeholder: just before summary (deterministic)
+        const exerciseOrder = summaryBlock ? summaryBlock.order - 0.5 : maxOrder + 1;
+        const exercisePlaceholder = { type: 'exercise' as const, order: exerciseOrder, id: 'placeholder-exercise' };
+
+        writeSSE({
+          type: 'content_ready',
+          placeholders: [...quizPlaceholders, exercisePlaceholder],
+        });
+      }
     }
 
     // Final save — ensure everything is persisted (flush any pending debounce)
