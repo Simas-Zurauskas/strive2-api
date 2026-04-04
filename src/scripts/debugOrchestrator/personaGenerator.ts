@@ -103,7 +103,7 @@ export async function generatePersonas(count: number = 5): Promise<Persona[]> {
     if (!p.wizardBehavior || !p.wizardBehavior.surveyStyle || !p.wizardBehavior.depthChoice || !p.wizardBehavior.structureReview) {
       throw new Error(`Persona "${p.name}" is missing wizardBehavior fields`);
     }
-    console.log(`${'[PersonaGen]'.magenta}   → ${p.name.bold}`);
+    console.log(`${'[PersonaGen]'.magenta}   → ${p.name}`);
   }
 
   return parsed.personas;

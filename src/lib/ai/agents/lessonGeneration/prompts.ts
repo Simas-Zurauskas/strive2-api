@@ -30,7 +30,10 @@ export const contentOutputSchema = z.object({
 });
 
 export const interactiveOutputSchema = z.object({
-  blocks: z.array(lessonBlockSchema),
+  blocks: z.preprocess(
+    (val) => (typeof val === 'string' ? JSON.parse(val) : val),
+    z.array(lessonBlockSchema),
+  ),
 });
 
 // ── System prompts ─────────────────────────────────────
@@ -51,7 +54,7 @@ Your task: Generate the full content for a single lesson as structured blocks. E
    - Use analogies to connect new concepts to familiar ones
    - End each section at a natural conceptual boundary
 
-3. **code** (0-4, when the topic involves programming or technical commands): Runnable, complete code examples. Rules:
+3. **code** (0-4): Runnable, complete code examples. ONLY use for actual programming or technical command topics. For non-programming topics (business, arts, science, humanities, photography, cooking, etc.), use ZERO code blocks — use sections with examples, callouts, or mermaid diagrams instead. Do NOT use code blocks for templates, checklists, or structured text. Rules:
    - Set metadata.language to the programming language (e.g., "typescript", "python", "sql", "bash")
    - Code must be COMPLETE and runnable — no pseudocode, no "// ..." stubs, no "implement here" placeholders
    - Each code block illustrates exactly one concept
@@ -121,7 +124,6 @@ A "summary" field (separate from the summary block) — a 1-2 sentence plain tex
 ## Adapting to non-technical topics
 
 For non-programming topics (business, humanities, science, arts, etc.):
-- Use 0 code blocks. Instead, rely on sections with rich examples, case studies, and scenarios.
 - Mermaid diagrams are still useful for processes, decision trees, concept maps, and relationships.
 - Callouts work well for key definitions, common misconceptions, and expert insights.
 - Sections should use real-world examples, historical cases, or concrete scenarios — not abstract definitions.
@@ -145,6 +147,8 @@ export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer 
    - Questions should test UNDERSTANDING, not just recall — ask "why" and "what happens when", not "what is the name of"
    - The content field should be empty string for quiz blocks (all data is in metadata)
    - Distractors should be plausible (common misconceptions), not obviously wrong
+   - VERIFY CONSISTENCY: After writing the question, options, correctIndex, and explanation, check that the explanation's reasoning leads to the option at correctIndex — not a different one. If the explanation derives a different answer, fix the correctIndex to match. This is critical for math, calculation, and metric-based questions.
+   - Each quiz MUST test a DIFFERENT concept from the lesson. If generating 2 quizzes, they should cover two distinct sections — never ask the same underlying question with different wording.
 
 2. **exercise** block (exactly 1): A practical challenge the learner can do to apply what they learned. Rules:
    - Content is a markdown description of the exercise

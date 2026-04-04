@@ -29,12 +29,14 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
   const password = flags['password'];
   const concurrency = flags['concurrency'];
   const personas = flags['personas'];
+  const lessons = flags['lessons'];
 
   const missing: string[] = [];
   if (!email) missing.push('--email');
   if (!password) missing.push('--password');
   if (!concurrency) missing.push('--concurrency');
   if (!personas) missing.push('--personas');
+  if (lessons === undefined) missing.push('--lessons');
 
   if (missing.length > 0) {
     console.error('Missing required flags: ' + missing.join(', '));
@@ -47,6 +49,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     console.error('  --password <pass>     User password');
     console.error('  --concurrency <n>     Max parallel personas');
     console.error('  --personas <n>        Number of personas to generate');
+    console.error('  --lessons <n>         Lessons to generate per persona (0 = skip)');
     console.error('');
     console.error('Optional:');
     console.error('  --api-url <url>       API base URL (default: http://localhost:4000)');
@@ -60,6 +63,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     apiUrl: flags['api-url'] ?? 'http://localhost:4000',
     concurrency: parseInt(concurrency, 10),
     personaCount: parseInt(personas, 10),
+    maxLessons: parseInt(lessons, 10),
     outputDir: path.resolve(__dirname, 'output'),
     enableChatReview: boolFlags.has('chat'),
   };
@@ -70,7 +74,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
 async function main() {
   const { personaCount, ...config } = parseArgs();
 
-  console.log('Debug Orchestrator — Course Creation Flow Testing'.bold.cyan);
+  console.log('Debug Orchestrator — Course Creation Flow Testing'.cyan);
   console.log('─'.repeat(50).dim);
 
   // Authenticate

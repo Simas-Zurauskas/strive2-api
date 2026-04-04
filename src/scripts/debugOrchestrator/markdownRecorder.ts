@@ -1,6 +1,6 @@
 import { writeFile, mkdir } from 'fs/promises';
 import path from 'path';
-import type { Persona, StepResult, CourseData, ClarifyQuestion, DepthPreviews, CourseStructure } from './types';
+import type { Persona, StepResult, CourseData, ClarifyQuestion, DepthPreviews, CourseStructure, ILessonContent, ILessonBlock } from './types';
 
 export class MarkdownRecorder {
   private sections: string[] = [];
@@ -173,7 +173,50 @@ ${modulesList}
 `);
   }
 
-  addSummary(totalDurationMs: number, course: CourseData, status: 'completed' | 'failed', error?: string): void {
+  addStep9_LessonGeneration(
+    lessons: {
+      moduleIndex: number;
+      lessonIndex: number;
+      moduleName: string;
+      lessonName: string;
+      content: ILessonContent;
+      generationMs: number;
+    }[],
+  ): void {
+    if (lessons.length === 0) return;
+
+    let md = `---\n\n## Steps 9-10: Lesson Generation (${lessons.length} lessons)\n\n`;
+
+    for (const lesson of lessons) {
+      const { moduleIndex, lessonIndex, moduleName, lessonName, content, generationMs } = lesson;
+      const blocks = content.blocks;
+
+      // Block count by type
+      const typeCounts: Record<string, number> = {};
+      for (const b of blocks) {
+        typeCounts[b.type] = (typeCounts[b.type] || 0) + 1;
+      }
+      const typeCountStr = Object.entries(typeCounts)
+        .map(([t, c]) => `${t}: ${c}`)
+        .join(', ');
+
+      md += `### Lesson [${moduleIndex}/${lessonIndex}]: ${moduleName} → ${lessonName}\n`;
+      md += `- **Generation time:** ${fmtDuration(generationMs)}\n`;
+      md += `- **Blocks:** ${blocks.length} (${typeCountStr})\n`;
+      md += `- **Hero image:** ${content.heroImageUrl ? 'Yes' : 'No'}\n`;
+      md += `- **Summary:** ${content.summary ? truncate(content.summary, 200) : '_none_'}\n\n`;
+
+      md += `<details>\n<summary>Block details (${blocks.length} blocks)</summary>\n\n`;
+      for (const block of blocks) {
+        md += formatBlock(block);
+      }
+      md += `</details>\n\n`;
+    }
+
+    this.sections.push(md);
+  }
+
+  addSummary(totalDurationMs: number, course: CourseData, status: 'completed' | 'failed', error?: string, lessonsGenerated?: number): void {
     const totalLessons = course.structure?.modules.reduce((sum, m) => sum + m.lessons.length, 0) ?? 0;
 
     // Insert summary right after header
@@ -187,7 +230,7 @@ ${modulesList}
 | Depth Selected | ${course.depth ?? 'N/A'} |
 | Modules | ${course.structure?.modules.length ?? 'N/A'} |
 | Total Lessons | ${totalLessons || 'N/A'} |
-${error ? `| Error | ${error} |` : ''}
+${lessonsGenerated !== undefined ? `| Lessons Generated | ${lessonsGenerated} |\n` : ''}${error ? `| Error | ${error} |` : ''}
 `;
 
     // Insert after the header (index 0)
@@ -215,4 +258,90 @@ ${error ? `| Error | ${error} |` : ''}
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function truncate(str: string, maxLen: number): string {
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen) + '...';
+}
+
+function formatBlock(block: ILessonBlock): string {
+  const meta = block.metadata as Record<string, unknown> | null;
+  let md = `**[${block.order}] ${block.type}**`;
+
+  switch (block.type) {
+    case 'intro':
+    case 'summary':
+      md += `\n> ${truncate(block.content.replace(/\n/g, ' '), 200)}\n\n`;
+      break;
+
+    case 'section':
+      md += `\n> ${truncate(block.content.replace(/\n/g, ' '), 500)}\n\n`;
+      break;
+
+    case 'code':
+      md += ` (${meta?.language ?? 'unknown'})\n`;
+      md += '```' + (meta?.language ?? '') + '\n';
+      md += truncate(block.content, 500) + '\n';
+      md += '```\n\n';
+      break;
+
+    case 'quiz': {
+      const q = meta as { question?: string; options?: string[]; correctIndex?: number; explanation?: string } | null;
+      md += '\n';
+      md += `- **Question:** ${q?.question ?? block.content}\n`;
+      if (q?.options) {
+        for (let i = 0; i < q.options.length; i++) {
+          const marker = i === q.correctIndex ? ' **(correct)**' : '';
+          md += `  - ${q.options[i]}${marker}\n`;
+        }
+      }
+      if (q?.explanation) md += `- **Explanation:** ${q.explanation}\n`;
+      md += '\n';
+      break;
+    }
+
+    case 'exercise': {
+      const ex = meta as { language?: string; starterCode?: string; expectedOutput?: string } | null;
+      md += ex?.language ? ` (${ex.language})\n` : '\n';
+      md += `- **Content:** ${truncate(block.content, 150)}\n`;
+      if (ex?.starterCode) {
+        md += '```' + (ex.language ?? '') + '\n';
+        md += truncate(ex.starterCode, 200) + '\n';
+        md += '```\n';
+      }
+      if (ex?.expectedOutput) md += `- **Expected output:** ${ex.expectedOutput}\n`;
+      md += '\n';
+      break;
+    }
+
+    case 'mermaid': {
+      const diag = meta as { diagramType?: string } | null;
+      md += ` (${diag?.diagramType ?? 'unknown'})\n`;
+      md += '```mermaid\n';
+      md += truncate(block.content, 600) + '\n';
+      md += '```\n\n';
+      break;
+    }
+
+    case 'callout': {
+      const co = meta as { variant?: string } | null;
+      md += ` (${co?.variant ?? 'info'})\n`;
+      md += `> ${truncate(block.content.replace(/\n/g, ' '), 200)}\n\n`;
+      break;
+    }
+
+    case 'links':
+      md += '\n' + block.content + '\n\n';
+      break;
+
+    case 'image':
+      md += '\n- ' + truncate(block.content, 200) + '\n\n';
+      break;
+
+    default:
+      md += '\n> ' + truncate(block.content, 200) + '\n\n';
+  }
+
+  return md;
 }
