@@ -50,7 +50,7 @@ export const upsertProgressSchema = z.object({
   exerciseAttempt: z
     .object({
       blockId: z.string(),
-      code: z.string().max(50000),
+      code: z.string().max(200000),
       passed: z.boolean(),
     })
     .optional(),

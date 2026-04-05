@@ -1,5 +1,6 @@
 import { RunnableConfig } from '@langchain/core/runnables';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { z } from 'zod';
 import { getInteractiveModel } from '@lib/langchain';
 import { withRetry } from '@lib/retry';
 import { LessonState } from '../state';
@@ -19,6 +20,12 @@ export const interactiveGeneration = async (state: LessonState, config?: Runnabl
   const summaryBlock = state.contentBlocks.find((b) => b.type === 'summary');
   const maxContentOrder = Math.max(...state.contentBlocks.map((b) => b.order));
 
+  const codeLanguages = [...new Set(
+    state.contentBlocks
+      .filter((b) => b.type === 'code' && b.metadata?.language)
+      .map((b) => b.metadata!.language as string),
+  )];
+
   const humanMessage = `## Lesson content
 
 ${formatBlocksForContext(state.contentBlocks)}
@@ -27,7 +34,7 @@ ${formatBlocksForContext(state.contentBlocks)}
 
 Title: ${state.lessonName}
 Description: ${state.lessonDescription}
-Course depth: ${state.depth}
+Course depth: ${state.depth}${codeLanguages.length > 0 ? `\nCode languages used in lesson: ${codeLanguages.join(', ')}` : ''}
 
 ## Positioning instructions
 
@@ -41,7 +48,7 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
     const model = getInteractiveModel().withStructuredOutput(interactiveOutputSchema);
     const result = await withRetry(() =>
       model.invoke([new SystemMessage(INTERACTIVE_SYSTEM_PROMPT), new HumanMessage(humanMessage)]),
-    );
+    ) as z.infer<typeof interactiveOutputSchema>;
 
     // Emit each interactive block
     for (const block of result.blocks) {
