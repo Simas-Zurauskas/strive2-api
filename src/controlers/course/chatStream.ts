@@ -6,7 +6,7 @@ import { getUserCourse } from '@services/courseDbService';
 import { courseDesignAgent } from '@src/lib/ai/agents/courseDesign';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { getUtilityModel } from '@lib/langchain';
-import ChatSessionModel from '@models/ChatSessionModel';
+import CourseDesignChatModel from '@models/CourseDesignChatModel';
 
 const formatAnswersFromCourse = (answers: Record<string, unknown> | null) =>
   Object.entries(answers ?? {}).map(([questionId, answer]) => ({
@@ -137,7 +137,7 @@ export const chatStreamController = asyncHandler(async (req, res) => {
   }
 
   // Load persisted chat history (compress if long to prevent context window bloat)
-  const chatSession = await ChatSessionModel.findOne({ courseId, userId }).lean();
+  const chatSession = await CourseDesignChatModel.findOne({ courseId, userId }).lean();
   const rawHistory = (chatSession?.messages ?? []) as { role: string; content: string }[];
   const history = await compressHistory(rawHistory);
 

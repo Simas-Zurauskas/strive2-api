@@ -1,5 +1,5 @@
 import { HumanMessage, AIMessage, AIMessageChunk } from '@langchain/core/messages';
-import ChatSessionModel from '@models/ChatSessionModel';
+import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import CourseModel from '@models/CourseModel';
 import { NodeFunction } from '../types';
 
@@ -46,7 +46,7 @@ export const saveMessages: NodeFunction = async (state) => {
   toSave.forEach((m) => console.log(`[agent:saveMessages]   ${m.role}: ${m.content.slice(0, 80)}`.gray));
 
   if (toSave.length > 0) {
-    await ChatSessionModel.findOneAndUpdate(
+    await CourseDesignChatModel.findOneAndUpdate(
       { courseId, userId },
       { $push: { messages: { $each: toSave } } },
       { upsert: true, returnDocument: 'after' },

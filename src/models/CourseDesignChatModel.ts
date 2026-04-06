@@ -3,25 +3,25 @@ import { CHAT_ROLES } from '@lib/constants';
 
 // ── Types ──────────────────────────────────────────────────
 
-export interface IChatMessage {
+export interface ICourseDesignChatMessage {
   role: (typeof CHAT_ROLES)[number];
   content: string;
   createdAt: Date;
 }
 
-export interface IChatSession {
+export interface ICourseDesignChat {
   userId: Types.ObjectId;
   courseId: Types.ObjectId;
-  messages: IChatMessage[];
+  messages: ICourseDesignChatMessage[];
   createdAt: Date;
   updatedAt: Date;
 }
 
-export type ChatSessionDocument = HydratedDocument<IChatSession>;
+export type CourseDesignChatDocument = HydratedDocument<ICourseDesignChat>;
 
 // ── Schema ─────────────────────────────────────────────────
 
-const messageSchema = new Schema<IChatMessage>(
+const messageSchema = new Schema<ICourseDesignChatMessage>(
   {
     role: {
       type: String,
@@ -40,7 +40,7 @@ const messageSchema = new Schema<IChatMessage>(
   { _id: true },
 );
 
-const schema = new Schema<IChatSession>(
+const schema = new Schema<ICourseDesignChat>(
   {
     userId: {
       type: Schema.Types.ObjectId,
@@ -72,6 +72,6 @@ schema.index({ userId: 1, courseId: 1 }, { unique: true });
 
 // ── Model ──────────────────────────────────────────────────
 
-const ChatSessionModel = mongoose.model<IChatSession>('ChatSession', schema, 'ChatSession');
+const CourseDesignChatModel = mongoose.model<ICourseDesignChat>('CourseDesignChat', schema, 'CourseDesignChat');
 
-export default ChatSessionModel;
+export default CourseDesignChatModel;

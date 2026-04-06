@@ -1,12 +1,8 @@
 import asyncHandler from 'express-async-handler';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
-import LessonContentModel from '@models/LessonContentModel';
-import ChatSessionModel from '@models/ChatSessionModel';
-import UserLessonProgressModel from '@models/UserLessonProgressModel';
-import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
-import { deleteByPrefix } from '@services/s3Service';
+import CourseDesignChatModel from '@models/CourseDesignChatModel';
+import { cleanupCourseContent } from '@services/courseCleanupService';
 
 /**
  * @swagger
@@ -56,20 +52,10 @@ export const deleteCourseController = asyncHandler(async (req, res) => {
 
   await Promise.all([
     JobModel.deleteMany({ courseId: course._id }),
-    LessonContentModel.deleteMany({ courseId: course._id }),
-    ChatSessionModel.deleteMany({ courseId: course._id }),
-    UserLessonProgressModel.deleteMany({ courseId: course._id }),
-    UserModuleQuizProgressModel.deleteMany({ courseId: course._id }),
-    ModuleQuizContentModel.deleteMany({ courseId: course._id }),
+    CourseDesignChatModel.deleteMany({ courseId: course._id }),
+    cleanupCourseContent(courseId),
   ]);
   await CourseModel.findByIdAndDelete(courseId);
-
-  // Clean up S3 files (hero images, future assets) — fire and forget
-  deleteByPrefix(`lessons/${courseId}/`).then((count) => {
-    if (count > 0) console.log(`[API] S3 cleanup: deleted ${count} objects for course ${courseId}`.gray);
-  }).catch((e) => {
-    console.warn(`[API] S3 cleanup failed for course ${courseId}:`, e instanceof Error ? e.message : e);
-  });
 
   console.log(`[API] Course deleted: ${courseId}`.green);
 

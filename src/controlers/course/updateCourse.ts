@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { updateCourseSchema } from './validation';
-import { updateCourse } from '@services/courseDbService';
+import { updateCourse, getUserCourse } from '@services/courseDbService';
 
 /**
  * @swagger
@@ -44,13 +44,26 @@ import { updateCourse } from '@services/courseDbService';
  *               properties:
  *                 data:
  *                   $ref: '#/components/schemas/Course'
+ *       403:
+ *         description: Cannot transition accepted course back to creating
  */
 export const updateCourseController = asyncHandler(async (req, res) => {
   const updates = updateCourseSchema.parse(req.body);
   const courseId = req.params.id as string;
+  const userId = req.userId!;
+
+  // Guard: accepted courses cannot be moved back to creating status
+  if (updates.status === 'creating') {
+    const existing = await getUserCourse({ userId, courseId });
+
+    if (existing.status === 'ready') {
+      res.status(403).json({ message: 'Cannot edit an accepted course. Course structure is locked once accepted.' });
+      return;
+    }
+  }
 
   console.log(`[API] Update course: ${courseId} fields: ${Object.keys(updates).join(', ')}`.cyan);
-  const course = await updateCourse({ userId: req.userId!, courseId, updates });
+  const course = await updateCourse({ userId, courseId, updates });
   console.log(`[API] Course updated: ${courseId}`.green);
 
   res.status(200).json({ data: course });

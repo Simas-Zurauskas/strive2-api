@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourse } from '@services/courseDbService';
-import ChatSessionModel from '@models/ChatSessionModel';
+import CourseDesignChatModel from '@models/CourseDesignChatModel';
 
 /**
  * @swagger
@@ -49,7 +49,7 @@ export const getChatHistoryController = asyncHandler(async (req, res) => {
 
   await getUserCourse({ userId, courseId });
 
-  const session = await ChatSessionModel.findOne({ courseId, userId }).lean();
+  const session = await CourseDesignChatModel.findOne({ courseId, userId }).lean();
 
   res.json({
     data: {
