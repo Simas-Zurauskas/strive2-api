@@ -7,6 +7,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  sync:
-    uses: Simas-Zurauskas/strive2-ci/.github/workflows/notion-sync.yml@master
+  sync-technical:
+    uses: Simas-Zurauskas/strive2-ci/.github/workflows/notion-sync-technical.yml@master
+    secrets: inherit
+
+  sync-product:
+    uses: Simas-Zurauskas/strive2-ci/.github/workflows/notion-sync-product.yml@master
     secrets: inherit
