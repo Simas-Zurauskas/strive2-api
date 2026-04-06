@@ -13,8 +13,8 @@ import {
 import { protect } from '@middleware/authMiddleware';
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 20, // max 20 requests per window per IP
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  limit: 30,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   message: { message: 'Too many requests, please try again later' },

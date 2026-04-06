@@ -3,7 +3,7 @@ import UserModel, { AuthProvider } from '@models/UserModel';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
-import ChatSessionModel from '@models/ChatSessionModel';
+import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
@@ -78,7 +78,7 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
   await Promise.all([
     JobModel.deleteMany({ userId: user._id }),
     LessonContentModel.deleteMany({ courseId: { $in: courseIds } }),
-    ChatSessionModel.deleteMany({ userId: user._id }),
+    CourseDesignChatModel.deleteMany({ userId: user._id }),
     UserLessonProgressModel.deleteMany({ userId: user._id }),
     UserModuleQuizProgressModel.deleteMany({ userId: user._id }),
     ModuleQuizContentModel.deleteMany({ courseId: { $in: courseIds } }),

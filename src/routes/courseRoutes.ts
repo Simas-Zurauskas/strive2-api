@@ -26,6 +26,7 @@ import {
   submitQuizAttemptController,
   getModuleQuizProgressController,
   getReviewsDueController,
+  getEditImpactController,
 } from '@controlers/course';
 import { protect } from '@middleware/authMiddleware';
 import { validateObjectId } from '@middleware/validateObjectId';
@@ -45,6 +46,9 @@ router.get('/', protect, listCoursesController);
 router.get('/:id', protect, validateObjectId('id'), getCourseController);
 router.patch('/:id', protect, validateObjectId('id'), updateCourseController);
 router.delete('/:id', protect, validateObjectId('id'), deleteCourseController);
+
+// Edit impact assessment
+router.get('/:courseId/edit-impact', protect, validateObjectId('courseId'), getEditImpactController);
 
 // Chat (course design agent)
 router.post('/:courseId/chat', protect, validateObjectId('courseId'), chatStreamController);

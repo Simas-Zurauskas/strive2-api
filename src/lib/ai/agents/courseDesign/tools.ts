@@ -2,7 +2,10 @@ import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { TavilySearch } from '@langchain/tavily';
 import { refineCourseStructure } from '@services/courseService';
+import { cleanupCourseContent } from '@services/courseCleanupService';
 import CourseModel from '@models/CourseModel';
+import LessonContentModel from '@models/LessonContentModel';
+import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import { TAVILY_API_KEY } from '@conf/env';
 import { CourseDepth } from '@lib/constants';
 
@@ -20,9 +23,15 @@ export const modifyStructure = tool(
     }
 
     try {
-      // Load feedback history from course
+      // Load feedback history and check for existing content/progress
       const course = await CourseModel.findById(courseId).select('feedbackHistory').lean();
       const feedbackHistory = (course?.feedbackHistory as string[]) ?? [];
+
+      const [contentCount, progressCount] = await Promise.all([
+        LessonContentModel.countDocuments({ courseId }),
+        UserLessonProgressModel.countDocuments({ courseId }),
+      ]);
+      const hasExistingContent = contentCount > 0 || progressCount > 0;
 
       // Call refineCourseStructure directly (skip the job system for inline chat operations)
       const result = await refineCourseStructure({
@@ -42,17 +51,23 @@ export const modifyStructure = tool(
         pendingFeedback: null,
       });
 
+      // Clean up orphaned content/progress if structure changed on a course with existing data
+      if (hasExistingContent) {
+        await cleanupCourseContent(courseId);
+      }
+
       // Update in-memory state for the next chat turn
       if (config?.configurable) {
         config.configurable.currentStructure = { reasoning: result.reasoning, modules: result.modules };
       }
 
-      console.log(`[tool:modify_structure] ✓ Done — ${result.modules.length} modules`.green);
+      console.log(`[tool:modify_structure] ✓ Done — ${result.modules.length} modules${hasExistingContent ? ' (content cleared)' : ''}`.green);
       return JSON.stringify({
         success: true,
         courseName: result.courseName,
         modules: result.modules,
         reasoning: result.reasoning,
+        contentCleared: hasExistingContent,
       });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

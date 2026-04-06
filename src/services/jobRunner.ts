@@ -8,6 +8,7 @@ import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews } from './courseService';
+import { cleanupCourseContent } from './courseCleanupService';
 import { jobEvents } from './jobEvents';
 
 // ── Concurrency & timeout ───────────────────────────────
@@ -95,10 +96,17 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       await CourseModel.findByIdAndUpdate(courseId, {
         clarifyData: result,
         ...(result.courseName && { name: result.courseName }),
+        // Clear all downstream data — answers may no longer match new questions
+        depthPreviews: null,
+        depth: null,
+        structure: null,
+        feedbackHistory: [],
       });
+      await cleanupCourseContent(courseId);
       return;
     }
     case 'generate_structure': {
+      await cleanupCourseContent(courseId);
       const result = await generateCourseStructure({
         goal: course.goal,
         answers: formatCourseAnswers(course),
@@ -112,6 +120,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       return;
     }
     case 'refine_structure': {
+      await cleanupCourseContent(courseId);
       const feedback = course.pendingFeedback ?? '';
       const result = await refineCourseStructure({
         goal: course.goal,
@@ -176,7 +185,13 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       return;
     }
     case 'generate_depth_previews': {
-      await CourseModel.findByIdAndUpdate(courseId, { depthPreviews: null });
+      // Clear downstream data — depth selection and structure are now stale
+      await CourseModel.findByIdAndUpdate(courseId, {
+        depthPreviews: null,
+        structure: null,
+        feedbackHistory: [],
+      });
+      await cleanupCourseContent(courseId);
       const result = await generateDepthPreviews({
         goal: course.goal,
         answers: formatCourseAnswers(course),
