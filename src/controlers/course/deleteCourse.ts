@@ -3,6 +3,7 @@ import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import { cleanupCourseContent } from '@services/courseCleanupService';
+import { getUserCourse } from '@services/courseDbService';
 
 /**
  * @swagger
@@ -35,29 +36,17 @@ import { cleanupCourseContent } from '@services/courseCleanupService';
  *                       type: boolean
  */
 export const deleteCourseController = asyncHandler(async (req, res) => {
-  const courseId = req.params.id as string;
   const userId = req.userId!;
-
-  const course = await CourseModel.findById(courseId);
-
-  if (!course) {
-    res.status(404);
-    throw new Error('Course not found');
-  }
-
-  if (course.userId.toString() !== userId) {
-    res.status(403);
-    throw new Error('Forbidden');
-  }
+  const course = await getUserCourse({ userId, courseId: req.params.id as string });
 
   await Promise.all([
     JobModel.deleteMany({ courseId: course._id }),
     CourseDesignChatModel.deleteMany({ courseId: course._id }),
-    cleanupCourseContent(courseId),
+    cleanupCourseContent(course._id.toString()),
   ]);
-  await CourseModel.findByIdAndDelete(courseId);
+  await CourseModel.findByIdAndDelete(course._id);
 
-  console.log(`[API] Course deleted: ${courseId}`.green);
+  console.log(`[API] Course deleted: ${course._id}`.green);
 
   res.status(200).json({ data: { deleted: true } });
 });

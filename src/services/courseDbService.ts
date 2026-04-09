@@ -24,11 +24,15 @@ export const listUserCourses = async (params: { userId: string }): Promise<ICour
 
 // ── Get single ─────────────────────────────────────────────
 
+const isObjectId = (value: string): boolean => /^[a-f0-9]{24}$/.test(value);
+
 export const getUserCourse = async (params: {
   userId: string;
   courseId: string;
 }): Promise<CourseDocument> => {
-  const course = await CourseModel.findById(params.courseId);
+  const course = isObjectId(params.courseId)
+    ? await CourseModel.findById(params.courseId)
+    : await CourseModel.findOne({ slug: params.courseId, userId: params.userId });
 
   if (!course) {
     throw new Error('Course not found');

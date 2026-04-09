@@ -99,7 +99,6 @@ const writeSSE = (res: import('express').Response, payload: Record<string, unkno
  *         description: SSE stream of chat response
  */
 export const chatStreamController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
 
   // AI SDK v3 sends messages with `parts` instead of `content` — normalise
@@ -123,7 +122,8 @@ export const chatStreamController = asyncHandler(async (req, res) => {
 
   const { messages: rawMessages } = parseResult.data;
 
-  const course = await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   if (!course.structure) {
     res.status(400);

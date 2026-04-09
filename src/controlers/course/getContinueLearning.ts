@@ -21,10 +21,13 @@ import { getContinueLearning } from '@services/progressService';
  *                 data:
  *                   type: object
  *                   nullable: true
- *                   required: [courseId, courseName, courseGoal, moduleName, lessonName, moduleIndex, lessonIndex, courseProgress]
+ *                   required: [courseId, courseSlug, courseName, courseGoal, moduleName, lessonName, moduleIndex, lessonIndex, courseProgress]
  *                   properties:
  *                     courseId:
  *                       type: string
+ *                     courseSlug:
+ *                       type: string
+ *                       nullable: true
  *                     courseName:
  *                       type: string
  *                     courseGoal:

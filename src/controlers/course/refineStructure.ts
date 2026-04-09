@@ -47,12 +47,12 @@ import CourseModel from '@models/CourseModel';
  *                       type: string
  */
 export const refineStructureController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
   const parsed = refineStructureSchema.parse(req.body);
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   console.log(`[API] Submitting refine structure job, courseId: ${courseId} feedback: ${parsed.feedback}`.cyan);
-  await getUserCourse({ userId, courseId });
 
   await CourseModel.findByIdAndUpdate(courseId, { pendingFeedback: parsed.feedback });
 

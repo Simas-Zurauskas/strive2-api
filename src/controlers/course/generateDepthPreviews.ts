@@ -33,10 +33,9 @@ import { getUserCourse } from '@services/courseDbService';
  *                       type: string
  */
 export const generateDepthPreviewsController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
-
-  await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   console.log(`[API] Submitting depth previews job, courseId: ${courseId}`.cyan);
   const jobId = await submitJob({

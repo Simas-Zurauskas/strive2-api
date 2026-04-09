@@ -60,13 +60,11 @@ import { upsertProgressSchema, parseIndexParam } from './validation';
  *                   $ref: '#/components/schemas/UserLessonProgress'
  */
 export const upsertLessonProgressController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
   const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
   const lessonIndex = parseIndexParam(req.params.lessonIndex, 'lessonIndex');
-
-  // Verify ownership
-  await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   const body = upsertProgressSchema.parse(req.body);
 

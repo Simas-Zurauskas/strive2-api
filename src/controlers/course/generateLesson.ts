@@ -48,11 +48,10 @@ import { generateLessonSchema, assertPreviousLessonGenerated } from './validatio
  *                       type: string
  */
 export const generateLessonController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
   const { moduleIndex, lessonIndex } = generateLessonSchema.parse(req.body);
-
-  const course = await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   // Validate that the module and lesson exist in the structure
   if (!course.structure?.modules) {

@@ -43,12 +43,11 @@ import { parseIndexParam } from './validation';
  *         description: Lesson content not yet generated
  */
 export const getLessonContentController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
   const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
   const lessonIndex = parseIndexParam(req.params.lessonIndex, 'lessonIndex');
-
-  await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   const content = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
 

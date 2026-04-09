@@ -6,6 +6,7 @@ import { COURSE_STATUSES, CourseStatus } from '@lib/constants';
 export interface ICourse {
   userId: Types.ObjectId;
   name: string;
+  slug: string | null;
   status: CourseStatus;
   goal: string;
   clarifyData: {
@@ -54,6 +55,7 @@ const schema = new Schema<ICourse>(
       index: true,
     },
     name: { type: String, default: '' },
+    slug: { type: String, default: null },
     status: {
       type: String,
       enum: [...COURSE_STATUSES],
@@ -107,6 +109,7 @@ const schema = new Schema<ICourse>(
 );
 
 schema.index({ userId: 1, updatedAt: -1 });
+schema.index({ userId: 1, slug: 1 }, { unique: true, sparse: true });
 
 // ── Model ──────────────────────────────────────────────────
 
