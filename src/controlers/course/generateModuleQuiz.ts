@@ -40,11 +40,10 @@ import { parseIndexParam } from './validation';
  *                       type: string
  */
 export const generateModuleQuizController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
   const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
-
-  const course = await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   const mod = course.structure?.modules?.[moduleIndex];
   if (!mod) {

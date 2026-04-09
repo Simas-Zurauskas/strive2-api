@@ -47,14 +47,13 @@ import { updateCourse, getUserCourse } from '@services/courseDbService';
  */
 export const updateCourseController = asyncHandler(async (req, res) => {
   const updates = updateCourseSchema.parse(req.body);
-  const courseId = req.params.id as string;
   const userId = req.userId!;
+  const resolved = await getUserCourse({ userId, courseId: req.params.id as string });
+  const courseId = resolved._id.toString();
 
   // Guard: accepted courses cannot be moved back to creating status
   if (updates.status === 'creating') {
-    const existing = await getUserCourse({ userId, courseId });
-
-    if (existing.status === 'ready') {
+    if (resolved.status === 'ready') {
       res.status(403).json({ message: 'Cannot edit an accepted course. Course structure is locked once accepted.' });
       return;
     }

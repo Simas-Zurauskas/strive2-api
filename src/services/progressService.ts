@@ -136,6 +136,7 @@ export const getCourseProgress = async (params: {
 
 interface ContinueLearningResult {
   courseId: string;
+  courseSlug: string | null;
   courseName: string;
   courseGoal: string;
   moduleName: string;
@@ -176,6 +177,7 @@ export const getContinueLearning = async (params: {
 
   return {
     courseId: latest.courseId.toString(),
+    courseSlug: course.slug ?? null,
     courseName: course.name,
     courseGoal: course.goal,
     moduleName: mod.name,
@@ -368,8 +370,12 @@ export const submitQuizAttempt = async (params: SubmitQuizAttemptParams): Promis
     // First attempt — set initial interval based on tier
     reviewIntervalDays = REVIEW_INITIAL_INTERVALS[masteryTier];
     consecutiveSuccesses = 0;
+  } else if (masteryTier === 'needs_review') {
+    // Still failing — keep interval short regardless of history
+    reviewIntervalDays = REVIEW_INITIAL_INTERVALS.needs_review;
+    consecutiveSuccesses = 0;
   } else if (TIER_ORDER[masteryTier] >= TIER_ORDER[previousBestTier]) {
-    // Maintained or improved — double the interval
+    // Maintained or improved (passed/mastered) — double the interval
     const prev = existing.reviewIntervalDays || REVIEW_INITIAL_INTERVALS[previousBestTier];
     reviewIntervalDays = Math.min(prev * 2, REVIEW_MAX_INTERVAL_DAYS);
     consecutiveSuccesses = (existing.consecutiveSuccesses || 0) + 1;
@@ -488,6 +494,7 @@ export const getCourseQuizProgress = async (params: {
 
 export interface ReviewDueItem {
   courseId: string;
+  courseSlug: string | null;
   courseName: string;
   moduleIndex: number;
   moduleName: string;
@@ -517,7 +524,7 @@ export const getReviewsDue = async (params: { userId: string }): Promise<ReviewD
   // Load course data for names and total module count
   const courseIds = [...byCourse.keys()];
   const courses = await CourseModel.find({ _id: { $in: courseIds } })
-    .select('name structure')
+    .select('name slug structure')
     .lean();
   const courseMap = new Map(courses.map((c) => [c._id.toString(), c]));
 
@@ -539,6 +546,7 @@ export const getReviewsDue = async (params: { userId: string }): Promise<ReviewD
       const mod = course.structure.modules[d.moduleIndex];
       results.push({
         courseId: courseIdStr,
+        courseSlug: course.slug ?? null,
         courseName: course.name || 'Untitled Course',
         moduleIndex: d.moduleIndex,
         moduleName: mod?.name || `Module ${d.moduleIndex + 1}`,

@@ -37,11 +37,10 @@ import { parseIndexParam } from './validation';
  *                     - $ref: '#/components/schemas/UserModuleQuizProgress'
  */
 export const getModuleQuizProgressController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
   const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
-
-  await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   const progress = await getModuleQuizProgress({ userId, courseId, moduleIndex });
 

@@ -421,9 +421,10 @@ export const schemas: SchemaMap = {
 
   ReviewDueItem: {
     type: 'object',
-    required: ['courseId', 'courseName', 'moduleIndex', 'moduleName', 'bestScore', 'bestTier', 'nextReviewAt', 'reviewReason'],
+    required: ['courseId', 'courseSlug', 'courseName', 'moduleIndex', 'moduleName', 'bestScore', 'bestTier', 'nextReviewAt', 'reviewReason'],
     properties: {
       courseId: { type: 'string' },
+      courseSlug: { type: 'string', nullable: true },
       courseName: { type: 'string' },
       moduleIndex: { type: 'integer' },
       moduleName: { type: 'string' },
@@ -441,6 +442,7 @@ export const schemas: SchemaMap = {
       _id: { type: 'string' },
       userId: { type: 'string' },
       name: { type: 'string' },
+      slug: { type: 'string', nullable: true },
       status: { $ref: '#/components/schemas/CourseStatus' },
       goal: { type: 'string' },
       clarifyData: { $ref: '#/components/schemas/ClarifyResponse' },

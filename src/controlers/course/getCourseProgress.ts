@@ -41,10 +41,9 @@ import { getCourseProgress, getCourseQuizProgress } from '@services/progressServ
  *                       $ref: '#/components/schemas/CourseProgressStats'
  */
 export const getCourseProgressController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
-
-  const course = await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
   const totalModules = course.structure?.modules?.length ?? 0;
 
   const [lessons, quizzes] = await Promise.all([

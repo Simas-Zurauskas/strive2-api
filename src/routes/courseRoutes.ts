@@ -45,40 +45,40 @@ router.get('/reviews-due', protect, getReviewsDueController);
 // Course CRUD
 router.post('/', protect, createCourseController);
 router.get('/', protect, listCoursesController);
-router.get('/:id', protect, validateObjectId('id'), getCourseController);
-router.patch('/:id', protect, validateObjectId('id'), updateCourseController);
-router.delete('/:id', protect, validateObjectId('id'), deleteCourseController);
+router.get('/:id', protect, getCourseController);
+router.patch('/:id', protect, updateCourseController);
+router.delete('/:id', protect, deleteCourseController);
 
 // Edit impact assessment
-router.get('/:courseId/edit-impact', protect, validateObjectId('courseId'), getEditImpactController);
+router.get('/:courseId/edit-impact', protect, getEditImpactController);
 
 // Chat (course design agent)
-router.post('/:courseId/chat', protect, validateObjectId('courseId'), chatStreamController);
-router.get('/:courseId/chat/history', protect, validateObjectId('courseId'), getChatHistoryController);
+router.post('/:courseId/chat', protect, chatStreamController);
+router.get('/:courseId/chat/history', protect, getChatHistoryController);
 
 // AI generation (scoped to a course)
-router.post('/:courseId/clarify', protect, validateObjectId('courseId'), clarifyCourseController);
-router.post('/:courseId/generate-structure', protect, validateObjectId('courseId'), generateStructureController);
-router.post('/:courseId/depth-previews', protect, validateObjectId('courseId'), generateDepthPreviewsController);
-router.post('/:courseId/refine-structure', protect, validateObjectId('courseId'), refineStructureController);
-router.post('/:courseId/generate-lesson', protect, validateObjectId('courseId'), generateLessonController);
-router.post('/:courseId/stream-lesson', protect, validateObjectId('courseId'), streamLessonContentController);
-router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', protect, validateObjectId('courseId'), getLessonContentController);
+router.post('/:courseId/clarify', protect, clarifyCourseController);
+router.post('/:courseId/generate-structure', protect, generateStructureController);
+router.post('/:courseId/depth-previews', protect, generateDepthPreviewsController);
+router.post('/:courseId/refine-structure', protect, refineStructureController);
+router.post('/:courseId/generate-lesson', protect, generateLessonController);
+router.post('/:courseId/stream-lesson', protect, streamLessonContentController);
+router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', protect, getLessonContentController);
 
 // Progress tracking
-router.get('/:courseId/progress', protect, validateObjectId('courseId'), getCourseProgressController);
-router.post('/:courseId/progress/:moduleIndex/:lessonIndex', protect, validateObjectId('courseId'), upsertLessonProgressController);
-router.get('/:courseId/generated-lessons', protect, validateObjectId('courseId'), getGeneratedLessonsController);
+router.get('/:courseId/progress', protect, getCourseProgressController);
+router.post('/:courseId/progress/:moduleIndex/:lessonIndex', protect, upsertLessonProgressController);
+router.get('/:courseId/generated-lessons', protect, getGeneratedLessonsController);
 
 // Module quizzes
-router.post('/:courseId/module-quiz/:moduleIndex/generate', protect, validateObjectId('courseId'), generateModuleQuizController);
-router.get('/:courseId/module-quiz/:moduleIndex', protect, validateObjectId('courseId'), getModuleQuizContentController);
-router.post('/:courseId/module-quiz/:moduleIndex/submit', protect, validateObjectId('courseId'), submitQuizAttemptController);
-router.get('/:courseId/module-quiz/:moduleIndex/progress', protect, validateObjectId('courseId'), getModuleQuizProgressController);
+router.post('/:courseId/module-quiz/:moduleIndex/generate', protect, generateModuleQuizController);
+router.get('/:courseId/module-quiz/:moduleIndex', protect, getModuleQuizContentController);
+router.post('/:courseId/module-quiz/:moduleIndex/submit', protect, submitQuizAttemptController);
+router.get('/:courseId/module-quiz/:moduleIndex/progress', protect, getModuleQuizProgressController);
 
 // Dev-only: reset quiz (hidden from Swagger)
 if (ENVIRONMENT === 'development') {
-  router.delete('/:courseId/module-quiz/:moduleIndex/reset', protect, validateObjectId('courseId'), resetModuleQuizController);
+  router.delete('/:courseId/module-quiz/:moduleIndex/reset', protect, resetModuleQuizController);
 }
 
 export { router as courseRoutes };

@@ -8,6 +8,7 @@ import LessonContentModel from '@models/LessonContentModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import { TAVILY_API_KEY } from '@conf/env';
 import { CourseDepth } from '@lib/constants';
+import { generateUniqueSlug } from '@lib/slugify';
 
 // ── modify_structure ──────────────────────────────────────
 
@@ -24,7 +25,7 @@ export const modifyStructure = tool(
 
     try {
       // Load feedback history and check for existing content/progress
-      const course = await CourseModel.findById(courseId).select('feedbackHistory').lean();
+      const course = await CourseModel.findById(courseId).select('feedbackHistory userId').lean();
       const feedbackHistory = (course?.feedbackHistory as string[]) ?? [];
 
       const [contentCount, progressCount] = await Promise.all([
@@ -46,6 +47,7 @@ export const modifyStructure = tool(
       // Persist the updated structure and feedback history
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
+        slug: await generateUniqueSlug(course!.userId.toString(), result.courseName),
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [...feedbackHistory, input.instruction],
         pendingFeedback: null,

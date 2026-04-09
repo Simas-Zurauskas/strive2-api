@@ -50,10 +50,9 @@ import { getEditImpact } from '@services/courseCleanupService';
  *                       type: number
  */
 export const getEditImpactController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
-
-  await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   const impact = await getEditImpact(courseId, userId);
 

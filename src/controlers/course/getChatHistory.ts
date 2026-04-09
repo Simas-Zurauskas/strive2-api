@@ -44,10 +44,9 @@ import CourseDesignChatModel from '@models/CourseDesignChatModel';
  *                             format: date-time
  */
 export const getChatHistoryController = asyncHandler(async (req, res) => {
-  const courseId = req.params.courseId as string;
   const userId = req.userId!;
-
-  await getUserCourse({ userId, courseId });
+  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const courseId = course._id.toString();
 
   const session = await CourseDesignChatModel.findOne({ courseId, userId }).lean();
 

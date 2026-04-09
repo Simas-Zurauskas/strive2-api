@@ -10,6 +10,7 @@ import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews } from './courseService';
 import { cleanupCourseContent } from './courseCleanupService';
 import { jobEvents } from './jobEvents';
+import { generateUniqueSlug } from '@lib/slugify';
 
 // ── Concurrency & timeout ───────────────────────────────
 
@@ -95,7 +96,10 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       const result = await clarifyCourse({ goal: course.goal });
       await CourseModel.findByIdAndUpdate(courseId, {
         clarifyData: result,
-        ...(result.courseName && { name: result.courseName }),
+        ...(result.courseName && {
+          name: result.courseName,
+          slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
+        }),
         // Clear all downstream data — answers may no longer match new questions
         depthPreviews: null,
         depth: null,
@@ -114,6 +118,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       });
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
+        slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [],
       });
@@ -134,6 +139,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       });
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
+        slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [...course.feedbackHistory, feedback],
         pendingFeedback: null,
