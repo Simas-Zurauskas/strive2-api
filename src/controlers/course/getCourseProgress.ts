@@ -27,12 +27,16 @@ import { getCourseProgress, getCourseQuizProgress } from '@services/progressServ
  *               properties:
  *                 data:
  *                   type: object
- *                   required: [lessons, stats]
+ *                   required: [lessons, quizzes, stats]
  *                   properties:
  *                     lessons:
  *                       type: array
  *                       items:
  *                         $ref: '#/components/schemas/UserLessonProgress'
+ *                     quizzes:
+ *                       type: array
+ *                       items:
+ *                         $ref: '#/components/schemas/CourseQuizProgressItem'
  *                     stats:
  *                       $ref: '#/components/schemas/CourseProgressStats'
  */

@@ -25,3 +25,4 @@ export { submitQuizAttemptController } from './submitQuizAttempt';
 export { getModuleQuizProgressController } from './getModuleQuizProgress';
 export { getReviewsDueController } from './getReviewsDue';
 export { getEditImpactController } from './getEditImpact';
+export { resetModuleQuizController } from './resetModuleQuiz';

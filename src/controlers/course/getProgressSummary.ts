@@ -22,7 +22,7 @@ import { getProgressSummary } from '@services/progressService';
  *                   type: array
  *                   items:
  *                     type: object
- *                     required: [courseId, total, completed, percentage]
+ *                     required: [courseId, total, completed, percentage, lastModuleIndex, lastLessonIndex]
  *                     properties:
  *                       courseId:
  *                         type: string
@@ -32,6 +32,12 @@ import { getProgressSummary } from '@services/progressService';
  *                         type: integer
  *                       percentage:
  *                         type: integer
+ *                       lastModuleIndex:
+ *                         type: integer
+ *                         nullable: true
+ *                       lastLessonIndex:
+ *                         type: integer
+ *                         nullable: true
  */
 export const getProgressSummaryController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

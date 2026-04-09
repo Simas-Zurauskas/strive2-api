@@ -20,6 +20,8 @@ import { getReviewsDue } from '@services/progressService';
  *               properties:
  *                 data:
  *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/ReviewDueItem'
  */
 export const getReviewsDueController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

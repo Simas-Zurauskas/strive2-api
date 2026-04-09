@@ -27,7 +27,9 @@ import {
   getModuleQuizProgressController,
   getReviewsDueController,
   getEditImpactController,
+  resetModuleQuizController,
 } from '@controlers/course';
+import { ENVIRONMENT } from '@conf/env';
 import { protect } from '@middleware/authMiddleware';
 import { validateObjectId } from '@middleware/validateObjectId';
 
@@ -73,5 +75,10 @@ router.post('/:courseId/module-quiz/:moduleIndex/generate', protect, validateObj
 router.get('/:courseId/module-quiz/:moduleIndex', protect, validateObjectId('courseId'), getModuleQuizContentController);
 router.post('/:courseId/module-quiz/:moduleIndex/submit', protect, validateObjectId('courseId'), submitQuizAttemptController);
 router.get('/:courseId/module-quiz/:moduleIndex/progress', protect, validateObjectId('courseId'), getModuleQuizProgressController);
+
+// Dev-only: reset quiz (hidden from Swagger)
+if (ENVIRONMENT === 'development') {
+  router.delete('/:courseId/module-quiz/:moduleIndex/reset', protect, validateObjectId('courseId'), resetModuleQuizController);
+}
 
 export { router as courseRoutes };

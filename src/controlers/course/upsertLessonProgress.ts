@@ -35,8 +35,7 @@ import { upsertProgressSchema, parseIndexParam } from './validation';
  *             type: object
  *             properties:
  *               status:
- *                 type: string
- *                 enum: [not_started, in_progress, completed]
+ *                 $ref: '#/components/schemas/LessonProgressStatus'
  *               notes:
  *                 type: string
  *                 nullable: true

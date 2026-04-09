@@ -29,11 +29,9 @@ import { updateCourse, getUserCourse } from '@services/courseDbService';
  *               answers:
  *                 type: object
  *               depth:
- *                 type: string
- *                 enum: [overview, comprehensive, deep_dive]
+ *                 $ref: '#/components/schemas/CourseDepth'
  *               status:
- *                 type: string
- *                 enum: [creating, ready, archived]
+ *                 $ref: '#/components/schemas/CourseStatus'
  *     responses:
  *       200:
  *         content:
