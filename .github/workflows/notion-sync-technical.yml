@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
-name: "Knowledge Base: Sync"
+name: 'Knowledge Base: Sync - Technical'
 
 on:
   push:
@@ -7,6 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  sync:
-    uses: Simas-Zurauskas/strive2-ci/.github/workflows/notion-sync.yml@master
+  sync-technical:
+    uses: Simas-Zurauskas/strive2-ci/.github/workflows/notion-sync-technical.yml@master
     secrets: inherit

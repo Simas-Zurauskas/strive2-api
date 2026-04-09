@@ -91,6 +91,7 @@ const executeCodeSchema = z.object({
  *               properties:
  *                 data:
  *                   type: object
+ *                   required: [stdout, stderr, compile_output, status, time, memory]
  *                   properties:
  *                     stdout:
  *                       type: string

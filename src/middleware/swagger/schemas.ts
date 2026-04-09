@@ -1,17 +1,82 @@
 import { OpenAPIV3 } from 'openapi-types';
 import { ERROR_CODES } from '@middleware/errorMiddleware';
-import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES } from '@lib/constants';
+import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
 
+// Helper for nullable $ref — OpenAPI 3.0 requires allOf wrapper
+const nullableRef = (ref: string): OpenAPIV3.SchemaObject => ({
+  nullable: true,
+  allOf: [{ $ref: ref }] as unknown as OpenAPIV3.SchemaObject[],
+} as unknown as OpenAPIV3.SchemaObject);
+
 export const schemas: SchemaMap = {
+  // ── Enum schemas ─────────────────────────────────────────
+
+  ErrorCode: {
+    type: 'string',
+    enum: [...ERROR_CODES],
+  },
+
+  AuthProviderType: {
+    type: 'string',
+    enum: [...AUTH_PROVIDERS],
+  },
+
+  QuestionType: {
+    type: 'string',
+    enum: [...QUESTION_TYPES],
+  },
+
+  CourseDepth: {
+    type: 'string',
+    enum: [...COURSE_DEPTHS],
+  },
+
+  CourseStatus: {
+    type: 'string',
+    enum: [...COURSE_STATUSES],
+  },
+
+  JobStatusEnum: {
+    type: 'string',
+    enum: [...JOB_STATUSES],
+  },
+
+  JobType: {
+    type: 'string',
+    enum: [...JOB_TYPES],
+  },
+
+  LessonProgressStatus: {
+    type: 'string',
+    enum: [...LESSON_PROGRESS_STATUSES],
+  },
+
+  QuizMasteryTier: {
+    type: 'string',
+    enum: [...QUIZ_MASTERY_TIERS],
+  },
+
+  BlockType: {
+    type: 'string',
+    enum: [...BLOCK_TYPES],
+  },
+
+  ReviewReason: {
+    type: 'string',
+    enum: ['time', 'progression'],
+  },
+
+  // ── Object schemas ───────────────────────────────────────
+
   ApiError: {
     type: 'object',
     required: ['message'],
     properties: {
       message: { type: 'string' },
-      errorCode: { type: 'string', enum: [...ERROR_CODES] },
+      errorCode: { $ref: '#/components/schemas/ErrorCode' },
     },
   },
 
@@ -19,7 +84,7 @@ export const schemas: SchemaMap = {
     type: 'object',
     required: ['provider'],
     properties: {
-      provider: { type: 'string', enum: [...AUTH_PROVIDERS] },
+      provider: { $ref: '#/components/schemas/AuthProviderType' },
       providerId: { type: 'string' },
     },
   },
@@ -48,7 +113,7 @@ export const schemas: SchemaMap = {
     properties: {
       id: { type: 'string' },
       question: { type: 'string' },
-      type: { type: 'string', enum: [...QUESTION_TYPES] },
+      type: { $ref: '#/components/schemas/QuestionType' },
       options: { type: 'array', items: { type: 'string' } },
     },
   },
@@ -136,7 +201,7 @@ export const schemas: SchemaMap = {
       overview: { $ref: '#/components/schemas/DepthPreview' },
       comprehensive: { $ref: '#/components/schemas/DepthPreview' },
       deep_dive: { $ref: '#/components/schemas/DepthPreview' },
-      recommended: { type: 'string', enum: [...COURSE_DEPTHS] },
+      recommended: { $ref: '#/components/schemas/CourseDepth' },
       recommendationReason: { type: 'string' },
     },
   },
@@ -145,21 +210,22 @@ export const schemas: SchemaMap = {
     type: 'object',
     required: ['status', 'type', 'courseId'],
     properties: {
-      status: { type: 'string', enum: [...JOB_STATUSES] },
-      type: { type: 'string', enum: [...JOB_TYPES] },
+      status: { $ref: '#/components/schemas/JobStatusEnum' },
+      type: { $ref: '#/components/schemas/JobType' },
       courseId: { type: 'string' },
       error: { type: 'string' },
+      metadata: { type: 'object', nullable: true, additionalProperties: true },
     },
   },
 
   LessonBlock: {
     type: 'object',
-    required: ['id', 'type', 'content', 'order'],
+    required: ['id', 'type', 'content', 'metadata', 'order'],
     properties: {
       id: { type: 'string' },
-      type: { type: 'string', enum: [...BLOCK_TYPES] },
+      type: { $ref: '#/components/schemas/BlockType' },
       content: { type: 'string' },
-      metadata: { type: 'object', nullable: true },
+      metadata: { type: 'object', nullable: true, additionalProperties: true },
       order: { type: 'integer' },
     },
   },
@@ -177,6 +243,7 @@ export const schemas: SchemaMap = {
         items: { $ref: '#/components/schemas/LessonBlock' },
       },
       heroImageUrl: { type: 'string', nullable: true },
+      includeHeroImage: { type: 'boolean' },
       audioUrl: { type: 'string', nullable: true },
       summary: { type: 'string', nullable: true },
       version: { type: 'integer' },
@@ -209,14 +276,14 @@ export const schemas: SchemaMap = {
 
   UserLessonProgress: {
     type: 'object',
-    required: ['_id', 'userId', 'courseId', 'moduleIndex', 'lessonIndex', 'status'],
+    required: ['_id', 'userId', 'courseId', 'moduleIndex', 'lessonIndex', 'status', 'lastAccessedAt', 'timeSpentSeconds', 'quizResponses', 'exerciseAttempts', 'bookmarked'],
     properties: {
       _id: { type: 'string' },
       userId: { type: 'string' },
       courseId: { type: 'string' },
       moduleIndex: { type: 'integer' },
       lessonIndex: { type: 'integer' },
-      status: { type: 'string', enum: [...LESSON_PROGRESS_STATUSES] },
+      status: { $ref: '#/components/schemas/LessonProgressStatus' },
       completedAt: { type: 'string', format: 'date-time', nullable: true },
       lastAccessedAt: { type: 'string', format: 'date-time' },
       timeSpentSeconds: { type: 'integer' },
@@ -246,6 +313,127 @@ export const schemas: SchemaMap = {
     },
   },
 
+  ModuleQuizQuestion: {
+    type: 'object',
+    required: ['id', 'question', 'options', 'sourceLessons', 'isInterleaved'],
+    properties: {
+      id: { type: 'string' },
+      question: { type: 'string' },
+      options: { type: 'array', items: { type: 'string' } },
+      sourceLessons: { type: 'array', items: { type: 'integer' } },
+      isInterleaved: { type: 'boolean' },
+      interleavedModuleIndex: { type: 'integer' },
+    },
+  },
+
+  ModuleQuizContent: {
+    type: 'object',
+    required: ['courseId', 'moduleIndex', 'questions', 'version'],
+    properties: {
+      courseId: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+      questions: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/ModuleQuizQuestion' },
+      },
+      version: { type: 'integer' },
+    },
+  },
+
+  QuizAttemptQuestionResult: {
+    type: 'object',
+    required: ['id', 'question', 'options', 'correctIndex', 'explanation', 'sourceLessons', 'isInterleaved', 'selectedOption', 'correct'],
+    properties: {
+      id: { type: 'string' },
+      question: { type: 'string' },
+      options: { type: 'array', items: { type: 'string' } },
+      correctIndex: { type: 'integer' },
+      explanation: { type: 'string' },
+      sourceLessons: { type: 'array', items: { type: 'integer' } },
+      isInterleaved: { type: 'boolean' },
+      interleavedModuleIndex: { type: 'integer' },
+      selectedOption: { type: 'integer', nullable: true },
+      correct: { type: 'boolean' },
+    },
+  },
+
+  QuizAttemptResult: {
+    type: 'object',
+    required: ['attemptNumber', 'score', 'masteryTier', 'completedAt', 'questions', 'nextReviewAt', 'reviewIntervalDays'],
+    properties: {
+      attemptNumber: { type: 'integer' },
+      score: { type: 'number' },
+      masteryTier: { $ref: '#/components/schemas/QuizMasteryTier' },
+      completedAt: { type: 'string', format: 'date-time' },
+      questions: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/QuizAttemptQuestionResult' },
+      },
+      nextReviewAt: { type: 'string', format: 'date-time' },
+      reviewIntervalDays: { type: 'integer' },
+    },
+  },
+
+  QuizAttempt: {
+    type: 'object',
+    required: ['attemptNumber', 'score', 'masteryTier', 'completedAt', 'quizVersion'],
+    properties: {
+      attemptNumber: { type: 'integer' },
+      score: { type: 'number' },
+      masteryTier: { $ref: '#/components/schemas/QuizMasteryTier' },
+      completedAt: { type: 'string', format: 'date-time' },
+      quizVersion: { type: 'integer' },
+    },
+  },
+
+  UserModuleQuizProgress: {
+    type: 'object',
+    required: ['_id', 'userId', 'courseId', 'moduleIndex', 'attempts', 'bestScore', 'bestTier'],
+    properties: {
+      _id: { type: 'string' },
+      userId: { type: 'string' },
+      courseId: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+      attempts: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/QuizAttempt' },
+      },
+      bestScore: { type: 'number' },
+      bestTier: nullableRef('#/components/schemas/QuizMasteryTier'),
+      reviewIntervalDays: { type: 'integer' },
+      consecutiveSuccesses: { type: 'integer' },
+      nextReviewAt: { type: 'string', format: 'date-time', nullable: true },
+    },
+  },
+
+  CourseQuizProgressItem: {
+    type: 'object',
+    required: ['moduleIndex', 'bestScore', 'bestTier', 'attemptCount', 'nextReviewAt', 'reviewDue'],
+    properties: {
+      moduleIndex: { type: 'integer' },
+      bestScore: { type: 'number' },
+      bestTier: nullableRef('#/components/schemas/QuizMasteryTier'),
+      attemptCount: { type: 'integer' },
+      nextReviewAt: { type: 'string', format: 'date-time', nullable: true },
+      reviewDue: { type: 'boolean' },
+    },
+  },
+
+  ReviewDueItem: {
+    type: 'object',
+    required: ['courseId', 'courseName', 'moduleIndex', 'moduleName', 'bestScore', 'bestTier', 'nextReviewAt', 'reviewReason'],
+    properties: {
+      courseId: { type: 'string' },
+      courseName: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+      moduleName: { type: 'string' },
+      bestScore: { type: 'number' },
+      bestTier: { $ref: '#/components/schemas/QuizMasteryTier' },
+      nextReviewAt: { type: 'string', format: 'date-time', nullable: true },
+      reviewReason: { $ref: '#/components/schemas/ReviewReason' },
+    },
+  },
+
   Course: {
     type: 'object',
     required: ['_id', 'userId', 'name', 'status', 'goal', 'createdAt', 'updatedAt'],
@@ -253,11 +441,11 @@ export const schemas: SchemaMap = {
       _id: { type: 'string' },
       userId: { type: 'string' },
       name: { type: 'string' },
-      status: { type: 'string', enum: [...COURSE_STATUSES] },
+      status: { $ref: '#/components/schemas/CourseStatus' },
       goal: { type: 'string' },
       clarifyData: { $ref: '#/components/schemas/ClarifyResponse' },
       answers: { type: 'object' },
-      depth: { type: 'string', enum: [...COURSE_DEPTHS] },
+      depth: { $ref: '#/components/schemas/CourseDepth' },
       depthPreviews: { $ref: '#/components/schemas/DepthPreviewsResponse' },
       structure: { $ref: '#/components/schemas/GenerateStructureResponse' },
       feedbackHistory: { type: 'array', items: { type: 'string' } },

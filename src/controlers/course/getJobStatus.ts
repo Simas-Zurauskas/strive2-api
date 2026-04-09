@@ -49,6 +49,7 @@ export const getJobStatusController = asyncHandler(async (req, res) => {
       type: job.type,
       error: job.error,
       courseId: job.courseId.toString(),
+      metadata: job.metadata ?? null,
     },
   });
 });

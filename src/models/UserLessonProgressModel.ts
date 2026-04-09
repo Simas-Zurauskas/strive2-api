@@ -84,7 +84,7 @@ const schema = new Schema<IUserLessonProgress>(
     timeSpentSeconds: { type: Number, default: 0 },
     quizResponses: { type: [quizResponseSchema], default: [] },
     exerciseAttempts: { type: [exerciseAttemptSchema], default: [] },
-    notes: { type: String, default: null },
+    notes: { type: String, default: null, maxlength: 10000 },
     bookmarked: { type: Boolean, default: false },
   },
   {

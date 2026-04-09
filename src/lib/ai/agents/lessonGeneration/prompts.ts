@@ -31,10 +31,6 @@ const interactiveBlockSchema = z.object({
       language: z.string().optional(),
       starterCode: z.string().optional(),
       expectedOutput: z.string().optional(),
-      executionEnvironment: z.enum(['judge0', 'sandpack']).optional(),
-      template: z.enum(['vanilla', 'react', 'vue', 'svelte', 'angular']).optional(),
-      files: z.array(z.object({ path: z.string(), content: z.string() })).optional(),
-      activeFile: z.string().optional(),
     })
     .nullable(),
   order: z.number(),
@@ -166,29 +162,12 @@ export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer 
 2. **exercise** block (exactly 1): A practical challenge the learner can do to apply what they learned. Rules:
    - Content is a markdown description of the exercise
    - Should be achievable in 5-10 minutes
-   - For code topics, set these metadata fields:
-     - metadata.language: the programming language
+   - For code topics (including web/frontend topics like JavaScript, TypeScript, React, Vue, etc.), set these metadata fields:
+     - metadata.language: the programming language (e.g., "javascript", "typescript", "python", etc.)
      - metadata.starterCode: pre-filled code the learner will modify/extend (must be syntactically valid and runnable as-is, even if incomplete)
      - metadata.expectedOutput: the expected stdout when solved correctly
-   - For WEB/FRONTEND code topics (HTML, CSS, JavaScript, React, Vue, Svelte, Angular, DOM manipulation, frontend frameworks), generate a **Sandpack** exercise instead:
-     - Set metadata.executionEnvironment to "sandpack"
-     - Set metadata.template to the matching framework:
-       - "vanilla" — plain HTML/CSS/JS only (no JSX, no framework syntax)
-       - "react" — React or any JSX-based code
-       - "vue" — Vue 3 (single-file components)
-       - "svelte" — Svelte components
-       - "angular" — Angular components
-     - Set metadata.files to an array of { path, content } objects
-     - Set metadata.activeFile to the file the learner should edit
-     - Do NOT set metadata.starterCode or metadata.expectedOutput (Sandpack exercises use files and are visually verified via live preview)
-     - Set metadata.language to the framework/language name (e.g., "html", "javascript", "react", "vue", "svelte", "angular")
-     - Typical files per template:
-       - vanilla: { path: "/index.html" }, { path: "/styles.css" }, { path: "/index.js" }
-       - react: { path: "/App.js" }, { path: "/styles.css" }
-       - vue: { path: "/src/App.vue" }, { path: "/src/styles.css" }
-       - svelte: { path: "/App.svelte" }, { path: "/styles.css" }
-       - angular: { path: "/src/app/app.component.ts" }, { path: "/src/app/app.component.html" }
-     - File contents must be complete and renderable. The learner should see a working (but incomplete) preview that they modify to complete the exercise.
+     - For frontend/web topics, focus exercises on JavaScript logic that produces console output (e.g., DOM manipulation logic, data transformations, event handling logic, state management patterns) rather than visual rendering. Use console.log to verify results.
+     - For topics that are purely visual (CSS layouts, styling, design) where stdout validation is not practical, generate a thought exercise instead (metadata: null) — ask the learner to build something locally or analyze a given design.
    - For non-code topics: write a thought exercise, analysis task, or application scenario as the content. Set metadata to null. The exercise should require the learner to apply concepts from the lesson to a concrete situation — not just summarize what they read.
 
 ## Depth calibration
@@ -240,23 +219,6 @@ Good code exercise block:
     "language": "javascript",
     "starterCode": "const users = [\\n  { name: 'Alice', email: 'alice@example.com', active: true },\\n  { name: 'Bob', email: 'bob@example.com', active: false },\\n  { name: 'Carol', email: 'carol@example.com', active: true },\\n];\\n\\nfunction getActiveEmails(users) {\\n  // Your code here\\n}\\n\\nconsole.log(getActiveEmails(users));",
     "expectedOutput": "[ 'ALICE@EXAMPLE.COM', 'CAROL@EXAMPLE.COM' ]"
-  },
-  "order": 5.5
-}
-
-Good Sandpack exercise block (web/React):
-{
-  "id": "exercise-1",
-  "type": "exercise",
-  "content": "## Build a Counter\\n\\nCreate a React counter component that increments when the button is clicked. Use the useState hook to manage the count state.",
-  "metadata": {
-    "language": "react",
-    "executionEnvironment": "sandpack",
-    "template": "react",
-    "files": [
-      { "path": "/App.js", "content": "import { useState } from 'react';\\n\\nexport default function App() {\\n  // Add state and click handler\\n  return (\\n    <div style={{ padding: '2rem', textAlign: 'center' }}>\\n      <h1>Counter: 0</h1>\\n      <button>Increment</button>\\n    </div>\\n  );\\n}" }
-    ],
-    "activeFile": "/App.js"
   },
   "order": 5.5
 }

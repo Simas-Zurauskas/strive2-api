@@ -32,8 +32,9 @@ import { parseIndexParam } from './validation';
  *               required: [data]
  *               properties:
  *                 data:
- *                   type: object
  *                   nullable: true
+ *                   allOf:
+ *                     - $ref: '#/components/schemas/UserModuleQuizProgress'
  */
 export const getModuleQuizProgressController = asyncHandler(async (req, res) => {
   const courseId = req.params.courseId as string;

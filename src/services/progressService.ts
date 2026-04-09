@@ -208,39 +208,73 @@ interface ProgressSummaryItem {
   total: number;
   completed: number;
   percentage: number;
+  lastModuleIndex: number | null;
+  lastLessonIndex: number | null;
 }
 
 export const getProgressSummary = async (params: {
   userId: string;
 }): Promise<ProgressSummaryItem[]> => {
-  // Get completed counts per course
-  const aggregation = await UserLessonProgressModel.aggregate([
-    { $match: { userId: new mongoose.Types.ObjectId(params.userId), status: 'completed' } },
-    { $group: { _id: '$courseId', completed: { $sum: 1 } } },
+  const userObjId = new mongoose.Types.ObjectId(params.userId);
+
+  // Get completed counts + last accessed lesson per course in parallel
+  const [completedAgg, lastAccessedAgg] = await Promise.all([
+    UserLessonProgressModel.aggregate([
+      { $match: { userId: userObjId, status: 'completed' } },
+      { $group: { _id: '$courseId', completed: { $sum: 1 } } },
+    ]),
+    UserLessonProgressModel.aggregate([
+      { $match: { userId: userObjId } },
+      { $sort: { lastAccessedAt: -1 } },
+      {
+        $group: {
+          _id: '$courseId',
+          lastModuleIndex: { $first: '$moduleIndex' },
+          lastLessonIndex: { $first: '$lessonIndex' },
+        },
+      },
+    ]),
   ]);
 
-  if (aggregation.length === 0) return [];
+  // Build last-accessed lookup
+  const lastAccessedMap = new Map(
+    lastAccessedAgg.map((a) => [
+      a._id.toString(),
+      { moduleIndex: a.lastModuleIndex as number, lessonIndex: a.lastLessonIndex as number },
+    ]),
+  );
 
-  // Get courses to calculate totals
-  const courseIds = aggregation.map((a) => a._id);
+  // Collect all course IDs from both aggregations
+  const courseIdSet = new Set<string>();
+  for (const a of completedAgg) courseIdSet.add(a._id.toString());
+  for (const a of lastAccessedAgg) courseIdSet.add(a._id.toString());
+
+  if (courseIdSet.size === 0) return [];
+
+  const courseIds = [...courseIdSet].map((id) => new mongoose.Types.ObjectId(id));
   const courses = await CourseModel.find({ _id: { $in: courseIds } })
     .select('structure')
     .lean();
 
   const courseMap = new Map(courses.map((c) => [c._id.toString(), c]));
+  const completedMap = new Map(completedAgg.map((a) => [a._id.toString(), a.completed as number]));
 
-  return aggregation.map((agg) => {
-    const course = courseMap.get(agg._id.toString());
+  return [...courseIdSet].map((id) => {
+    const course = courseMap.get(id);
     const total = course?.structure?.modules?.reduce(
       (sum, m) => sum + (m.lessons?.length ?? 0),
       0,
     ) ?? 0;
+    const completed = completedMap.get(id) ?? 0;
+    const lastAccessed = lastAccessedMap.get(id);
 
     return {
-      courseId: agg._id.toString(),
+      courseId: id,
       total,
-      completed: agg.completed,
-      percentage: total > 0 ? Math.round((agg.completed / total) * 100) : 0,
+      completed,
+      percentage: total > 0 ? Math.round((completed / total) * 100) : 0,
+      lastModuleIndex: lastAccessed?.moduleIndex ?? null,
+      lastLessonIndex: lastAccessed?.lessonIndex ?? null,
     };
   });
 };

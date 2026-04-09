@@ -50,7 +50,7 @@ import { submitQuizAttemptSchema, parseIndexParam } from './validation';
  *               required: [data]
  *               properties:
  *                 data:
- *                   type: object
+ *                   $ref: '#/components/schemas/QuizAttemptResult'
  */
 export const submitQuizAttemptController = asyncHandler(async (req, res) => {
   const courseId = req.params.courseId as string;

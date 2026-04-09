@@ -1,6 +1,68 @@
 import { RunnableConfig } from '@langchain/core/runnables';
 import { LessonState } from '../state';
 
+// ── Heuristics for detecting non-code content in code blocks ──
+
+function isLikelyNotCode(content: string): boolean {
+  const lines = content.split('\n').filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return false;
+
+  // 1. High comment-line ratio (heading-style comments like "# Some Title")
+  const headingComments = lines.filter((l) => /^\s*#\s+[A-Z]/.test(l));
+  if (headingComments.length / lines.length > 0.4) return true;
+
+  // 2. Multiple natural language sentences (long lines with many words ending in punctuation)
+  const sentenceLines = lines.filter((l) => {
+    const t = l.trim();
+    return t.length > 60 && t.split(/\s+/).length > 8 && /[.!?:]$/.test(t);
+  });
+  if (sentenceLines.length >= 2) return true;
+
+  // 3. No programming constructs at all
+  const codePatterns = [
+    /\b(function|def|class|const|let|var|import|export|from|return|if|else|for|while|switch|case|try|catch|throw|async|await)\b/,
+    /[=!<>]=|&&|\|\|/, // operators
+    /\w+\(.*\)/, // function calls
+    /[{}\[\]();]/, // braces and semicolons
+    /^\s*(npm|pip|yarn|cargo|brew|apt|curl|wget|docker|git|cd|ls|mkdir|chmod|ssh|cat|echo|grep|sed|awk|make|go|rustc|javac|gcc|node|python3?|ruby)\s/m, // CLI commands
+  ];
+  const hasCodePattern = codePatterns.some((p) => p.test(content));
+  if (!hasCodePattern) return true;
+
+  // 4. Template/checklist pattern: majority of lines are "Label: Value" or "- [ ]" items
+  const labelValueLines = lines.filter((l) => /^\s*[-•*]?\s*[\w\s]+:\s+\S/.test(l));
+  const checklistLines = lines.filter((l) => /^\s*[-•*]\s*\[[ x]\]/i.test(l));
+  if ((labelValueLines.length + checklistLines.length) / lines.length > 0.5) return true;
+
+  return false;
+}
+
+function reformatAsSection(content: string): string {
+  const lines = content.split('\n');
+  let title = '';
+
+  const reformatted = lines
+    .map((line) => {
+      // Convert "# HEADING" style comments to markdown headings
+      const headingMatch = line.match(/^\s*#{1,3}\s+(.+)/);
+      if (headingMatch) {
+        const heading = headingMatch[1].trim();
+        if (!title) title = heading;
+        return `## ${heading}`;
+      }
+      // Convert "Key: Value" lines to bold key
+      const kvMatch = line.match(/^(\s*[-•*]?\s*)([\w\s/]+):\s+(.+)/);
+      if (kvMatch) {
+        const [, indent, key, value] = kvMatch;
+        return `${indent}**${key.trim()}:** ${value.trim()}`;
+      }
+      return line;
+    })
+    .join('\n');
+
+  return title ? `## ${title}\n\n${reformatted}` : reformatted;
+}
+
 /**
  * Lightweight validation node that checks content blocks for structural issues
  * before they flow to interactive generation and merge.
@@ -67,8 +129,28 @@ export const contentValidation = async (state: LessonState, _config?: RunnableCo
     return true;
   });
 
-  if (filtered.length !== blocks.length) {
-    return { contentBlocks: filtered };
+  // Convert non-code content in code blocks to section blocks
+  let converted = false;
+  const corrected = filtered.map((b) => {
+    if (b.type !== 'code') return b;
+    if (!isLikelyNotCode(b.content)) return b;
+
+    converted = true;
+    const newId = b.id.replace(/^code-/, 'section-converted-');
+    console.warn(`[contentValidation] Converting code block ${b.id} → section (detected non-code content)`.yellow);
+    warnings.push(`Converted non-code code block ${b.id} to section`);
+
+    return {
+      ...b,
+      id: newId,
+      type: 'section' as const,
+      content: reformatAsSection(b.content),
+      metadata: null,
+    };
+  });
+
+  if (converted || filtered.length !== blocks.length) {
+    return { contentBlocks: corrected };
   }
 
   return {};
