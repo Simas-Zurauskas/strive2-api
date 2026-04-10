@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getReviewsDue } from '@services/progressService';
+import { getReviewsDue } from '@services/reviewSchedulingService';
 
 /**
  * @swagger

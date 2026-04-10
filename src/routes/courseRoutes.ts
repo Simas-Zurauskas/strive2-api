@@ -28,6 +28,10 @@ import {
   getReviewsDueController,
   getEditImpactController,
   resetModuleQuizController,
+  toggleFavoriteCourseController,
+  getFavoriteCourseIdsController,
+  getBookmarkedLessonsController,
+  getRecentActivityController,
 } from '@controlers/course';
 import { ENVIRONMENT } from '@conf/env';
 import { protect } from '@middleware/authMiddleware';
@@ -41,6 +45,10 @@ router.post('/execute-code', protect, executeCodeController);
 router.get('/continue', protect, getContinueLearningController);
 router.get('/progress-summary', protect, getProgressSummaryController);
 router.get('/reviews-due', protect, getReviewsDueController);
+router.get('/favorites', protect, getFavoriteCourseIdsController);
+router.post('/favorite/:courseId', protect, toggleFavoriteCourseController);
+router.get('/bookmarked-lessons', protect, getBookmarkedLessonsController);
+router.get('/recent-activity', protect, getRecentActivityController);
 
 // Course CRUD
 router.post('/', protect, createCourseController);

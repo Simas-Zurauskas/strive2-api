@@ -1,17 +1,9 @@
 import mongoose from 'mongoose';
 import UserLessonProgressModel, { IUserLessonProgress } from '@models/UserLessonProgressModel';
-import UserModuleQuizProgressModel, { IUserModuleQuizProgress, IQuizAttempt } from '@models/UserModuleQuizProgressModel';
-import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import LessonContentModel from '@models/LessonContentModel';
 import CourseModel from '@models/CourseModel';
-import {
-  LessonProgressStatus,
-  QuizMasteryTier,
-  REVIEW_INITIAL_INTERVALS,
-  REVIEW_PROGRESSION_GAPS,
-  REVIEW_MAX_INTERVAL_DAYS,
-  REVIEW_MIN_INTERVAL_DAYS,
-} from '@lib/constants';
+import { LessonProgressStatus } from '@lib/constants';
+import * as gamificationService from '@services/gamificationService';
 
 // ── Status transition guard ───────────────────────────────
 
@@ -114,7 +106,25 @@ export const upsertLessonProgress = async (params: UpsertParams): Promise<IUserL
         doc.completedAt = now;
       }
       await doc.save();
+
+      // Fire-and-forget gamification side effects on lesson completion
+      if (params.status === 'completed') {
+        gamificationService.onLessonComplete(userId, courseId).catch(() => {});
+      }
     }
+  }
+
+  // Fire-and-forget gamification for first exercise pass
+  if (params.exerciseAttempt?.passed) {
+    gamificationService.onExercisePass(userId).catch(() => {});
+  }
+
+  // Record streak activity for any meaningful interaction
+  // Lesson completion already records activity via onLessonComplete, so skip if that fired
+  const completionFired = params.status === 'completed';
+  const hadMeaningfulInteraction = params.status === 'in_progress' || params.timeSpentDelta || params.quizResponse || params.exerciseAttempt;
+  if (!completionFired && hadMeaningfulInteraction) {
+    gamificationService.recordActivity(userId).catch(() => {});
   }
 
   return doc!.toJSON();
@@ -197,7 +207,7 @@ export const getContinueLearning = async (params: {
 export const getGeneratedLessons = async (params: {
   courseId: string;
 }): Promise<{ moduleIndex: number; lessonIndex: number }[]> => {
-  return LessonContentModel.find({ courseId: params.courseId })
+  return LessonContentModel.find({ courseId: params.courseId, completed: true })
     .select('moduleIndex lessonIndex')
     .lean()
     .then((docs) => docs.map((d) => ({ moduleIndex: d.moduleIndex, lessonIndex: d.lessonIndex })));
@@ -281,288 +291,3 @@ export const getProgressSummary = async (params: {
   });
 };
 
-// ── Module quiz progress ────────────────────────────────
-
-const computeMasteryTier = (score: number): QuizMasteryTier => {
-  if (score >= 80) return 'mastered';
-  if (score >= 60) return 'passed';
-  return 'needs_review';
-};
-
-export const getModuleQuizProgress = async (params: {
-  userId: string;
-  courseId: string;
-  moduleIndex: number;
-}): Promise<IUserModuleQuizProgress | null> => {
-  return UserModuleQuizProgressModel.findOne({
-    userId: params.userId,
-    courseId: params.courseId,
-    moduleIndex: params.moduleIndex,
-  }).lean();
-};
-
-interface SubmitQuizAttemptParams {
-  userId: string;
-  courseId: string;
-  moduleIndex: number;
-  responses: { questionId: string; selectedOption: number }[];
-}
-
-export interface SubmitQuizAttemptResult {
-  attempt: IQuizAttempt;
-  nextReviewAt: Date;
-  reviewIntervalDays: number;
-}
-
-// Mastery tier ordering for regression detection
-const TIER_ORDER: Record<QuizMasteryTier, number> = { needs_review: 0, passed: 1, mastered: 2 };
-
-export const submitQuizAttempt = async (params: SubmitQuizAttemptParams): Promise<SubmitQuizAttemptResult> => {
-  const { userId, courseId, moduleIndex, responses } = params;
-  const now = new Date();
-
-  // Load quiz content to grade answers
-  const quizContent = await ModuleQuizContentModel.findOne({ courseId, moduleIndex }).lean();
-  if (!quizContent) throw new Error('Quiz content not found');
-
-  if (responses.length !== quizContent.questions.length) {
-    throw new Error(`Expected ${quizContent.questions.length} responses, got ${responses.length}`);
-  }
-
-  // Grade each response
-  const gradedResponses = responses.map((r) => {
-    const question = quizContent.questions.find((q) => q.id === r.questionId);
-    return {
-      questionId: r.questionId,
-      selectedOption: r.selectedOption,
-      correct: question ? r.selectedOption === question.correctIndex : false,
-      answeredAt: now,
-    };
-  });
-
-  const correctCount = gradedResponses.filter((r) => r.correct).length;
-  const score = Math.round((correctCount / quizContent.questions.length) * 100);
-  const masteryTier = computeMasteryTier(score);
-
-  // Get current progress to determine attempt number + review state
-  const existing = await UserModuleQuizProgressModel.findOne({ userId, courseId, moduleIndex });
-  const attemptNumber = existing ? existing.attempts.length + 1 : 1;
-  const previousBestTier = existing?.bestTier ?? null;
-
-  const attempt: IQuizAttempt = {
-    attemptNumber,
-    responses: gradedResponses,
-    score,
-    masteryTier,
-    completedAt: now,
-    quizVersion: quizContent.version,
-  };
-
-  // Upsert progress: push attempt, update best score/tier
-  const bestScore = existing ? Math.max(existing.bestScore, score) : score;
-  const bestTier = computeMasteryTier(bestScore);
-
-  // Compute review scheduling
-  let reviewIntervalDays: number;
-  let consecutiveSuccesses: number;
-
-  if (!existing || !previousBestTier) {
-    // First attempt — set initial interval based on tier
-    reviewIntervalDays = REVIEW_INITIAL_INTERVALS[masteryTier];
-    consecutiveSuccesses = 0;
-  } else if (masteryTier === 'needs_review') {
-    // Still failing — keep interval short regardless of history
-    reviewIntervalDays = REVIEW_INITIAL_INTERVALS.needs_review;
-    consecutiveSuccesses = 0;
-  } else if (TIER_ORDER[masteryTier] >= TIER_ORDER[previousBestTier]) {
-    // Maintained or improved (passed/mastered) — double the interval
-    const prev = existing.reviewIntervalDays || REVIEW_INITIAL_INTERVALS[previousBestTier];
-    reviewIntervalDays = Math.min(prev * 2, REVIEW_MAX_INTERVAL_DAYS);
-    consecutiveSuccesses = (existing.consecutiveSuccesses || 0) + 1;
-  } else {
-    // Regressed — halve the interval
-    const prev = existing.reviewIntervalDays || REVIEW_INITIAL_INTERVALS[previousBestTier];
-    reviewIntervalDays = Math.max(Math.floor(prev / 2), REVIEW_MIN_INTERVAL_DAYS);
-    consecutiveSuccesses = 0;
-  }
-
-  const nextReviewAt = new Date(now.getTime() + reviewIntervalDays * 24 * 60 * 60 * 1000);
-
-  await UserModuleQuizProgressModel.findOneAndUpdate(
-    { userId, courseId, moduleIndex },
-    {
-      $push: { attempts: attempt },
-      $set: {
-        bestScore,
-        bestTier,
-        reviewIntervalDays,
-        consecutiveSuccesses,
-        nextReviewAt,
-      },
-      $setOnInsert: {
-        userId: new mongoose.Types.ObjectId(userId),
-        courseId: new mongoose.Types.ObjectId(courseId),
-        moduleIndex,
-      },
-    },
-    { upsert: true },
-  );
-
-  return { attempt, nextReviewAt, reviewIntervalDays };
-};
-
-export interface CourseQuizProgressItem {
-  moduleIndex: number;
-  bestScore: number;
-  bestTier: QuizMasteryTier | null;
-  attemptCount: number;
-  nextReviewAt: string | null;
-  reviewDue: boolean;
-}
-
-// ── Shared review-due computation ─────────────────────────
-
-interface ReviewCheckInput {
-  bestTier: QuizMasteryTier | null;
-  attempts: { completedAt: Date }[];
-  nextReviewAt: Date | null;
-  moduleIndex: number;
-}
-
-interface ReviewCheckResult {
-  effectiveReviewAt: Date | null;
-  timeDue: boolean;
-  progressionDue: boolean;
-}
-
-const checkReviewDue = (
-  doc: ReviewCheckInput,
-  maxModuleIndex: number,
-  totalModules: number,
-  now: Date,
-): ReviewCheckResult => {
-  if (!doc.bestTier || doc.attempts.length === 0) {
-    return { effectiveReviewAt: null, timeDue: false, progressionDue: false };
-  }
-
-  // Time-based trigger (with back-population fallback)
-  let effectiveReviewAt = doc.nextReviewAt;
-  if (!effectiveReviewAt) {
-    const lastAttempt = doc.attempts[doc.attempts.length - 1];
-    const intervalDays = REVIEW_INITIAL_INTERVALS[doc.bestTier];
-    effectiveReviewAt = new Date(lastAttempt.completedAt.getTime() + intervalDays * 24 * 60 * 60 * 1000);
-  }
-  const timeDue = effectiveReviewAt <= now;
-
-  // Progression-based trigger (gap capped to totalModules - 1 for small courses)
-  const rawGap = REVIEW_PROGRESSION_GAPS[doc.bestTier];
-  const gap = Math.min(rawGap, Math.max(totalModules - 1, 1));
-  const progressionDue = maxModuleIndex - doc.moduleIndex >= gap;
-
-  return { effectiveReviewAt, timeDue, progressionDue };
-};
-
-export const getCourseQuizProgress = async (params: {
-  userId: string;
-  courseId: string;
-  totalModules?: number;
-}): Promise<CourseQuizProgressItem[]> => {
-  const docs = await UserModuleQuizProgressModel.find({
-    userId: params.userId,
-    courseId: params.courseId,
-  }).lean();
-
-  const now = new Date();
-  const maxModuleIndex = docs.length > 0 ? Math.max(...docs.map((d) => d.moduleIndex)) : -1;
-  const totalMods = params.totalModules ?? maxModuleIndex + 1;
-
-  return docs.map((d) => {
-    const { effectiveReviewAt, timeDue, progressionDue } = checkReviewDue(d, maxModuleIndex, totalMods, now);
-
-    return {
-      moduleIndex: d.moduleIndex,
-      bestScore: d.bestScore,
-      bestTier: d.bestTier,
-      attemptCount: d.attempts.length,
-      nextReviewAt: effectiveReviewAt?.toISOString() ?? null,
-      reviewDue: timeDue || progressionDue,
-    };
-  });
-};
-
-// ── Reviews due (cross-course) ────────────────────────────
-
-export interface ReviewDueItem {
-  courseId: string;
-  courseSlug: string | null;
-  courseName: string;
-  moduleIndex: number;
-  moduleName: string;
-  bestScore: number;
-  bestTier: QuizMasteryTier;
-  nextReviewAt: string | null;
-  reviewReason: 'time' | 'progression';
-}
-
-export const getReviewsDue = async (params: { userId: string }): Promise<ReviewDueItem[]> => {
-  const now = new Date();
-
-  const allDocs = await UserModuleQuizProgressModel.find({
-    userId: params.userId,
-  }).lean();
-
-  if (allDocs.length === 0) return [];
-
-  // Group by courseId
-  const byCourse = new Map<string, typeof allDocs>();
-  for (const doc of allDocs) {
-    const key = doc.courseId.toString();
-    if (!byCourse.has(key)) byCourse.set(key, []);
-    byCourse.get(key)!.push(doc);
-  }
-
-  // Load course data for names and total module count
-  const courseIds = [...byCourse.keys()];
-  const courses = await CourseModel.find({ _id: { $in: courseIds } })
-    .select('name slug structure')
-    .lean();
-  const courseMap = new Map(courses.map((c) => [c._id.toString(), c]));
-
-  const results: ReviewDueItem[] = [];
-
-  for (const [courseIdStr, docs] of byCourse) {
-    const course = courseMap.get(courseIdStr);
-    if (!course?.structure?.modules) continue;
-
-    const maxModuleIndex = Math.max(...docs.map((d) => d.moduleIndex));
-    const totalModules = course.structure.modules.length;
-
-    for (const d of docs) {
-      const { effectiveReviewAt, timeDue, progressionDue } = checkReviewDue(d, maxModuleIndex, totalModules, now);
-
-      if (!timeDue && !progressionDue) continue;
-      if (!d.bestTier) continue;
-
-      const mod = course.structure.modules[d.moduleIndex];
-      results.push({
-        courseId: courseIdStr,
-        courseSlug: course.slug ?? null,
-        courseName: course.name || 'Untitled Course',
-        moduleIndex: d.moduleIndex,
-        moduleName: mod?.name || `Module ${d.moduleIndex + 1}`,
-        bestScore: d.bestScore,
-        bestTier: d.bestTier,
-        nextReviewAt: effectiveReviewAt?.toISOString() ?? null,
-        reviewReason: progressionDue ? 'progression' : 'time',
-      });
-    }
-  }
-
-  // Sort: progression-triggered first, then by review date (most overdue first)
-  results.sort((a, b) => {
-    if (a.reviewReason !== b.reviewReason) return a.reviewReason === 'progression' ? -1 : 1;
-    return (a.nextReviewAt ?? '') < (b.nextReviewAt ?? '') ? -1 : 1;
-  });
-
-  return results;
-};

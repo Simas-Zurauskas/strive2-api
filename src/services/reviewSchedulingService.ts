@@ -1,0 +1,165 @@
+import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
+import CourseModel from '@models/CourseModel';
+import {
+  QuizMasteryTier,
+  REVIEW_INITIAL_INTERVALS,
+  REVIEW_PROGRESSION_GAPS,
+} from '@lib/constants';
+
+// ── Shared review-due computation ─────────────────────────
+
+interface ReviewCheckInput {
+  bestTier: QuizMasteryTier | null;
+  attempts: { completedAt: Date }[];
+  nextReviewAt: Date | null;
+  moduleIndex: number;
+}
+
+interface ReviewCheckResult {
+  effectiveReviewAt: Date | null;
+  timeDue: boolean;
+  progressionDue: boolean;
+}
+
+const checkReviewDue = (
+  doc: ReviewCheckInput,
+  maxModuleIndex: number,
+  totalModules: number,
+  now: Date,
+): ReviewCheckResult => {
+  if (!doc.bestTier || doc.attempts.length === 0) {
+    return { effectiveReviewAt: null, timeDue: false, progressionDue: false };
+  }
+
+  // Time-based trigger (with back-population fallback)
+  let effectiveReviewAt = doc.nextReviewAt;
+  if (!effectiveReviewAt) {
+    const lastAttempt = doc.attempts[doc.attempts.length - 1];
+    const intervalDays = REVIEW_INITIAL_INTERVALS[doc.bestTier];
+    effectiveReviewAt = new Date(lastAttempt.completedAt.getTime() + intervalDays * 24 * 60 * 60 * 1000);
+  }
+  const timeDue = effectiveReviewAt <= now;
+
+  // Progression-based trigger (gap capped to totalModules - 1 for small courses)
+  const rawGap = REVIEW_PROGRESSION_GAPS[doc.bestTier];
+  const gap = Math.min(rawGap, Math.max(totalModules - 1, 1));
+  const progressionDue = maxModuleIndex - doc.moduleIndex >= gap;
+
+  return { effectiveReviewAt, timeDue, progressionDue };
+};
+
+// ── Course quiz progress ─────────────────────────────────
+
+export interface CourseQuizProgressItem {
+  moduleIndex: number;
+  bestScore: number;
+  bestTier: QuizMasteryTier | null;
+  attemptCount: number;
+  nextReviewAt: string | null;
+  reviewDue: boolean;
+}
+
+export const getCourseQuizProgress = async (params: {
+  userId: string;
+  courseId: string;
+  totalModules?: number;
+}): Promise<CourseQuizProgressItem[]> => {
+  const docs = await UserModuleQuizProgressModel.find({
+    userId: params.userId,
+    courseId: params.courseId,
+  }).lean();
+
+  const now = new Date();
+  const maxModuleIndex = docs.length > 0 ? Math.max(...docs.map((d) => d.moduleIndex)) : -1;
+  const totalMods = params.totalModules ?? maxModuleIndex + 1;
+
+  return docs.map((d) => {
+    const { effectiveReviewAt, timeDue, progressionDue } = checkReviewDue(d, maxModuleIndex, totalMods, now);
+
+    return {
+      moduleIndex: d.moduleIndex,
+      bestScore: d.bestScore,
+      bestTier: d.bestTier,
+      attemptCount: d.attempts.length,
+      nextReviewAt: effectiveReviewAt?.toISOString() ?? null,
+      reviewDue: timeDue || progressionDue,
+    };
+  });
+};
+
+// ── Reviews due (cross-course) ────────────────────────────
+
+export interface ReviewDueItem {
+  courseId: string;
+  courseSlug: string | null;
+  courseName: string;
+  moduleIndex: number;
+  moduleName: string;
+  bestScore: number;
+  bestTier: QuizMasteryTier;
+  nextReviewAt: string | null;
+  reviewReason: 'time' | 'progression';
+}
+
+export const getReviewsDue = async (params: { userId: string }): Promise<ReviewDueItem[]> => {
+  const now = new Date();
+
+  const allDocs = await UserModuleQuizProgressModel.find({
+    userId: params.userId,
+  }).lean();
+
+  if (allDocs.length === 0) return [];
+
+  // Group by courseId
+  const byCourse = new Map<string, typeof allDocs>();
+  for (const doc of allDocs) {
+    const key = doc.courseId.toString();
+    if (!byCourse.has(key)) byCourse.set(key, []);
+    byCourse.get(key)!.push(doc);
+  }
+
+  // Load course data for names and total module count
+  const courseIds = [...byCourse.keys()];
+  const courses = await CourseModel.find({ _id: { $in: courseIds } })
+    .select('name slug structure')
+    .lean();
+  const courseMap = new Map(courses.map((c) => [c._id.toString(), c]));
+
+  const results: ReviewDueItem[] = [];
+
+  for (const [courseIdStr, docs] of byCourse) {
+    const course = courseMap.get(courseIdStr);
+    if (!course?.structure?.modules) continue;
+
+    const maxModuleIndex = Math.max(...docs.map((d) => d.moduleIndex));
+    const totalModules = course.structure.modules.length;
+
+    for (const d of docs) {
+      const { effectiveReviewAt, timeDue, progressionDue } = checkReviewDue(d, maxModuleIndex, totalModules, now);
+
+      if (!timeDue && !progressionDue) continue;
+      if (!d.bestTier) continue;
+
+      const mod = course.structure.modules[d.moduleIndex];
+      results.push({
+        courseId: courseIdStr,
+        courseSlug: course.slug ?? null,
+        courseName: course.name || 'Untitled Course',
+        moduleIndex: d.moduleIndex,
+        moduleName: mod?.name || `Module ${d.moduleIndex + 1}`,
+        bestScore: d.bestScore,
+        bestTier: d.bestTier,
+        nextReviewAt: effectiveReviewAt?.toISOString() ?? null,
+        reviewReason: progressionDue ? 'progression' : 'time',
+      });
+    }
+  }
+
+  // Sort: progression-triggered first, then by review date (most overdue first)
+  results.sort((a, b) => {
+    if (a.reviewReason !== b.reviewReason) return a.reviewReason === 'progression' ? -1 : 1;
+    return (a.nextReviewAt ?? '') < (b.nextReviewAt ?? '') ? -1 : 1;
+  });
+
+  return results;
+};

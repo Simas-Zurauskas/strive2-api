@@ -26,6 +26,7 @@ For local development, you can optionally create a `.env.local` file to override
 - `MONGO_URI`: MongoDB connection string
 - `OPENAI_API_KEY`: OpenAI API key for course generation
 - `ANTHROPIC_API_KEY`: Anthropic API key for course generation
+- `BFL_API_KEY`: BFL API key for image generation
 - `JWT_SECRET`: JWT secret for authentication
 - `FRONTEND_URL`: Frontend URL for CORS
 - `GOOGLE_CLIENT_ID`: Google Client ID for OAuth

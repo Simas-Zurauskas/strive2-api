@@ -16,6 +16,7 @@ import swaggerSpec from '@middleware/swagger';
 import swaggerUi from 'swagger-ui-express';
 import { authRoutes } from '@routes/authRoutes';
 import { courseRoutes } from '@routes/courseRoutes';
+import { gamificationRoutes } from '@routes/gamificationRoutes';
 import mongoose from 'mongoose';
 import { getIO, initSocketIO } from '@lib/socket';
 import { initJobSocketBridge } from '@lib/jobSocketBridge';
@@ -60,6 +61,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/course', courseRoutes);
+app.use('/api/gamification', gamificationRoutes);
 
 app.get('/swagger.json', (req, res) => {
   res.status(200).json(swaggerSpec);

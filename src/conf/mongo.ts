@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import * as Sentry from '@sentry/node';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
+import LessonContentModel from '@models/LessonContentModel';
 
 import { MONGO_URI } from './env';
 
@@ -26,6 +27,12 @@ const cleanupOrphanedJobs = async () => {
 
     if (orphanedCourses.length > 0) {
       console.log(`[Startup] Cleaned up ${orphanedCourses.length} orphaned job reference(s)`.cyan);
+    }
+
+    // Delete partial content left by interrupted generations
+    const deleted = await LessonContentModel.deleteMany({ completed: false });
+    if (deleted.deletedCount > 0) {
+      console.log(`[Startup] Deleted ${deleted.deletedCount} incomplete lesson content document(s)`.cyan);
     }
   } catch (error: unknown) {
     console.error('[Startup] Failed to clean up orphaned jobs:'.red, error);
