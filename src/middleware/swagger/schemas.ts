@@ -1,6 +1,7 @@
 import { OpenAPIV3 } from 'openapi-types';
 import { ERROR_CODES } from '@middleware/errorMiddleware';
 import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
+import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
@@ -435,9 +436,100 @@ export const schemas: SchemaMap = {
     },
   },
 
+  // ── Gamification schemas ─────────────────────────────────
+
+  XpSource: {
+    type: 'string',
+    enum: [...XP_SOURCES],
+  },
+
+  AchievementCategory: {
+    type: 'string',
+    enum: [...ACHIEVEMENT_CATEGORIES],
+  },
+
+  EarnedAchievement: {
+    type: 'object',
+    required: ['achievementId', 'earnedAt'],
+    properties: {
+      achievementId: { type: 'string' },
+      earnedAt: { type: 'string', format: 'date-time' },
+      metadata: { type: 'object', nullable: true, additionalProperties: true },
+    },
+  },
+
+  XpLogEntry: {
+    type: 'object',
+    required: ['date', 'xp', 'source'],
+    properties: {
+      date: { type: 'string' },
+      xp: { type: 'number' },
+      source: { $ref: '#/components/schemas/XpSource' },
+    },
+  },
+
+  GamificationProfile: {
+    type: 'object',
+    required: ['userId', 'totalXp', 'level', 'xpForNextLevel', 'currentStreak', 'longestStreak', 'streakFreezeAvailable', 'earnedAchievements'],
+    properties: {
+      userId: { type: 'string' },
+      totalXp: { type: 'number' },
+      level: { type: 'integer' },
+      xpForNextLevel: { type: 'number' },
+      currentStreak: { type: 'integer' },
+      longestStreak: { type: 'integer' },
+      lastActiveDate: { type: 'string', nullable: true },
+      streakFreezeAvailable: { type: 'integer' },
+      streakFreezeUsedDates: { type: 'array', items: { type: 'string' } },
+      earnedAchievements: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/EarnedAchievement' },
+      },
+      activeDates: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+      xpLog: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/XpLogEntry' },
+      },
+    },
+  },
+
+  GamificationStats: {
+    type: 'object',
+    required: ['xpByDay', 'xpByWeek', 'totalTimeLearned', 'lessonsThisWeek'],
+    properties: {
+      xpByDay: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['date', 'xp'],
+          properties: {
+            date: { type: 'string' },
+            xp: { type: 'number' },
+          },
+        },
+      },
+      xpByWeek: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['week', 'xp'],
+          properties: {
+            week: { type: 'string' },
+            xp: { type: 'number' },
+          },
+        },
+      },
+      totalTimeLearned: { type: 'number' },
+      lessonsThisWeek: { type: 'integer' },
+    },
+  },
+
   Course: {
     type: 'object',
-    required: ['_id', 'userId', 'name', 'status', 'goal', 'createdAt', 'updatedAt'],
+    required: ['_id', 'userId', 'name', 'slug', 'status', 'goal', 'createdAt', 'updatedAt'],
     properties: {
       _id: { type: 'string' },
       userId: { type: 'string' },

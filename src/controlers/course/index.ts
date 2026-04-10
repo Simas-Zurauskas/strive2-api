@@ -26,3 +26,7 @@ export { getModuleQuizProgressController } from './getModuleQuizProgress';
 export { getReviewsDueController } from './getReviewsDue';
 export { getEditImpactController } from './getEditImpact';
 export { resetModuleQuizController } from './resetModuleQuiz';
+export { toggleFavoriteCourseController } from './toggleFavoriteCourse';
+export { getFavoriteCourseIdsController } from './getFavoriteCourseIds';
+export { getBookmarkedLessonsController } from './getBookmarkedLessons';
+export { getRecentActivityController } from './getRecentActivity';

@@ -1,25 +1,74 @@
 import { z } from 'zod';
 import { RunnableConfig } from '@langchain/core/runnables';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import OpenAI from 'openai';
 import { TavilySearch } from '@langchain/tavily';
-import { OPENAI_API_KEY, TAVILY_API_KEY } from '@conf/env';
+import { BFL_API_KEY, TAVILY_API_KEY } from '@conf/env';
 import { getUtilityModel } from '@lib/langchain';
 import { uploadBuffer, getPresignedUrl } from '@services/s3Service';
 import { ILessonBlock } from '@models/LessonContentModel';
 import { LessonState } from '../state';
-
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 const tavilySearch = new TavilySearch({
   maxResults: 8,
   tavilyApiKey: TAVILY_API_KEY,
 });
 
+// ── Flux Kontext Pro (BFL API) ────────────────────────
+
+const BFL_API_BASE = 'https://api.bfl.ai/v1';
+const BFL_POLL_INTERVAL_MS = 3_000;
+const BFL_TIMEOUT_MS = 120_000;
+
+const pollBflResult = async (pollingUrl: string): Promise<string> => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < BFL_TIMEOUT_MS) {
+    const res = await fetch(pollingUrl, {
+      headers: { accept: 'application/json', 'X-Key': BFL_API_KEY },
+    });
+    if (!res.ok) throw new Error(`BFL poll failed: ${res.status} ${res.statusText}`);
+
+    const data = (await res.json()) as {
+      status: string;
+      result?: { sample: string };
+    };
+
+    if (data.status === 'Ready') {
+      if (!data.result?.sample) throw new Error('BFL returned Ready but no sample URL');
+      return data.result.sample;
+    }
+
+    if (data.status === 'Error' || data.status === 'Failed') {
+      throw new Error(`BFL image generation failed (status: ${data.status})`);
+    }
+
+    await new Promise((r) => setTimeout(r, BFL_POLL_INTERVAL_MS));
+  }
+
+  throw new Error(`BFL image generation timed out after ${BFL_TIMEOUT_MS / 1000}s`);
+};
+
 // ── Hero image ─────────────────────────────────────────
+
+const IMAGE_STYLES = [
+  'Mixed-media collage aesthetic with torn paper layers, ink stamp textures, and hand-drawn annotation marks. Muted parchment-toned base with one bold accent colour.',
+  'Flat vector illustration with bold geometric shapes, clean lines, and a limited palette of 3-4 saturated colours on a soft off-white background. Slight grain overlay for print texture.',
+  'Watercolour wash painting with soft, bleeding edges and layered translucent pigments. Earthy natural tones with one vivid highlight colour pooling at focal points.',
+  'Isometric 3D-style low-poly render with pastel surfaces, soft ambient shadows, and a miniature diorama feel. Clean, toy-like aesthetic.',
+  'Vintage science-textbook engraving style with fine crosshatch lines, sepia and deep navy tones, and a single copper-orange accent. Aged paper texture.',
+  'Risograph print aesthetic with misregistered halftone dots, 2-3 spot colours layered with visible overlap, and a lo-fi zine feel on recycled paper.',
+  'Japanese woodblock-inspired illustration with flat colour planes, bold outlines, subtle wood-grain texture, and a harmonious warm-cool colour split.',
+  'Blueprint / technical-drawing style with white linework on deep indigo background, precise geometric constructions, and occasional chalk-like annotations.',
+] as const;
+
+const getStyleForLesson = (moduleIndex: number, lessonIndex: number): string => {
+  const index = (moduleIndex * 7 + lessonIndex) % IMAGE_STYLES.length;
+  return IMAGE_STYLES[index];
+};
 
 const generateHeroImage = async (
   lessonName: string,
+  moduleName: string,
   courseGoal: string,
   courseId: string,
   moduleIndex: number,
@@ -27,30 +76,42 @@ const generateHeroImage = async (
 ): Promise<string | null> => {
   try {
     console.log(`[assetsGeneration] Generating hero image...`.cyan);
-    const prompt = `Create an artistic, editorial-quality illustration that visually captures the essence of "${lessonName}" within the broader theme of "${courseGoal}".
 
-Style: Hand-crafted feel, like a premium editorial illustration from a design magazine. Use a rich but restrained color palette (2-3 dominant colors with subtle accents). The composition should feel intentional and balanced, with organic textures — watercolor washes, ink splatters, paper grain, or risograph-style layering. Avoid the typical AI-generated glossy/smooth look.
+    const style = getStyleForLesson(moduleIndex, lessonIndex);
+    const prompt = `A wide editorial illustration about "${lessonName}" (part of "${moduleName}" in a course on ${courseGoal}). The image must clearly depict the specific subject matter of this lesson — show recognisable objects, diagrams, or scenes that someone familiar with the topic would instantly connect to "${lessonName}". Style: ${style} Wide 16:9 composition. No text, no letters, no digits, no human faces.`;
 
-Subject: Abstract visual metaphor that represents the concept — NOT a literal depiction. Think conceptual editorial art: flowing forms, overlapping translucent shapes, organic patterns, or symbolic compositions that evoke the idea without spelling it out.
-
-Absolute restrictions: NO text, NO letters, NO numbers, NO words, NO characters, NO writing of any kind anywhere in the image. NO human faces or figures. NO generic tech imagery (no glowing circuits, no floating screens, no binary code). NO clipart-style icons.
-
-Format: Wide banner composition (16:9), with visual weight distributed for use as a hero image with content below it.`;
-
-    const response = await openai.images.generate({
-      model: 'dall-e-3',
-      prompt,
-      n: 1,
-      size: '1792x1024',
-      quality: 'standard',
-      response_format: 'b64_json',
+    // 1. Submit generation task
+    const submitRes = await fetch(`${BFL_API_BASE}/flux-kontext-pro`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Key': BFL_API_KEY,
+      },
+      body: JSON.stringify({
+        prompt,
+        aspect_ratio: '16:9',
+        prompt_upsampling: true,
+        output_format: 'png',
+      }),
     });
 
-    const b64 = response.data?.[0]?.b64_json;
-    if (!b64) return null;
+    if (!submitRes.ok) {
+      const errBody = await submitRes.text();
+      throw new Error(`BFL submit failed: ${submitRes.status} — ${errBody}`);
+    }
+
+    const { polling_url } = (await submitRes.json()) as { id: string; polling_url: string };
+
+    // 2. Poll until ready
+    const imageUrl = await pollBflResult(polling_url);
+
+    // 3. Download image and upload to S3
+    const imageRes = await fetch(imageUrl);
+    if (!imageRes.ok) throw new Error(`Failed to download BFL image: ${imageRes.status}`);
+    const buffer = Buffer.from(await imageRes.arrayBuffer());
 
     const key = `lessons/${courseId}/${moduleIndex}/${lessonIndex}/hero.png`;
-    await uploadBuffer(key, Buffer.from(b64, 'base64'), 'image/png');
+    await uploadBuffer(key, buffer, 'image/png');
 
     console.log(`[assetsGeneration] ✓ Hero image uploaded to S3: ${key}`.green);
     return key;
@@ -175,7 +236,7 @@ export const imageGeneration = async (state: LessonState, config?: RunnableConfi
   const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
 
   const s3Key = await generateHeroImage(
-    state.lessonName, state.goal, state.courseId, state.moduleIndex, state.lessonIndex,
+    state.lessonName, state.moduleName, state.goal, state.courseId, state.moduleIndex, state.lessonIndex,
   );
 
   if (s3Key) {

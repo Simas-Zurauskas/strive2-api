@@ -1,6 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourse } from '@services/courseDbService';
-import { getCourseProgress, getCourseQuizProgress } from '@services/progressService';
+import { getCourseProgress } from '@services/progressService';
+import { getCourseQuizProgress } from '@services/reviewSchedulingService';
 
 /**
  * @swagger

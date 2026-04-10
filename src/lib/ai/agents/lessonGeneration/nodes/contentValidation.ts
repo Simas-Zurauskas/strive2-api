@@ -1,5 +1,10 @@
 import { RunnableConfig } from '@langchain/core/runnables';
+import { generateObject } from 'ai';
+import { anthropic } from '@ai-sdk/anthropic';
+import { z } from 'zod';
+import { MODEL_IDS } from '@lib/langchain';
 import { LessonState } from '../state';
+import { lessonBlockSchema } from '../prompts';
 
 // ── Heuristics for detecting non-code content in code blocks ──
 
@@ -63,14 +68,107 @@ function reformatAsSection(content: string): string {
   return title ? `## ${title}\n\n${reformatted}` : reformatted;
 }
 
+// ── Structural repair: generate missing required blocks ──
+
+interface StructuralGaps {
+  missingIntro: boolean;
+  missingSummary: boolean;
+  needMoreSections: number; // 0 = fine, >0 = how many extra sections needed
+}
+
+function detectStructuralGaps(blocks: LessonState['contentBlocks']): StructuralGaps {
+  const introCount = blocks.filter((b) => b.type === 'intro').length;
+  const summaryCount = blocks.filter((b) => b.type === 'summary').length;
+  const sectionCount = blocks.filter((b) => b.type === 'section').length;
+
+  return {
+    missingIntro: introCount === 0,
+    missingSummary: summaryCount === 0,
+    needMoreSections: sectionCount < 2 ? 2 - sectionCount : 0,
+  };
+}
+
+async function repairStructuralGaps(
+  blocks: LessonState['contentBlocks'],
+  gaps: StructuralGaps,
+  writer?: (event: Record<string, unknown>) => void,
+): Promise<LessonState['contentBlocks']> {
+  const missing: string[] = [];
+  if (gaps.missingIntro) missing.push('1 "intro" block (2-4 sentence compelling opening)');
+  if (gaps.missingSummary) missing.push('1 "summary" block (4-6 bullet points of key takeaways, no heading)');
+  if (gaps.needMoreSections > 0) missing.push(`${gaps.needMoreSections} additional "section" block(s) (150-400 words each, starting with ## heading)`);
+
+  const maxOrder = Math.max(...blocks.map((b) => b.order), -1);
+  const existingBlocksSummary = blocks.map((b) => `[${b.type}] id=${b.id}, order=${b.order}: ${b.content.slice(0, 100)}...`).join('\n');
+
+  // Compute correct ordering: sections come before summary, intro before everything
+  // Sections fill slots after existing content, summary is always last
+  let nextSectionOrder = maxOrder + 1;
+  const summaryOrder = maxOrder + gaps.needMoreSections + 1;
+
+  console.log(`[contentValidation] 🔄 Attempting repair: generating ${missing.join(', ')}`.yellow);
+
+  // Track which types we need so we can filter out unexpected ones
+  const allowedTypes = new Set<string>();
+  if (gaps.missingIntro) allowedTypes.add('intro');
+  if (gaps.missingSummary) allowedTypes.add('summary');
+  if (gaps.needMoreSections > 0) allowedTypes.add('section');
+
+  try {
+    const { object } = await generateObject({
+      model: anthropic(MODEL_IDS.SONNET),
+      schema: z.object({ blocks: z.array(lessonBlockSchema) }),
+      temperature: 0.3,
+      messages: [
+        {
+          role: 'system' as const,
+          content: `You are repairing an incomplete lesson. The lesson generation produced content blocks but is missing required structural blocks. Generate ONLY the missing blocks listed below. Match the style, depth, and topic of the existing content.\n\nRules:\n- Use the id format "type-repair-N" (e.g., "intro-repair-1", "summary-repair-1", "section-repair-1")\n- For intro blocks: order should be -1 (will be placed at the start)\n- For section blocks: order should increment from ${nextSectionOrder}\n- For summary blocks: order should be ${summaryOrder} (always last)\n- Content must be consistent with the existing blocks below`,
+        },
+        {
+          role: 'user' as const,
+          content: `## Existing blocks\n\n${existingBlocksSummary}\n\n## Missing blocks to generate\n\n${missing.map((m) => `- ${m}`).join('\n')}\n\nGenerate ONLY the missing blocks. Do not duplicate existing content.`,
+        },
+      ],
+    });
+
+    // Discard any blocks the LLM generated with unexpected types
+    const repairedBlocks = object.blocks.filter((b) => allowedTypes.has(b.type));
+
+    // Enforce correct ordering regardless of what the LLM produced
+    for (const block of repairedBlocks) {
+      if (block.type === 'intro') {
+        block.order = -1;
+      } else if (block.type === 'section') {
+        block.order = nextSectionOrder++;
+      } else if (block.type === 'summary') {
+        block.order = summaryOrder;
+      }
+    }
+
+    // Stream repaired blocks to client
+    for (const block of repairedBlocks) {
+      writer?.({ type: 'block', block });
+    }
+
+    console.log(`[contentValidation] ✓ Repair complete: generated ${repairedBlocks.length} blocks`.green);
+    return [...blocks, ...repairedBlocks];
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`[contentValidation] ✗ Repair failed: ${reason}`.red);
+    return blocks; // Fall back to original blocks
+  }
+}
+
 /**
  * Lightweight validation node that checks content blocks for structural issues
  * before they flow to interactive generation and merge.
- * Logs warnings but does not block the pipeline — acts as a quality signal.
+ * When required blocks are missing (intro, summary, sections), attempts a single
+ * targeted repair via LLM before continuing. Other warnings are log-only.
  */
-export const contentValidation = async (state: LessonState, _config?: RunnableConfig): Promise<Partial<LessonState>> => {
-  const blocks = state.contentBlocks;
+export const contentValidation = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
+  let blocks = state.contentBlocks;
   const warnings: string[] = [];
+  const writer = config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined;
 
   // Check required block types
   const introBlocks = blocks.filter((b) => b.type === 'intro');
@@ -118,6 +216,23 @@ export const contentValidation = async (state: LessonState, _config?: RunnableCo
     console.log(`[contentValidation] ✓ All checks passed (${blocks.length} blocks)`.green);
   }
 
+  // ── Structural repair: attempt to generate missing required blocks ──
+  const gaps = detectStructuralGaps(blocks);
+  if (gaps.missingIntro || gaps.missingSummary || gaps.needMoreSections > 0) {
+    blocks = await repairStructuralGaps(blocks, gaps, writer);
+
+    // Log post-repair validation
+    const postIntro = blocks.filter((b) => b.type === 'intro').length;
+    const postSummary = blocks.filter((b) => b.type === 'summary').length;
+    const postSections = blocks.filter((b) => b.type === 'section').length;
+    const stillBroken = postIntro !== 1 || postSummary !== 1 || postSections < 2;
+    if (stillBroken) {
+      console.warn(`[contentValidation] ⚠ Post-repair: intro=${postIntro}, summary=${postSummary}, sections=${postSections} — still incomplete`.yellow);
+    } else {
+      console.log(`[contentValidation] ✓ Post-repair: structure valid (intro=${postIntro}, summary=${postSummary}, sections=${postSections})`.green);
+    }
+  }
+
   // Remove placeholder code blocks (LLM sometimes generates "no code needed" stubs for non-technical lessons)
   const filtered = blocks.filter((b) => {
     if (b.type !== 'code') return true;
@@ -149,7 +264,9 @@ export const contentValidation = async (state: LessonState, _config?: RunnableCo
     };
   });
 
-  if (converted || filtered.length !== blocks.length) {
+  // Return updated blocks if anything changed (repair, filtering, or conversion)
+  const blocksChanged = blocks !== state.contentBlocks || converted || filtered.length !== blocks.length;
+  if (blocksChanged) {
     return { contentBlocks: corrected };
   }
 

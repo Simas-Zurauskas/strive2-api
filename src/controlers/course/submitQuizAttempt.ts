@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourse } from '@services/courseDbService';
-import { submitQuizAttempt } from '@services/progressService';
+import { submitQuizAttempt } from '@services/quizProgressService';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { submitQuizAttemptSchema, parseIndexParam } from './validation';
 

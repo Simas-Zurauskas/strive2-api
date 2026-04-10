@@ -5,6 +5,7 @@ import { jobEvents } from '@services/jobEvents';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import CourseModel from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
+import { deleteByPrefix } from '@services/s3Service';
 import { generateLessonSchema, assertPreviousLessonGenerated } from './validation';
 
 /**
@@ -74,6 +75,9 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error('A generation is already running for this course. Please wait.');
   }
+
+  // Notify clients (including other tabs) which lesson is generating
+  jobEvents.emit('started', { jobId: 'stream', courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex });
 
   // ── SSE headers ──────────────────────────────────────
   res.setHeader('Content-Type', 'text/event-stream');
@@ -155,49 +159,62 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
       }
     };
 
-    // Stream with updates mode
-    for await (const chunk of await lessonGenerationAgent.stream(input, {
-      streamMode: 'updates',
-      configurable: {
-        writer: trackingWriter,
-      },
-    })) {
-      // Capture summary from content generation node
-      if (chunk.contentGeneration) {
-        const { contentSummary } = chunk.contentGeneration as { contentSummary?: string };
-        if (contentSummary) savedSummary = contentSummary;
+    // Stream with updates mode (5-minute timeout to prevent hanging on API stalls)
+    const STREAM_TIMEOUT_MS = 5 * 60 * 1000;
+    const streamPromise = (async () => {
+      for await (const chunk of await lessonGenerationAgent.stream(input, {
+        streamMode: 'updates',
+        configurable: {
+          writer: trackingWriter,
+        },
+      })) {
+        // Capture summary from content generation node
+        if (chunk.contentGeneration) {
+          const { contentSummary } = chunk.contentGeneration as { contentSummary?: string };
+          if (contentSummary) savedSummary = contentSummary;
+        }
+
+        // Content is validated — send placeholders for interactive blocks so client can show skeletons
+        if (chunk.contentValidation) {
+          const contentBlocks = allBlocks as { type: string; order: number }[];
+          const sections = contentBlocks.filter((b) => b.type === 'section');
+          const summaryBlock = contentBlocks.find((b) => b.type === 'summary');
+          const maxOrder = Math.max(...contentBlocks.map((b) => b.order));
+
+          // Quiz placeholders: after the last 2 sections (or fewer if less sections)
+          const quizSections = sections.slice(-2);
+          const quizPlaceholders = quizSections.map((s, i) => ({
+            type: 'quiz' as const,
+            order: s.order + 0.5,
+            id: `placeholder-quiz-${i}`,
+          }));
+
+          // Exercise placeholder: just before summary (deterministic)
+          const exerciseOrder = summaryBlock ? summaryBlock.order - 0.5 : maxOrder + 1;
+          const exercisePlaceholder = { type: 'exercise' as const, order: exerciseOrder, id: 'placeholder-exercise' };
+
+          writeSSE({
+            type: 'content_ready',
+            placeholders: [...quizPlaceholders, exercisePlaceholder],
+          });
+        }
       }
+    })();
 
-      // Content is validated — send placeholders for interactive blocks so client can show skeletons
-      if (chunk.contentValidation) {
-        const contentBlocks = allBlocks as { type: string; order: number }[];
-        const sections = contentBlocks.filter((b) => b.type === 'section');
-        const summaryBlock = contentBlocks.find((b) => b.type === 'summary');
-        const maxOrder = Math.max(...contentBlocks.map((b) => b.order));
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Lesson generation timed out after 5 minutes')), STREAM_TIMEOUT_MS),
+    );
 
-        // Quiz placeholders: after the last 2 sections (or fewer if less sections)
-        const quizSections = sections.slice(-2);
-        const quizPlaceholders = quizSections.map((s, i) => ({
-          type: 'quiz' as const,
-          order: s.order + 0.5,
-          id: `placeholder-quiz-${i}`,
-        }));
-
-        // Exercise placeholder: just before summary (deterministic)
-        const exerciseOrder = summaryBlock ? summaryBlock.order - 0.5 : maxOrder + 1;
-        const exercisePlaceholder = { type: 'exercise' as const, order: exerciseOrder, id: 'placeholder-exercise' };
-
-        writeSSE({
-          type: 'content_ready',
-          placeholders: [...quizPlaceholders, exercisePlaceholder],
-        });
-      }
-    }
+    await Promise.race([streamPromise, timeoutPromise]);
 
     // Final save — ensure everything is persisted (flush any pending debounce)
     if (saveTimer) clearTimeout(saveTimer);
     await savePromise;
     await saveToDb();
+    await LessonContentModel.findOneAndUpdate(
+      { courseId, moduleIndex, lessonIndex },
+      { completed: true },
+    );
     console.log(`[API] Final save: ${allBlocks.length} blocks, image: ${!!savedHeroImageUrl}`.gray);
 
     writeSSE({ type: 'complete' });
@@ -205,14 +222,18 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
 
     // Notify other clients (e.g. reloaded tabs) via WebSocket
     await CourseModel.findByIdAndUpdate(courseId, { activeJobId: null });
-    jobEvents.emit('update', { jobId: 'stream', status: 'completed', courseId, type: 'generate_lesson', userId });
+    jobEvents.emit('update', { jobId: 'stream', status: 'completed', courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[API] Lesson stream failed: ${message}`.red);
     writeSSE({ type: 'error', message });
 
+    // Clean up incomplete content and S3 assets from failed generation
+    await LessonContentModel.deleteOne({ courseId, moduleIndex, lessonIndex, completed: false });
+    deleteByPrefix(`lessons/${courseId}/${moduleIndex}/${lessonIndex}/`).catch(() => {});
+
     await CourseModel.findByIdAndUpdate(courseId, { activeJobId: null });
-    jobEvents.emit('update', { jobId: 'stream', status: 'failed', error: message, courseId, type: 'generate_lesson', userId });
+    jobEvents.emit('update', { jobId: 'stream', status: 'failed', error: message, courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex });
   } finally {
     res.end();
   }

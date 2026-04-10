@@ -6,6 +6,8 @@ interface JobStartedPayload {
   courseId: string;
   type: string;
   userId: string;
+  moduleIndex?: number;
+  lessonIndex?: number;
 }
 
 interface JobUpdatePayload {
@@ -15,6 +17,8 @@ interface JobUpdatePayload {
   courseId: string;
   type: string;
   userId: string;
+  moduleIndex?: number;
+  lessonIndex?: number;
 }
 
 export const initJobSocketBridge = () => {
@@ -25,6 +29,8 @@ export const initJobSocketBridge = () => {
         jobId: payload.jobId,
         courseId: payload.courseId,
         type: payload.type,
+        moduleIndex: payload.moduleIndex,
+        lessonIndex: payload.lessonIndex,
       });
   });
 
@@ -37,6 +43,8 @@ export const initJobSocketBridge = () => {
         error: payload.error,
         courseId: payload.courseId,
         type: payload.type,
+        moduleIndex: payload.moduleIndex,
+        lessonIndex: payload.lessonIndex,
       });
   });
 };

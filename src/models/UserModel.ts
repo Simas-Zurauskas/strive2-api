@@ -25,6 +25,7 @@ export interface IUser extends UserInput {
   emailVerificationExpiry?: Date;
   passwordResetToken?: string;
   tokenVersion: number;
+  favoriteCourseIds: mongoose.Types.ObjectId[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -54,6 +55,10 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
     emailVerificationExpiry: { type: Date, select: false },
     passwordResetToken: { type: String, select: false },
     tokenVersion: { type: Number, default: 0 },
+    favoriteCourseIds: {
+      type: [{ type: Schema.Types.ObjectId, ref: 'Course' }],
+      default: [],
+    },
     authProviders: {
       type: [
         {

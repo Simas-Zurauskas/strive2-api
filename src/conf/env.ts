@@ -11,6 +11,7 @@ const getEnv = (key: string): string => {
 
 export const ENVIRONMENT = getEnv('ENVIRONMENT'); // development|production
 export const OPENAI_API_KEY = getEnv('OPENAI_API_KEY');
+export const BFL_API_KEY = getEnv('BFL_API_KEY');
 export const ANTHROPIC_API_KEY = getEnv('ANTHROPIC_API_KEY');
 export const MONGO_URI = getEnv('MONGO_URI');
 export const JWT_SECRET = getEnv('JWT_SECRET');
