@@ -53,11 +53,7 @@ export interface AwardXpResult {
   newAchievements: AchievementDefinition[];
 }
 
-export const awardXp = async (
-  userId: string,
-  amount: number,
-  source: XpSource,
-): Promise<AwardXpResult> => {
+export const awardXp = async (userId: string, amount: number, source: XpSource): Promise<AwardXpResult> => {
   if (amount <= 0) return { xpAwarded: 0, totalXp: 0, level: 1, leveledUp: false, newAchievements: [] };
 
   const today = todayStr();
@@ -141,9 +137,11 @@ export const recordActivity = async (userId: string): Promise<RecordActivityResu
     } else if (gap === 2 && doc.streakFreezeAvailable > 0) {
       // Missed exactly 1 day — auto-apply freeze
       doc.streakFreezeAvailable -= 1;
-      doc.streakFreezeUsedDates.push(doc.lastActiveDate.replace(/^(\d{4}-\d{2}-)(\d{2})$/, (_m, prefix, day) => {
-        return prefix + String(Number(day) + 1).padStart(2, '0');
-      }));
+      doc.streakFreezeUsedDates.push(
+        doc.lastActiveDate.replace(/^(\d{4}-\d{2}-)(\d{2})$/, (_m, prefix, day) => {
+          return prefix + String(Number(day) + 1).padStart(2, '0');
+        }),
+      );
       doc.currentStreak += 1;
       streakFreezeUsed = true;
     } else {
@@ -216,23 +214,24 @@ const isAchievementEarned = async (
 ): Promise<boolean> => {
   switch (achievement.id) {
     // Lesson milestones
-    case 'first_lesson': {
+    case 'lesson_first': {
       const count = await UserLessonProgressModel.countDocuments({ userId: userObjId, status: 'completed' });
       return count >= 1;
     }
-    case 'ten_lessons': {
+    case 'lessons_ten': {
       const count = await UserLessonProgressModel.countDocuments({ userId: userObjId, status: 'completed' });
       return count >= 10;
     }
-    case 'fifty_lessons': {
+    case 'lessons_fifty': {
       const count = await UserLessonProgressModel.countDocuments({ userId: userObjId, status: 'completed' });
       return count >= 50;
     }
 
     // Course completion milestones
-    case 'first_course':
-    case 'three_courses': {
-      const threshold = achievement.id === 'first_course' ? 1 : 3;
+    case 'course_first':
+    case 'courses_three':
+    case 'courses_five': {
+      const threshold = achievement.id === 'course_first' ? 1 : achievement.id === 'courses_three' ? 3 : 5;
       const courses = await CourseModel.find({ userId: userObjId, status: 'ready' }).select('structure').lean();
       let completedCourses = 0;
 
@@ -250,14 +249,19 @@ const isAchievementEarned = async (
     }
 
     // Streak achievements
-    case 'streak_3': return (context.streak as number) >= 3;
-    case 'streak_7': return (context.streak as number) >= 7;
-    case 'streak_30': return (context.streak as number) >= 30;
+    case 'streak_3':
+      return (context.streak as number) >= 3;
+    case 'streak_7':
+      return (context.streak as number) >= 7;
+    case 'streak_14':
+      return (context.streak as number) >= 14;
 
     // Quiz/mastery achievements
-    case 'perfect_quiz': return (context.score as number) === 100;
-    case 'first_review': return (context.isReview as boolean) === true;
-    case 'all_mastered_course': {
+    case 'quiz_perfect':
+      return (context.score as number) === 100;
+    case 'review_first':
+      return (context.isReview as boolean) === true;
+    case 'course_mastered': {
       const courseId = context.courseId as string;
       if (!courseId) return false;
       const course = await CourseModel.findById(courseId).select('structure').lean();
@@ -272,9 +276,10 @@ const isAchievementEarned = async (
     }
 
     // Dedication achievements
-    case 'hour_learned':
-    case 'ten_hours': {
-      const threshold = achievement.id === 'hour_learned' ? 3600 : 36000;
+    case 'hours_one':
+    case 'hours_ten':
+    case 'hours_twentyfive': {
+      const threshold = achievement.id === 'hours_one' ? 3600 : achievement.id === 'hours_ten' ? 36000 : 90000;
       const agg = await UserLessonProgressModel.aggregate([
         { $match: { userId: userObjId } },
         { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
@@ -283,10 +288,15 @@ const isAchievementEarned = async (
     }
 
     // Level achievements
-    case 'level_5': return (context.level as number) >= 5;
-    case 'level_10': return (context.level as number) >= 10;
+    case 'level_5':
+      return (context.level as number) >= 5;
+    case 'level_15':
+      return (context.level as number) >= 15;
+    case 'level_25':
+      return (context.level as number) >= 25;
 
-    default: return false;
+    default:
+      return false;
   }
 };
 
@@ -297,10 +307,7 @@ export interface OnLessonCompleteResult {
   streak: RecordActivityResult;
 }
 
-export const onLessonComplete = async (
-  userId: string,
-  courseId: string,
-): Promise<OnLessonCompleteResult> => {
+export const onLessonComplete = async (userId: string, courseId: string): Promise<OnLessonCompleteResult> => {
   // Award XP
   const xp = await awardXp(userId, XP_VALUES.LESSON_COMPLETE, 'lesson_complete');
 
