@@ -24,6 +24,7 @@ export { getModuleQuizContentController } from './getModuleQuizContent';
 export { submitQuizAttemptController } from './submitQuizAttempt';
 export { getModuleQuizProgressController } from './getModuleQuizProgress';
 export { getReviewsDueController } from './getReviewsDue';
+export { getUnattemptedQuizCountController } from './getUnattemptedQuizCount';
 export { getEditImpactController } from './getEditImpact';
 export { resetModuleQuizController } from './resetModuleQuiz';
 export { toggleFavoriteCourseController } from './toggleFavoriteCourse';

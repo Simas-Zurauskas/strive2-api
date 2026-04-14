@@ -1,4 +1,6 @@
+import mongoose from 'mongoose';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
+import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import CourseModel from '@models/CourseModel';
 import {
   QuizMasteryTier,
@@ -160,6 +162,71 @@ export const getReviewsDue = async (params: { userId: string }): Promise<ReviewD
     if (a.reviewReason !== b.reviewReason) return a.reviewReason === 'progression' ? -1 : 1;
     return (a.nextReviewAt ?? '') < (b.nextReviewAt ?? '') ? -1 : 1;
   });
+
+  return results;
+};
+
+// ── Unattempted quizzes (cross-course) ───────────────────
+
+export interface UnattemptedQuizItem {
+  courseId: string;
+  courseSlug: string | null;
+  courseName: string;
+  moduleIndex: number;
+  moduleName: string;
+}
+
+export const getUnattemptedQuizzes = async (params: { userId: string }): Promise<UnattemptedQuizItem[]> => {
+  const userObjId = new mongoose.Types.ObjectId(params.userId);
+
+  // Get all ready courses for this user
+  const courses = await CourseModel.find({ userId: userObjId, status: 'ready' })
+    .select('name slug structure')
+    .lean();
+
+  if (courses.length === 0) return [];
+
+  const courseIds = courses.map((c) => c._id);
+
+  // Get completed lesson counts grouped by course+module, and attempted quiz modules in parallel
+  const [completedAgg, quizDocs] = await Promise.all([
+    UserLessonProgressModel.aggregate([
+      { $match: { userId: userObjId, courseId: { $in: courseIds }, status: 'completed' } },
+      { $group: { _id: { courseId: '$courseId', moduleIndex: '$moduleIndex' }, count: { $sum: 1 } } },
+    ]),
+    UserModuleQuizProgressModel.find({ userId: params.userId, courseId: { $in: courseIds } })
+      .select('courseId moduleIndex')
+      .lean(),
+  ]);
+
+  // Build lookup sets
+  const completedByModule = new Map<string, number>(
+    completedAgg.map((a) => [`${a._id.courseId}-${a._id.moduleIndex}`, a.count as number]),
+  );
+  const attemptedQuizzes = new Set<string>(
+    quizDocs.map((q) => `${q.courseId}-${q.moduleIndex}`),
+  );
+
+  const results: UnattemptedQuizItem[] = [];
+  for (const course of courses) {
+    if (!course.structure?.modules) continue;
+    for (let mi = 0; mi < course.structure.modules.length; mi++) {
+      const mod = course.structure.modules[mi];
+      const totalLessons = mod.lessons?.length ?? 0;
+      if (totalLessons === 0) continue;
+      const completedLessons = completedByModule.get(`${course._id}-${mi}`) ?? 0;
+      const key = `${course._id}-${mi}`;
+      if (completedLessons >= totalLessons && !attemptedQuizzes.has(key)) {
+        results.push({
+          courseId: course._id.toString(),
+          courseSlug: course.slug ?? null,
+          courseName: course.name || 'Untitled Course',
+          moduleIndex: mi,
+          moduleName: mod.name || `Module ${mi + 1}`,
+        });
+      }
+    }
+  }
 
   return results;
 };

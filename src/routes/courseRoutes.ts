@@ -26,6 +26,7 @@ import {
   submitQuizAttemptController,
   getModuleQuizProgressController,
   getReviewsDueController,
+  getUnattemptedQuizCountController,
   getEditImpactController,
   resetModuleQuizController,
   toggleFavoriteCourseController,
@@ -45,6 +46,7 @@ router.post('/execute-code', protect, executeCodeController);
 router.get('/continue', protect, getContinueLearningController);
 router.get('/progress-summary', protect, getProgressSummaryController);
 router.get('/reviews-due', protect, getReviewsDueController);
+router.get('/unattempted-quiz-count', protect, getUnattemptedQuizCountController);
 router.get('/favorites', protect, getFavoriteCourseIdsController);
 router.post('/favorite/:courseId', protect, toggleFavoriteCourseController);
 router.get('/bookmarked-lessons', protect, getBookmarkedLessonsController);

@@ -101,7 +101,7 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
   {
     id: 'lessons_fifty',
     category: 'milestone',
-    name: 'Century Scholar',
+    name: 'Bookworm',
     description: 'Complete 50 lessons',
     icon: 'graduation-cap',
     trigger: 'lesson',
@@ -151,7 +151,7 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
   {
     id: 'streak_14',
     category: 'streak',
-    name: 'Monthly Dedication',
+    name: 'Fortnight Flame',
     description: '14-day learning streak',
     icon: 'flame',
     trigger: 'streak',
@@ -203,7 +203,7 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
   {
     id: 'hours_twentyfive',
     category: 'dedication',
-    name: 'Centurion',
+    name: 'Marathon Learner',
     description: 'Spend 25 hours learning',
     icon: 'clock',
     trigger: 'lesson',
