@@ -32,6 +32,79 @@ const daysBetween = (a: string, b: string): number => {
   return Math.round((dateB.getTime() - dateA.getTime()) / 86400000);
 };
 
+/** Count missed weekdays (Mon–Fri) strictly between two YYYY-MM-DD dates (exclusive on both ends). */
+const missedWeekdays = (a: string, b: string): number => {
+  const start = new Date(a + 'T00:00:00Z');
+  const end = new Date(b + 'T00:00:00Z');
+  let count = 0;
+  const d = new Date(start);
+  d.setUTCDate(d.getUTCDate() + 1);
+  while (d < end) {
+    const dow = d.getUTCDay(); // 0=Sun, 6=Sat
+    if (dow !== 0 && dow !== 6) count++;
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return count;
+};
+
+// ── Live Streak (read-time adjustment) ────────────────────
+
+export const computeLiveStreak = (profile: {
+  activeDates: string[];
+  streakFreezeAvailable: number;
+  streakFreezeUsedDates: string[];
+}): number => {
+  const today = todayStr();
+  const sorted = [...new Set(profile.activeDates)].sort((a, b) => b.localeCompare(a));
+
+  if (sorted.length === 0) return 0;
+
+  // Check if streak is alive: no missed weekdays between most recent activity and today
+  const mostRecent = sorted[0];
+  if (mostRecent !== today) {
+    const missed = missedWeekdays(mostRecent, today);
+    if (missed > 1) return 0;
+    if (missed === 1 && profile.streakFreezeAvailable <= 0) return 0;
+  }
+
+  // Recompute streak from activeDates going backwards
+  const freezeSet = new Set(profile.streakFreezeUsedDates);
+  let streak = 1;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const missed = missedWeekdays(sorted[i], sorted[i - 1]);
+    if (missed === 0) {
+      streak++;
+    } else if (missed === 1) {
+      // Check if the missed weekday was covered by a freeze
+      const d = new Date(sorted[i] + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + 1);
+      while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() + 1);
+      if (freezeSet.has(d.toISOString().slice(0, 10))) {
+        streak++;
+      } else {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+
+  return streak;
+};
+
+/** If the live streak exceeds the stored value, persist it and check streak achievements. */
+export const syncLiveStreak = async (userId: string, liveStreak: number): Promise<void> => {
+  const doc = await UserGamificationModel.findOne({ userId: new mongoose.Types.ObjectId(userId) });
+  if (!doc || liveStreak <= doc.currentStreak) return;
+
+  doc.currentStreak = liveStreak;
+  if (liveStreak > doc.longestStreak) doc.longestStreak = liveStreak;
+  await doc.save();
+
+  await checkAchievements(userId, 'streak', { streak: liveStreak });
+};
+
 // ── Get or Create Profile ──────────────────────────────────
 
 export const getOrCreateProfile = async (userId: string): Promise<IUserGamification> => {
@@ -129,19 +202,21 @@ export const recordActivity = async (userId: string): Promise<RecordActivityResu
   doc.activeDates.push(today);
 
   if (doc.lastActiveDate) {
-    const gap = daysBetween(doc.lastActiveDate, today);
+    const missed = missedWeekdays(doc.lastActiveDate, today);
 
-    if (gap === 1) {
-      // Consecutive day
+    if (missed === 0) {
+      // Consecutive (or only weekends between)
       doc.currentStreak += 1;
-    } else if (gap === 2 && doc.streakFreezeAvailable > 0) {
-      // Missed exactly 1 day — auto-apply freeze
+    } else if (missed === 1 && doc.streakFreezeAvailable > 0) {
+      // Missed exactly 1 weekday — auto-apply freeze
       doc.streakFreezeAvailable -= 1;
-      doc.streakFreezeUsedDates.push(
-        doc.lastActiveDate.replace(/^(\d{4}-\d{2}-)(\d{2})$/, (_m, prefix, day) => {
-          return prefix + String(Number(day) + 1).padStart(2, '0');
-        }),
-      );
+      // Find the actual missed weekday
+      const d = new Date(doc.lastActiveDate + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + 1);
+      while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+        d.setUTCDate(d.getUTCDate() + 1);
+      }
+      doc.streakFreezeUsedDates.push(d.toISOString().slice(0, 10));
       doc.currentStreak += 1;
       streakFreezeUsed = true;
     } else {
@@ -422,7 +497,7 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
   // Lessons completed this week
   const now = new Date();
   const startOfWeek = new Date(now);
-  startOfWeek.setDate(now.getDate() - now.getDay());
+  startOfWeek.setDate(now.getDate() - ((now.getDay() + 6) % 7));
   startOfWeek.setHours(0, 0, 0, 0);
 
   const lessonsThisWeek = await UserLessonProgressModel.countDocuments({

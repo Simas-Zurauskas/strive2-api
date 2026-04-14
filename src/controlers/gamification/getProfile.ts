@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getOrCreateProfile } from '@services/gamificationService';
+import { getOrCreateProfile, computeLiveStreak, syncLiveStreak } from '@services/gamificationService';
 import { xpForNextLevel } from '@lib/gamificationConstants';
 
 /**
@@ -25,10 +25,17 @@ import { xpForNextLevel } from '@lib/gamificationConstants';
 export const getProfileController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
   const profile = await getOrCreateProfile(userId);
+  const liveStreak = computeLiveStreak(profile);
+
+  // Sync stored streak + award any missed achievements if live value is higher
+  if (liveStreak > profile.currentStreak) {
+    syncLiveStreak(userId, liveStreak).catch(() => {});
+  }
 
   res.status(200).json({
     data: {
       ...profile,
+      currentStreak: liveStreak,
       xpForNextLevel: xpForNextLevel(profile.level),
     },
   });
