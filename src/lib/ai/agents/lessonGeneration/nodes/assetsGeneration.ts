@@ -19,7 +19,33 @@ const BFL_API_BASE = 'https://api.bfl.ai/v1';
 const BFL_POLL_INTERVAL_MS = 3_000;
 const BFL_TIMEOUT_MS = 120_000;
 
+/**
+ * Guard against SSRF via BFL response injection.
+ *
+ * The pollingUrl and image sample URL we later `fetch()` both come out of
+ * BFL response bodies. If BFL's infra were compromised — or an intermediary
+ * MITM'd — the response could point us at internal-network hosts (e.g.
+ * `http://localhost:6379`, the EC2 metadata endpoint, a staging DB). Since
+ * we send the BFL API key on the poll call, an attacker could also trick
+ * us into leaking it to their own server. We only follow https URLs whose
+ * hostname is under `bfl.ai`.
+ */
+const isBflUrl = (raw: string): boolean => {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    return host === 'bfl.ai' || host.endsWith('.bfl.ai');
+  } catch {
+    return false;
+  }
+};
+
 const pollBflResult = async (pollingUrl: string): Promise<string> => {
+  if (!isBflUrl(pollingUrl)) {
+    throw new Error('BFL returned a polling URL outside the bfl.ai origin');
+  }
+
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < BFL_TIMEOUT_MS) {
@@ -105,10 +131,39 @@ const generateHeroImage = async (
     // 2. Poll until ready
     const imageUrl = await pollBflResult(polling_url);
 
-    // 3. Download image and upload to S3
+    // 3. Download image and upload to S3. Sample URL also comes from BFL's
+    //    response body — same SSRF concern as the poll URL, enforce the
+    //    same origin allowlist before we make an outbound request.
+    if (!isBflUrl(imageUrl)) {
+      throw new Error('BFL returned an image URL outside the bfl.ai origin');
+    }
+
+    // Typical BFL images are 2-4 MB. 10 MB is a generous ceiling that
+    // accommodates the occasional high-detail render while preventing a
+    // pathological or attacker-supplied response from ballooning heap use
+    // to hundreds of MB (the whole payload is `Buffer.from(arrayBuffer)`'d
+    // into memory before the S3 upload). We check the Content-Length
+    // header pre-download to short-circuit the transfer when possible, and
+    // re-check after download for servers that omit or lie about the
+    // header.
+    const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
     const imageRes = await fetch(imageUrl);
     if (!imageRes.ok) throw new Error(`Failed to download BFL image: ${imageRes.status}`);
+
+    const advertised = Number(imageRes.headers.get('content-length') ?? 0);
+    if (Number.isFinite(advertised) && advertised > MAX_IMAGE_BYTES) {
+      throw new Error(
+        `BFL image exceeds ${MAX_IMAGE_BYTES} byte cap (advertised ${advertised})`,
+      );
+    }
+
     const buffer = Buffer.from(await imageRes.arrayBuffer());
+    if (buffer.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error(
+        `BFL image exceeds ${MAX_IMAGE_BYTES} byte cap (downloaded ${buffer.byteLength})`,
+      );
+    }
 
     const key = `lessons/${courseId}/${moduleIndex}/${lessonIndex}/hero.png`;
     await uploadBuffer(key, buffer, 'image/png');

@@ -59,6 +59,19 @@ Adjust question difficulty based on the course depth:
   - "Critique this approach — what does it get wrong?"
   - 20% apply, 40% analyze, 40% evaluate
 
+## Adapting to the course domain
+
+The \`## Course context\` may include a \`Course domain\` field. Shape questions and distractors to the discipline so the assessment feels native to the subject, not generic:
+
+- **programming**: questions can reference code snippets, API behavior, error messages, stack traces, performance trade-offs. Distractors should reflect common misunderstandings a developer at this depth might hold.
+- **stem** (mathematics, physics, chemistry, statistics, engineering, economics): use numeric scenarios, formula applications, derivation traps, unit errors. LaTeX is welcome in question text (\`$E = mc^2$\`) when it clarifies. Distractors reflect common algebraic slips or misapplied formulas.
+- **humanities**: interpretation, comparison of viewpoints, identifying arguments vs claims, historical cause-and-effect. Distractors are plausible but less defensible readings, not opposite positions.
+- **language**: grammar in context, translation nuance, collocation, register. Distractors are near-miss choices a learner at this level would be tempted by.
+- **creative**: craft decisions, technique recognition, stylistic intent. Distractors reflect common amateur choices.
+- **other / unknown**: let the lesson summaries drive the framing; stay neutral on domain-specific styling.
+
+Never emit code snippets as question content for non-programming domains, and never use prose-only questions for a deep programming module — the mismatch reads as a bug to the learner.
+
 ## Synthesis questions
 
 At least 2 questions MUST draw from 2+ different lessons (sourceLessons should have multiple indices). These cross-lesson questions are the most valuable — they test whether the learner can connect concepts across the module.

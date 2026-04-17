@@ -2,6 +2,13 @@ import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, Del
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { AWS_S3_BUCKET, AWS_S3_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from '@conf/env';
 
+// ⚠ Keys are currently scoped by `courseId` only (e.g.
+// `lessons/{courseId}/{moduleIndex}/{lessonIndex}/hero.png`). Course ids
+// are ObjectIds and aren't exposed across tenants, so today this is safe.
+// For defense in depth, moving the scheme to `lessons/{userId}/{courseId}/…`
+// would keep presigned URLs tightly bound to a user even if a courseId ever
+// leaks into a shared context. Deferred because it requires coordinated
+// migration of existing stored keys.
 const s3 = new S3Client({
   region: AWS_S3_REGION,
   credentials: {

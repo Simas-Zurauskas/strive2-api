@@ -3,8 +3,13 @@ import { generateObject } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { z } from 'zod';
 import { MODEL_IDS } from '@lib/langchain';
+import { sanitizeLatex } from '@lib/latexSanitizer';
 import { LessonState } from '../state';
 import { lessonBlockSchema } from '../prompts';
+
+// Block types whose `content` is markdown-ish and may contain LaTeX math.
+// `code` and `mermaid` carry domain-specific syntax and must never be sanitized.
+const MATH_BEARING_TYPES = new Set(['intro', 'section', 'callout', 'summary']);
 
 // ── Heuristics for detecting non-code content in code blocks ──
 
@@ -264,10 +269,32 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     };
   });
 
-  // Return updated blocks if anything changed (repair, filtering, or conversion)
-  const blocksChanged = blocks !== state.contentBlocks || converted || filtered.length !== blocks.length;
+  // ── LaTeX sanitization: catch malformed math spans server-side ──
+  // Broken LaTeX from the LLM would otherwise surface as KaTeX error nodes
+  // (rehype-katex throwOnError: false) or, worse, silently wrong rendering.
+  // Replace failing spans with inline-code fallbacks before the blocks hit the client.
+  let totalLatexFailures = 0;
+  const sanitized = corrected.map((b) => {
+    if (!MATH_BEARING_TYPES.has(b.type) || !b.content) return b;
+    const { text, failedSpans } = sanitizeLatex(b.content);
+    if (failedSpans === 0) return b;
+    totalLatexFailures += failedSpans;
+    console.warn(`[contentValidation] LaTeX sanitize: block ${b.id} had ${failedSpans} malformed span(s)`.yellow);
+    return { ...b, content: text };
+  });
+
+  if (totalLatexFailures > 0) {
+    console.warn(`[contentValidation] ⚠ Total LaTeX parse failures: ${totalLatexFailures}`.yellow);
+  }
+
+  // Return updated blocks if anything changed (repair, filtering, conversion, or LaTeX fix-ups)
+  const blocksChanged =
+    blocks !== state.contentBlocks ||
+    converted ||
+    filtered.length !== blocks.length ||
+    totalLatexFailures > 0;
   if (blocksChanged) {
-    return { contentBlocks: corrected };
+    return { contentBlocks: sanitized };
   }
 
   return {};

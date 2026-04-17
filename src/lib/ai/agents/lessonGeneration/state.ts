@@ -1,5 +1,7 @@
 import { Annotation } from '@langchain/langgraph';
+import { CourseDomain } from '@lib/constants';
 import { ILessonBlock } from '@models/LessonContentModel';
+import { GeneratedInsight } from '@services/insightContentService';
 
 export const LessonStateAnnotation = Annotation.Root({
   // ── Input (set at invocation) ──────────────────────────
@@ -7,6 +9,10 @@ export const LessonStateAnnotation = Annotation.Root({
   goal: Annotation<string>(),
   answers: Annotation<{ questionId: string; answer: string }[]>(),
   depth: Annotation<string>(),
+  domain: Annotation<CourseDomain | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
   structure: Annotation<{
     modules: {
       name: string;
@@ -63,6 +69,10 @@ export const LessonStateAnnotation = Annotation.Root({
   linksBlock: Annotation<ILessonBlock | null>({
     reducer: (_prev, next) => next,
     default: () => null,
+  }),
+  insights: Annotation<GeneratedInsight[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
   }),
 });
 

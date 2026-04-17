@@ -1,5 +1,4 @@
 import pLimit from 'p-limit';
-import { Types } from 'mongoose';
 import JobModel from '@models/JobModel';
 import CourseModel, { CourseDocument } from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
@@ -10,6 +9,7 @@ import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews } from './courseService';
 import { cleanupCourseContent } from './courseCleanupService';
 import { jobEvents } from './jobEvents';
+import { bgError } from '@lib/bg';
 import { generateUniqueSlug } from '@lib/slugify';
 
 // ── Concurrency & timeout ───────────────────────────────
@@ -50,17 +50,12 @@ interface SubmitJobParams {
 // ── Submit ─────────────────────────────────────────────────
 
 export const submitJob = async (params: SubmitJobParams): Promise<string> => {
-  // Atomic guard: only allow job submission if no active job exists for this course
-  const updated = await CourseModel.findOneAndUpdate(
-    { _id: params.courseId, $or: [{ activeJobId: null }, { activeJobId: { $exists: false } }] },
-    { activeJobId: new Types.ObjectId() }, // Placeholder — replaced below with real job ID
-    { returnDocument: 'after' },
-  );
-
-  if (!updated) {
-    throw new Error('A job is already running for this course. Please wait for it to complete.');
-  }
-
+  // Create the Job document first, then atomically claim the course slot with
+  // the real job id. The previous pattern wrote a placeholder ObjectId to
+  // `course.activeJobId` and then overwrote it — which meant (a) clients that
+  // polled /job/:jobId during the placeholder window got a 404, and (b) if
+  // JobModel.create() threw after the guard, the placeholder was never
+  // cleared and the course stayed permanently locked.
   const job = await JobModel.create({
     userId: params.userId,
     courseId: params.courseId,
@@ -69,7 +64,22 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
     ...(params.metadata && { metadata: params.metadata }),
   });
 
-  await CourseModel.findByIdAndUpdate(params.courseId, { activeJobId: job._id });
+  const claimed = await CourseModel.findOneAndUpdate(
+    {
+      _id: params.courseId,
+      $or: [{ activeJobId: null }, { activeJobId: { $exists: false } }],
+    },
+    { activeJobId: job._id },
+    { returnDocument: 'after' },
+  );
+
+  if (!claimed) {
+    // Another job won the slot. Delete the orphan we just created so it
+    // doesn't linger as pending forever (the startup reaper would eventually
+    // catch it anyway, but cleaning up immediately is cheap and correct).
+    await JobModel.deleteOne({ _id: job._id }).catch(bgError('jobRunner.orphanDelete'));
+    throw new Error('A job is already running for this course. Please wait for it to complete.');
+  }
 
   jobEvents.emit('started', {
     jobId: job._id.toString(),
@@ -119,6 +129,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
         slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
+        domain: result.domain,
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [],
       });
@@ -134,12 +145,14 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
         currentStructure: course.structure as {
           modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
         },
+        currentDomain: course.domain ?? null,
         feedback,
         feedbackHistory: course.feedbackHistory,
       });
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
         slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
+        domain: result.domain,
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [...course.feedbackHistory, feedback],
         pendingFeedback: null,
@@ -162,6 +175,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
           goal: course.goal,
           answers: formatCourseAnswers(course),
           depth: course.depth ?? 'comprehensive',
+          domain: course.domain ?? null,
           structure: course.structure as {
             modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
           },
@@ -223,6 +237,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
         goal: course.goal,
         answers: formatCourseAnswers(course),
         depth: course.depth ?? 'comprehensive',
+        domain: course.domain ?? null,
         structure: course.structure as {
           modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
         },

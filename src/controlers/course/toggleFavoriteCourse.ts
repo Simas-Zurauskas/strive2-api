@@ -36,22 +36,26 @@ export const toggleFavoriteCourseController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
   const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
 
-  const user = await UserModel.findById(userId).select('favoriteCourseIds');
-  if (!user) {
-    res.status(404).json({ message: 'User not found' });
+  // Two-step atomic toggle. The prior read-splice-save pattern lost data on
+  // concurrent clicks — both clients would start from the same pre-toggle
+  // array, both would save their half of the change, last write wins.
+  //
+  // Step 1: conditionally add (filter requires the id be absent).
+  // Step 2: if step 1's filter missed, the id was already present — pull it.
+  // Each step is a single atomic Mongo op. Two concurrent toggles resolve
+  // the same as "add then remove", which is the correct semantics for a
+  // user double-tapping the favorite button.
+  const added = await UserModel.findOneAndUpdate(
+    { _id: userId, favoriteCourseIds: { $ne: course._id } },
+    { $push: { favoriteCourseIds: course._id } },
+    { projection: { _id: 1 } },
+  );
+
+  if (added) {
+    res.status(200).json({ data: { favorited: true } });
     return;
   }
 
-  const index = user.favoriteCourseIds.findIndex((id) => id.equals(course._id));
-  const isFavorited = index !== -1;
-
-  if (isFavorited) {
-    user.favoriteCourseIds.splice(index, 1);
-  } else {
-    user.favoriteCourseIds.push(course._id);
-  }
-
-  await user.save();
-
-  res.status(200).json({ data: { favorited: !isFavorited } });
+  await UserModel.updateOne({ _id: userId }, { $pull: { favoriteCourseIds: course._id } });
+  res.status(200).json({ data: { favorited: false } });
 });

@@ -5,7 +5,11 @@ import { jobEvents } from '@services/jobEvents';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import CourseModel from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
+import InsightModel from '@models/InsightModel';
+import { GeneratedInsight, persistLessonInsights } from '@services/insightContentService';
 import { deleteByPrefix } from '@services/s3Service';
+import { bgError } from '@lib/bg';
+import { bumpSseStreamEnded, bumpSseStreamStarted } from '@lib/metrics';
 import { generateLessonSchema, assertPreviousLessonGenerated } from './validation';
 
 /**
@@ -76,28 +80,79 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     throw new Error('A generation is already running for this course. Please wait.');
   }
 
-  // Notify clients (including other tabs) which lesson is generating
-  jobEvents.emit('started', { jobId: 'stream', courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex });
-
-  // ── SSE headers ──────────────────────────────────────
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Content-Encoding', 'none');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders();
-
+  // Everything from header setup through the LangGraph stream happens inside
+  // a single try/catch whose finally clears activeJobId. The previous
+  // structure had SSE header setup + jobEvents.emit between the guard and
+  // the try block; any throw in that window (e.g., `res.setHeader` after a
+  // subtle proxy rewrite, or a synchronous listener throwing) would leave
+  // the course permanently locked. Moving them inside the try folds those
+  // paths into the same cleanup.
   let clientConnected = true;
-  res.on('close', () => { clientConnected = false; });
+
+  // AbortController threaded into `lessonGenerationAgent.stream()` so two
+  // different failure modes can stop the agent from burning tokens and BFL
+  // image generations uselessly:
+  //   1. Client disconnect (tab closed, network dropped) — detected via
+  //      `res.on('close')` below.
+  //   2. Severe SSE backpressure — if the Node writable buffer grows past
+  //      our watermark (5 MB) the consumer isn't keeping up; we abort
+  //      rather than let allBlocks + the writable buffer accumulate into a
+  //      process-wide memory bomb.
+  // AbortErrors raised downstream are caught and treated as a normal
+  // teardown path in the `catch` block.
+  const abortController = new AbortController();
+  const BACKPRESSURE_WATERMARK_BYTES = 5 * 1024 * 1024;
 
   const writeSSE = (payload: Record<string, unknown>) => {
-    if (!clientConnected) return;
+    if (!clientConnected || abortController.signal.aborted) return;
+
+    // If the writable buffer is already oversized, the client is slow or
+    // the socket is stalled. Abort the agent run so we don't keep feeding
+    // it; the catch block will clean up the partial lesson.
+    if (res.writableLength > BACKPRESSURE_WATERMARK_BYTES) {
+      console.warn(
+        `[API] SSE backpressure watermark exceeded (${res.writableLength} bytes), aborting stream`.yellow,
+      );
+      abortController.abort();
+      return;
+    }
+
+    // `res.write` returns false when the socket buffer is full. We don't
+    // synchronously wait for `drain` (the LangGraph writer contract is
+    // sync), but the watermark check above catches the pathological case
+    // where `drain` never fires because the client vanished.
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
-  console.log(`[API] Streaming lesson generation (LangGraph), courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
-
   try {
+    // Counter for the /metrics scraper — paired with the decrement in the
+    // finally block so "active streams" = started - ended at any instant.
+    bumpSseStreamStarted();
+
+    // Notify clients (including other tabs) which lesson is generating
+    jobEvents.emit('started', { jobId: 'stream', courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex });
+
+    // ── SSE headers ──────────────────────────────────────
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Content-Encoding', 'none');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    res.on('close', () => {
+      clientConnected = false;
+      // Cancel the LangGraph run immediately — no point finishing blocks
+      // that won't be delivered, and the in-flight Anthropic / BFL / Tavily
+      // calls will unwind on the shared signal.
+      if (!abortController.signal.aborted) {
+        console.log(`[API] Client disconnected mid-stream, aborting agent`.gray);
+        abortController.abort();
+      }
+    });
+
+    console.log(`[API] Streaming lesson generation (LangGraph), courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
+
     // Invoke the LangGraph agent with custom stream mode
     // Nodes emit events via config.writer → writeSSE → client
     const input = {
@@ -105,6 +160,7 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
       goal: course.goal,
       answers: formatCourseAnswers(course),
       depth: course.depth ?? 'comprehensive',
+      domain: course.domain ?? null,
       structure: course.structure as {
         modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
       },
@@ -118,6 +174,9 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     const allBlocks: unknown[] = [];
     let savedHeroImageUrl: string | null = null;
     let savedSummary = '';
+    // Insights arrive as a batch from the insightGeneration node — persist after
+    // the lesson itself is saved so we have a valid LessonContent._id to FK to.
+    let pendingInsights: GeneratedInsight[] = [];
 
     // Save to DB — called after each block arrives so content survives page reload
     const saveToDb = async () => {
@@ -157,6 +216,8 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
         savedHeroImageUrl = (event.s3Key as string) || (event.url as string);
         debouncedSave();
       }
+      // 'insight' events are informational (for future live-preview UIs);
+      // the authoritative persistence happens via the insights chunk below.
     };
 
     // Stream with updates mode (5-minute timeout to prevent hanging on API stalls)
@@ -164,6 +225,9 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     const streamPromise = (async () => {
       for await (const chunk of await lessonGenerationAgent.stream(input, {
         streamMode: 'updates',
+        // Shared abort signal — propagates to every in-flight LLM call and
+        // the stream iterator itself via LangGraph's RunnableConfig.
+        signal: abortController.signal,
         configurable: {
           writer: trackingWriter,
         },
@@ -172,6 +236,12 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
         if (chunk.contentGeneration) {
           const { contentSummary } = chunk.contentGeneration as { contentSummary?: string };
           if (contentSummary) savedSummary = contentSummary;
+        }
+
+        // Capture the final insight set from the insight generation node.
+        if (chunk.insightGeneration) {
+          const { insights } = chunk.insightGeneration as { insights?: GeneratedInsight[] };
+          if (insights) pendingInsights = insights;
         }
 
         // Content is validated — send placeholders for interactive blocks so client can show skeletons
@@ -217,6 +287,22 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     );
     console.log(`[API] Final save: ${allBlocks.length} blocks, image: ${!!savedHeroImageUrl}`.gray);
 
+    // Persist insights after the lesson row exists (FK target). Best-effort —
+    // insights are additive enrichment; a failure here must not fail the lesson.
+    if (pendingInsights.length > 0) {
+      try {
+        const persistedIds = await persistLessonInsights({
+          courseId,
+          moduleIndex,
+          lessonIndex,
+          insights: pendingInsights,
+        });
+        writeSSE({ type: 'insights_saved', count: persistedIds.length });
+      } catch (e) {
+        console.warn(`[API] Insight persistence failed: ${e instanceof Error ? e.message : e}`.yellow);
+      }
+    }
+
     writeSSE({ type: 'complete' });
     console.log(`[API] Lesson stream complete, courseId: ${courseId}`.green);
 
@@ -225,16 +311,39 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
     jobEvents.emit('update', { jobId: 'stream', status: 'completed', courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[API] Lesson stream failed: ${message}`.red);
-    writeSSE({ type: 'error', message });
+    // Distinguish user-initiated abort (client closed tab, backpressure
+    // watermark hit) from a real failure. The cleanup + activeJobId clear
+    // still run either way — the partial lesson should never persist —
+    // but we don't want AbortErrors to look like a bug in logs.
+    const isAbort =
+      abortController.signal.aborted ||
+      (error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message)));
 
-    // Clean up incomplete content and S3 assets from failed generation
+    if (isAbort) {
+      console.log(`[API] Lesson stream aborted: ${message}`.gray);
+    } else {
+      console.error(`[API] Lesson stream failed: ${message}`.red);
+      writeSSE({ type: 'error', message });
+    }
+
+    // Clean up incomplete content and S3 assets from failed generation.
+    // Insights for this lesson are also removed so a retry gets a clean slate.
     await LessonContentModel.deleteOne({ courseId, moduleIndex, lessonIndex, completed: false });
-    deleteByPrefix(`lessons/${courseId}/${moduleIndex}/${lessonIndex}/`).catch(() => {});
+    InsightModel.deleteMany({ courseId, moduleIndex, lessonIndex }).catch(bgError('streamLesson.cleanupInsights'));
+    deleteByPrefix(`lessons/${courseId}/${moduleIndex}/${lessonIndex}/`).catch(bgError('streamLesson.cleanupS3'));
 
     await CourseModel.findByIdAndUpdate(courseId, { activeJobId: null });
-    jobEvents.emit('update', { jobId: 'stream', status: 'failed', error: message, courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex });
+    // Emit a failure event so other tabs / the reviewsDue bell clear their
+    // "generating" state. Abort path uses 'failed' too because downstream
+    // clients just need to know the run ended without a completion.
+    jobEvents.emit('update', {
+      jobId: 'stream', status: 'failed', error: isAbort ? 'aborted' : message,
+      courseId, type: 'generate_lesson', userId, moduleIndex, lessonIndex,
+    });
   } finally {
+    // Pair with bumpSseStreamStarted above. Incremented on every exit path
+    // (success, error, abort) — the `/metrics` gauge reads the delta.
+    bumpSseStreamEnded();
     res.end();
   }
 });

@@ -1,6 +1,15 @@
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ANTHROPIC_API_KEY } from '@conf/env';
 
+// ⚠ No per-user or per-course spend cap is enforced anywhere in this file
+// or in the controllers that invoke these models. A malicious or runaway
+// client that hammers `/api/course` endpoints can generate arbitrary
+// numbers of lessons — each one drives 4+ Sonnet calls. Rate limiting at
+// the HTTP layer (see index.ts + authLimiter) caps request rate but not
+// tokens-per-user. For production, track a rolling spend window on
+// UserGamificationModel (or a new UserUsageModel) and refuse jobs above
+// a tier-dependent budget. Out of scope for the current audit pass.
+
 // ── Model IDs (centralized for easy version pinning) ──
 export const MODEL_IDS = {
   SONNET: 'claude-sonnet-4-6',

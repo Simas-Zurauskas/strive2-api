@@ -16,6 +16,16 @@ export const QuizStateAnnotation = Annotation.Root({
   }>(),
   moduleIndex: Annotation<number>(),
 
+  // Course domain (programming / stem / humanities / language / creative /
+  // other) — set by the course-design agent and threaded through every
+  // downstream prompt so assessment style matches the discipline. Nullable
+  // because legacy courses predate the domain field; the prompt simply
+  // omits the domain line when absent.
+  domain: Annotation<string | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+
   // ── Derived (set by contextLoad) ───────────────────────
   moduleName: Annotation<string>({
     reducer: (_prev, next) => next,

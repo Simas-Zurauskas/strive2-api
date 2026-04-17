@@ -3,6 +3,8 @@ import LessonContentModel from '@models/LessonContentModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
+import InsightModel from '@models/InsightModel';
+import UserInsightProgressModel from '@models/UserInsightProgressModel';
 import { deleteByPrefix } from '@services/s3Service';
 
 export interface CleanupResult {
@@ -11,6 +13,8 @@ export interface CleanupResult {
   lessonProgressDeleted: number;
   quizContentDeleted: number;
   quizProgressDeleted: number;
+  insightsDeleted: number;
+  insightProgressDeleted: number;
 }
 
 /**
@@ -19,13 +23,23 @@ export interface CleanupResult {
  * to prevent orphaned data keyed by stale module/lesson indices.
  */
 export const cleanupCourseContent = async (courseId: string): Promise<CleanupResult> => {
-  const [chatSessions, lessonContent, lessonProgress, quizContent, quizProgress] = await Promise.all([
-    CourseDesignChatModel.deleteMany({ courseId }),
-    LessonContentModel.deleteMany({ courseId }),
-    UserLessonProgressModel.deleteMany({ courseId }),
-    ModuleQuizContentModel.deleteMany({ courseId }),
-    UserModuleQuizProgressModel.deleteMany({ courseId }),
-  ]);
+  // Grab insight ids first so we can cascade to UserInsightProgress before
+  // deleting the insight rows themselves.
+  const insightIdDocs = await InsightModel.find({ courseId }).select('_id').lean();
+  const insightIds = insightIdDocs.map((d) => d._id);
+
+  const [chatSessions, lessonContent, lessonProgress, quizContent, quizProgress, insights, insightProgress] =
+    await Promise.all([
+      CourseDesignChatModel.deleteMany({ courseId }),
+      LessonContentModel.deleteMany({ courseId }),
+      UserLessonProgressModel.deleteMany({ courseId }),
+      ModuleQuizContentModel.deleteMany({ courseId }),
+      UserModuleQuizProgressModel.deleteMany({ courseId }),
+      InsightModel.deleteMany({ courseId }),
+      insightIds.length > 0
+        ? UserInsightProgressModel.deleteMany({ insightId: { $in: insightIds } })
+        : Promise.resolve({ deletedCount: 0 }),
+    ]);
 
   // S3 cleanup (hero images, future assets) — fire and forget
   deleteByPrefix(`lessons/${courseId}/`)
@@ -42,6 +56,8 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
     lessonProgressDeleted: lessonProgress.deletedCount,
     quizContentDeleted: quizContent.deletedCount,
     quizProgressDeleted: quizProgress.deletedCount,
+    insightsDeleted: insights.deletedCount,
+    insightProgressDeleted: insightProgress.deletedCount ?? 0,
   };
 
   const total = Object.values(result).reduce((a, b) => a + b, 0);

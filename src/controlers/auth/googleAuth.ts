@@ -51,6 +51,15 @@ export const googleAuthController = asyncHandler(async (req, res) => {
     throw new Error('Unable to verify Google account');
   }
 
+  // Google tokens may carry an email the user hasn't proven ownership of
+  // (e.g., workspace-admin-added alias, unverified gmail). Accepting those
+  // would let an attacker sign in as a victim who uses the same address
+  // for credentials auth. Require Google's own verification step.
+  if (!payload.email_verified) {
+    res.status(400);
+    throw new Error('Google account email is not verified');
+  }
+
   const { email, sub, picture, name } = payload;
 
   const user = await UserModel.findOneAndUpdate(

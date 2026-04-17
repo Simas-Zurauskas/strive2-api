@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { getClarifyModel, getStructureModel } from '@lib/langchain';
 import { withRetry } from '@lib/retry';
-import { COURSE_DEPTHS, CourseDepth, QUESTION_TYPES } from '@lib/constants';
+import { COURSE_DEPTHS, COURSE_DOMAINS, CourseDepth, CourseDomain, QUESTION_TYPES } from '@lib/constants';
 import { sanitizePromptInput } from '@lib/sanitize';
 
 // ── Clarify course ──────────────────────────────────────
@@ -132,6 +132,7 @@ Generate personalized depth previews for each tier.`;
 
 const structureOutputSchema = z.object({
   courseName: z.string(),
+  domain: z.enum(COURSE_DOMAINS),
   reasoning: z.object({
     learnerProfile: z.string(),
     topicAnalysis: z.string(),
@@ -159,6 +160,15 @@ const STRUCTURE_SYSTEM_PROMPT = `You are a world-class curriculum designer, subj
 Your task: Design a structured course as a linear sequence of modules, each containing ordered lessons. The course must be deeply personalized — not a generic template with the learner's topic inserted.
 
 First, generate a concise, descriptive course title as the courseName field (2-6 words). The title should reflect both the topic and the learner's specific focus — "Kubernetes for Data Engineers" not just "Learn Kubernetes." Make it specific and professional.
+
+Next, classify the course into ONE primary domain (the \`domain\` field). This classification steers downstream lesson generation (block-type mix, math-vs-code balance, example style):
+- "programming": software engineering, systems, web, devops, data engineering, security, any course whose primary content is source code.
+- "stem": mathematics, physics, chemistry, biology, statistics, engineering, economics, quantitative finance — disciplines whose content lives on equations, formulas, and quantitative reasoning. Choose this even when some coding is involved, as long as math is the heart of the subject.
+- "humanities": history, philosophy, literature, law, social sciences, religion.
+- "language": natural-language learning (Spanish, Mandarin, ASL, etc.).
+- "creative": visual art, music, writing craft, design, photography, performance.
+- "other": anything that genuinely doesn't fit the above (business skills, cooking, gardening, personal finance basics, etc.).
+Pick the SINGLE best fit. When a course spans domains (e.g., computational physics), pick the domain that best describes the lesson-level content the learner will read.
 
 CRITICAL — Before generating any modules, you MUST fill in the reasoning fields. Think carefully:
 
@@ -224,12 +234,13 @@ interface RefineInput extends StructureInput {
   currentStructure: {
     modules: { name: string; description: string; lessons: { name: string; description: string }[] }[];
   };
+  currentDomain?: CourseDomain | null;
   feedback: string;
   feedbackHistory: string[];
 }
 
 export const refineCourseStructure = async (params: RefineInput): Promise<StructureOutput> => {
-  const { answers, depth, currentStructure } = params;
+  const { answers, depth, currentStructure, currentDomain } = params;
   const goal = sanitizePromptInput(params.goal);
   const feedback = sanitizePromptInput(params.feedback);
   const feedbackHistory = params.feedbackHistory.map(sanitizePromptInput);
@@ -250,7 +261,7 @@ ${formatAnswers(answers)}
 
 Chosen course depth: ${depth}
 
---- CURRENT STRUCTURE (previously generated) ---
+${currentDomain ? `Current course domain: ${currentDomain} — keep this domain unless the refinement genuinely changes the subject of the course.\n\n` : ''}--- CURRENT STRUCTURE (previously generated) ---
 ${currentStructureText}
 
 ${feedbackHistory.length > 0 ? `--- PREVIOUS REFINEMENTS (already applied to the structure above) ---\n${feedbackHistory.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\n` : ''}--- CURRENT REQUEST ---

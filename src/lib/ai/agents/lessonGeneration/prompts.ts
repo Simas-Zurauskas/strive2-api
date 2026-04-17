@@ -130,12 +130,31 @@ Each block needs:
 
 A "summary" field (separate from the summary block) — a 1-2 sentence plain text summary of the entire lesson.
 
-## Adapting to non-technical topics
+## Mathematical notation (universal)
 
-For non-programming topics (business, humanities, science, arts, etc.):
-- Mermaid diagrams are still useful for processes, decision trees, concept maps, and relationships.
-- Callouts work well for key definitions, common misconceptions, and expert insights.
-- Sections should use real-world examples, historical cases, or concrete scenarios — not abstract definitions.
+Write EVERY mathematical expression in LaTeX — never approximate with ASCII.
+- Inline math: wrap in single dollars, e.g. \`$\\alpha$\`, \`$x^2 + y^2 = r^2$\`, \`$\\frac{1}{2}mv^2$\`.
+- Display math (block-level equations): wrap in double dollars, e.g. \`$$\\int_0^\\infty e^{-x}\\,dx = 1$$\`.
+- Forbidden ASCII approximations: \`x^2\`, \`sqrt(2)\`, \`pi\`, \`->\`, \`<=\`, \`!=\`, \`~\` (for approximately), \`*\` (for multiplication). Always use the LaTeX equivalents: \`$x^2$\`, \`$\\sqrt{2}$\`, \`$\\pi$\`, \`$\\to$\`, \`$\\leq$\`, \`$\\neq$\`, \`$\\approx$\`, \`$\\cdot$\` or \`$\\times$\`.
+- LaTeX inside JSON must escape backslashes correctly: write \`$\\\\alpha$\` in your JSON output, which deserializes to the LaTeX source \`$\\alpha$\`.
+- The client renders LaTeX with KaTeX. Unsupported macros (e.g. \`\\require{...}\`, \`\\begin{tikzpicture}\`) will fall back to plaintext — stick to standard math-mode commands.
+
+## Adapting to the course domain
+
+The \`## Course context\` in the user message includes a \`Course domain\` field. Adapt block selection to it:
+
+- **stem** (mathematics, physics, chemistry, statistics, engineering, economics, quantitative finance, any equation-driven subject):
+  - Code blocks are WELCOME when the lesson asks the learner to compute, simulate, or implement something — numerical methods, simulations, data analysis (Python/numpy/pandas, R, Julia), solving systems symbolically, etc. Don't force code into purely theoretical lessons, but don't avoid it when it earns its place.
+  - Use display math (\`$$…$$\`) generously for canonical equations, definitions, and derivations the learner must see cleanly laid out.
+  - Anchor abstract concepts to worked numerical examples with explicit units.
+  - Mermaid diagrams are great for concept hierarchies, proof structure, reaction pathways, and cause-effect networks.
+  - Callouts of variant "important" suit key definitions and theorems; "warning" suits common sign or unit errors.
+
+- **programming**: code blocks central (existing rules). LaTeX math is rarely needed; use only if the lesson involves algorithmic complexity or numerical methods.
+
+- **humanities**, **creative**, **language**, **other**: ZERO code blocks. Prose-driven sections with real-world examples; callouts for definitions and misconceptions; mermaid for processes or decision trees.
+
+- **null / unknown domain**: follow the general rules above, letting the lesson name and description guide you.
 
 ## Quality principles
 
@@ -169,6 +188,28 @@ export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer 
      - For frontend/web topics, focus exercises on JavaScript logic that produces console output (e.g., DOM manipulation logic, data transformations, event handling logic, state management patterns) rather than visual rendering. Use console.log to verify results.
      - For topics that are purely visual (CSS layouts, styling, design) where stdout validation is not practical, generate a thought exercise instead (metadata: null) — ask the learner to build something locally or analyze a given design.
    - For non-code topics: write a thought exercise, analysis task, or application scenario as the content. Set metadata to null. The exercise should require the learner to apply concepts from the lesson to a concrete situation — not just summarize what they read.
+
+## Mathematical notation
+
+Write EVERY mathematical expression in LaTeX — in quiz \`question\` and \`explanation\` AND in exercise \`content\`. Inline: \`$\\pi$\`, \`$v^2 = u^2 + 2as$\`, \`$f'(x)$\`, \`$\\int_0^1 x^2\\,dx$\`. Display (use sparingly in quizzes; welcome in exercise prose for canonical equations): \`$$…$$\`. Forbidden ASCII approximations anywhere a math expression appears: \`x^2\`, \`sqrt(2)\`, \`pi\`, \`->\`, \`<=\`, \`!=\`, \`~\`. The client renders LaTeX with KaTeX.
+
+Quiz OPTIONS are rendered as plain text — do NOT put LaTeX inside options. If a choice needs a symbol, use Unicode (π, ², ³, √, ∞, ≤, ≠, ≈, ±, ·, ×, ∫, Σ, Δ) instead.
+
+## Adapting the exercise to the course domain
+
+The \`Course domain\` in the lesson info tells you how the exercise should be shaped. It OVERRIDES any signal from code appearing in the lesson body (code in a stem lesson is illustration, not prescription).
+
+- **stem** (mathematics, physics, chemistry, statistics, engineering, economics, quantitative finance):
+  - DEFAULT to a THOUGHT exercise (\`metadata: null\`): a math/science problem the learner solves with paper and pencil. Examples: "compute this derivative", "find the limit", "evaluate the integral", "apply this theorem", "show this identity", "for which $x$ does the equation hold?", "compute the force given these values", "balance this reaction", "find the variance of $X$".
+  - Use LaTeX liberally in the exercise \`content\` — canonical equations, explicit variables, numerical setup.
+  - ONLY produce a code exercise when the lesson itself is explicitly about numerical IMPLEMENTATION (e.g., a lesson titled "Implementing Newton's method in Python", "Simulating the n-body problem in NumPy", "Monte Carlo integration in R"). A calculus lesson that includes a code snippet to illustrate secant-slope convergence is NOT a code lesson — it's a math lesson that happens to have code.
+  - When in doubt: thought exercise. Never invent a code exercise just because the lesson body contains code.
+
+- **programming**: use a CODE exercise. Existing code-exercise rules apply.
+
+- **humanities**, **creative**, **language**, **other**: THOUGHT exercise (\`metadata: null\`) — analysis, application, or reflection, as already specified below.
+
+- **null or unknown domain**: judge from the lesson's main subject. If it teaches how to write code, use a code exercise. If it teaches concepts, ideas, or quantitative reasoning, use a thought exercise.
 
 ## Depth calibration
 
@@ -223,11 +264,20 @@ Good code exercise block:
   "order": 5.5
 }
 
-Good non-code exercise block:
+Good non-code exercise block (humanities/business):
 {
   "id": "exercise-1",
   "type": "exercise",
   "content": "## Pricing Strategy Analysis\\n\\nA SaaS startup currently charges $49/month flat. They're considering switching to usage-based pricing. Using the concepts from this lesson:\\n\\n1. List two specific customer segments that would benefit from usage-based pricing and two that would not\\n2. Identify the key metric you would base usage pricing on and justify why\\n3. Describe one risk of the transition and how you would mitigate it",
+  "metadata": null,
+  "order": 5.5
+}
+
+Good STEM thought exercise (calculus — note: math is in LaTeX, metadata is null, NOT a code exercise even though the lesson could have shown code):
+{
+  "id": "exercise-1",
+  "type": "exercise",
+  "content": "## Computing a Derivative from the Definition\\n\\nUse the limit definition of the derivative to compute $f'(x)$ for $f(x) = 3x^2 - 5x + 2$ at the point $x = 4$.\\n\\n1. Write out $\\\\lim_{h \\\\to 0} \\\\frac{f(4+h) - f(4)}{h}$ explicitly.\\n2. Expand, simplify, and cancel the $h$ in the numerator.\\n3. Take the limit as $h \\\\to 0$ to get the instantaneous slope.\\n\\nCheck your result against the power rule: $f'(x) = 6x - 5$, so $f'(4) = 19$.",
   "metadata": null,
   "order": 5.5
 }

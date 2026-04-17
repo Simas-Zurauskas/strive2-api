@@ -6,7 +6,7 @@ const formatAnswers = (answers: { questionId: string; answer: string }[]) =>
   answers.map((a) => `- ${a.questionId}: ${sanitizePromptInput(a.answer)}`).join('\n');
 
 export const contextLoad = async (state: QuizState): Promise<Partial<QuizState>> => {
-  const { answers, depth, structure, moduleIndex } = state;
+  const { answers, depth, domain, structure, moduleIndex } = state;
   const goal = sanitizePromptInput(state.goal);
 
   const mod = structure.modules[moduleIndex];
@@ -54,7 +54,7 @@ Include 1-2 review questions from this previous module. Set isInterleaved=true a
   const humanMessage = `## Course context
 
 Learning goal: ${goal}
-Course depth: ${depth}
+Course depth: ${depth}${domain ? `\nCourse domain: ${domain}` : ''}
 
 Learner's answers to clarifying questions:
 ${formatAnswers(answers)}

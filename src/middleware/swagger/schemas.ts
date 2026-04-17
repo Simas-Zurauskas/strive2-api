@@ -1,8 +1,9 @@
 import { OpenAPIV3 } from 'openapi-types';
 import { ERROR_CODES } from '@middleware/errorMiddleware';
-import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
+import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
 import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
+import { INSIGHT_KINDS, INSIGHT_MODES, INSIGHT_RATINGS, INSIGHT_STATES } from '@lib/insightConstants';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
 
@@ -38,6 +39,11 @@ export const schemas: SchemaMap = {
   CourseStatus: {
     type: 'string',
     enum: [...COURSE_STATUSES],
+  },
+
+  CourseDomain: {
+    type: 'string',
+    enum: [...COURSE_DOMAINS],
   },
 
   JobStatusEnum: {
@@ -470,7 +476,7 @@ export const schemas: SchemaMap = {
 
   GamificationProfile: {
     type: 'object',
-    required: ['userId', 'totalXp', 'level', 'xpForNextLevel', 'currentStreak', 'longestStreak', 'streakFreezeAvailable', 'earnedAchievements'],
+    required: ['userId', 'totalXp', 'level', 'xpForNextLevel', 'currentStreak', 'longestStreak', 'earnedAchievements'],
     properties: {
       userId: { type: 'string' },
       totalXp: { type: 'number' },
@@ -479,8 +485,6 @@ export const schemas: SchemaMap = {
       currentStreak: { type: 'integer' },
       longestStreak: { type: 'integer' },
       lastActiveDate: { type: 'string', nullable: true },
-      streakFreezeAvailable: { type: 'integer' },
-      streakFreezeUsedDates: { type: 'array', items: { type: 'string' } },
       earnedAchievements: {
         type: 'array',
         items: { $ref: '#/components/schemas/EarnedAchievement' },
@@ -493,6 +497,18 @@ export const schemas: SchemaMap = {
         type: 'array',
         items: { $ref: '#/components/schemas/XpLogEntry' },
       },
+    },
+  },
+
+  WeeklySummaryPeriod: {
+    type: 'object',
+    required: ['xp', 'timeSeconds', 'lessons', 'quizzes', 'insights'],
+    properties: {
+      xp: { type: 'number' },
+      timeSeconds: { type: 'number' },
+      lessons: { type: 'integer' },
+      quizzes: { type: 'integer' },
+      insights: { type: 'integer' },
     },
   },
 
@@ -524,6 +540,14 @@ export const schemas: SchemaMap = {
       },
       totalTimeLearned: { type: 'number' },
       lessonsThisWeek: { type: 'integer' },
+      weeklySummary: {
+        type: 'object',
+        required: ['thisWeek', 'lastWeek'],
+        properties: {
+          thisWeek: { $ref: '#/components/schemas/WeeklySummaryPeriod' },
+          lastWeek: { $ref: '#/components/schemas/WeeklySummaryPeriod' },
+        },
+      },
     },
   },
 
@@ -537,6 +561,7 @@ export const schemas: SchemaMap = {
       slug: { type: 'string', nullable: true },
       status: { $ref: '#/components/schemas/CourseStatus' },
       goal: { type: 'string' },
+      domain: nullableRef('#/components/schemas/CourseDomain'),
       clarifyData: { $ref: '#/components/schemas/ClarifyResponse' },
       answers: { type: 'object' },
       depth: { $ref: '#/components/schemas/CourseDepth' },
@@ -548,6 +573,158 @@ export const schemas: SchemaMap = {
       activeJobId: { type: 'string' },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  // ── Insights schemas ──────────────────────────────────────
+
+  InsightKind: {
+    type: 'string',
+    enum: [...INSIGHT_KINDS],
+  },
+
+  InsightMode: {
+    type: 'string',
+    enum: [...INSIGHT_MODES],
+  },
+
+  InsightState: {
+    type: 'string',
+    enum: [...INSIGHT_STATES],
+  },
+
+  InsightRating: {
+    type: 'integer',
+    enum: [...INSIGHT_RATINGS],
+    description: '1=Again, 2=Hard, 3=Good, 4=Easy',
+  },
+
+  InsightQueueItem: {
+    type: 'object',
+    required: [
+      'insightId', 'courseId', 'courseSlug', 'courseName', 'lessonId',
+      'moduleIndex', 'lessonIndex', 'lessonName', 'moduleName',
+      'kind', 'prompt', 'answer', 'conceptTags', 'sourceBlockId',
+      'isNew', 'mode', 'box', 'dueAt',
+    ],
+    properties: {
+      insightId: { type: 'string' },
+      courseId: { type: 'string' },
+      courseSlug: { type: 'string', nullable: true },
+      courseName: { type: 'string' },
+      lessonId: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+      lessonName: { type: 'string' },
+      moduleName: { type: 'string' },
+      kind: { $ref: '#/components/schemas/InsightKind' },
+      prompt: { type: 'string' },
+      answer: { type: 'string' },
+      conceptTags: { type: 'array', items: { type: 'string' } },
+      sourceBlockId: { type: 'string' },
+      isNew: { type: 'boolean' },
+      mode: { $ref: '#/components/schemas/InsightMode' },
+      box: { type: 'integer' },
+      dueAt: { type: 'string', format: 'date-time', nullable: true },
+    },
+  },
+
+  InsightQueue: {
+    type: 'object',
+    required: ['due', 'fresh', 'counts'],
+    properties: {
+      due: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/InsightQueueItem' },
+      },
+      fresh: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/InsightQueueItem' },
+      },
+      counts: {
+        type: 'object',
+        required: ['dueTotal', 'freshAvailable', 'learned'],
+        properties: {
+          dueTotal: { type: 'integer' },
+          freshAvailable: { type: 'integer' },
+          learned: { type: 'integer' },
+        },
+      },
+    },
+  },
+
+  RateInsightResult: {
+    type: 'object',
+    required: ['box', 'state', 'reps', 'lapses', 'nextDue', 'lastReview'],
+    properties: {
+      box: { type: 'integer' },
+      state: { $ref: '#/components/schemas/InsightState' },
+      reps: { type: 'integer' },
+      lapses: { type: 'integer' },
+      nextDue: { type: 'string', format: 'date-time' },
+      lastReview: { type: 'string', format: 'date-time', nullable: true },
+      masteredAt: { type: 'string', format: 'date-time', nullable: true },
+      justMastered: {
+        type: 'boolean',
+        description: 'True exactly once per insight, when this rating first reached Leitner box 4. Never true on re-mastery.',
+      },
+    },
+  },
+
+  GradeVerdict: {
+    type: 'string',
+    enum: ['correct', 'partial', 'incorrect'],
+  },
+
+  GradeResult: {
+    type: 'object',
+    required: ['score', 'verdict', 'feedback'],
+    properties: {
+      score: { type: 'number', minimum: 0, maximum: 1 },
+      verdict: { $ref: '#/components/schemas/GradeVerdict' },
+      feedback: { type: 'string' },
+    },
+  },
+
+  InsightStats: {
+    type: 'object',
+    required: [
+      'totalInsights', 'totalReviewed', 'totalMastered',
+      'reviewedThisWeek', 'reviewedLastWeek',
+      'dueToday', 'dueThisWeek',
+      'boxDistribution', 'recentHistory',
+    ],
+    properties: {
+      totalInsights: { type: 'integer' },
+      totalReviewed: { type: 'integer' },
+      totalMastered: { type: 'integer', description: 'Insights that reached Leitner box 4 at least once (masteredAt !== null)' },
+      reviewedThisWeek: { type: 'integer' },
+      reviewedLastWeek: { type: 'integer' },
+      dueToday: { type: 'integer' },
+      dueThisWeek: { type: 'integer' },
+      boxDistribution: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['box', 'count'],
+          properties: {
+            box: { type: 'integer' },
+            count: { type: 'integer' },
+          },
+        },
+      },
+      recentHistory: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['date', 'reviews', 'avgRating'],
+          properties: {
+            date: { type: 'string' },
+            reviews: { type: 'integer' },
+            avgRating: { type: 'number' },
+          },
+        },
+      },
     },
   },
 };

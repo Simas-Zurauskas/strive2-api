@@ -7,6 +7,7 @@ import {
   REVIEW_MAX_INTERVAL_DAYS,
   REVIEW_MIN_INTERVAL_DAYS,
 } from '@lib/constants';
+import { bgError } from '@lib/bg';
 import * as gamificationService from '@services/gamificationService';
 
 // ── Mastery tier computation ─────────────────────────────
@@ -123,7 +124,15 @@ export const submitQuizAttempt = async (params: SubmitQuizAttemptParams): Promis
   await UserModuleQuizProgressModel.findOneAndUpdate(
     { userId, courseId, moduleIndex },
     {
-      $push: { attempts: attempt },
+      // Rolling-window attempts cap. Without the $slice, spam-submitting
+      // quizzes grows this array without bound — each attempt records up to
+      // 8 questions with prose explanations, so a bored user or a broken
+      // client can quickly push the document past Mongo's 16 MB limit, at
+      // which point legitimate quiz writes start failing. 100 attempts is
+      // orders of magnitude more than any real learner would accumulate,
+      // and bestScore/bestTier above retain the historical peak regardless
+      // of which individual attempts are still in the array.
+      $push: { attempts: { $each: [attempt], $slice: -100 } },
       $set: {
         bestScore,
         bestTier,
@@ -143,7 +152,9 @@ export const submitQuizAttempt = async (params: SubmitQuizAttemptParams): Promis
   // Fire-and-forget gamification side effects on quiz completion
   const isReview = !!existing && attemptNumber > 1;
   const prevBestScore = existing?.bestScore ?? 0;
-  gamificationService.onQuizComplete(userId, courseId, score, prevBestScore, isReview).catch(() => {});
+  gamificationService
+    .onQuizComplete(userId, courseId, score, prevBestScore, isReview)
+    .catch(bgError('gamification.onQuizComplete'));
 
   return { attempt, nextReviewAt, reviewIntervalDays };
 };

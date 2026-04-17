@@ -6,3 +6,4 @@ export * from './verifyEmail';
 export * from './resendVerification';
 export * from './resendVerificationAuthenticated';
 export * from './deleteAccount';
+export * from './logout';
