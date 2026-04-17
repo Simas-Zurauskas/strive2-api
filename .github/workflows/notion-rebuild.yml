@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: 'Knowledge Base: Rebuild'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rebuild-technical:
+    uses: Simas-Zurauskas/notion-docs-agent/.github/workflows/rebuild-technical.yml@master
+    with:
+      notion_root_id: 336c2628-ef95-81bf-8806-d8b738a2d8eb
+    secrets: inherit
+  rebuild-product:
+    uses: Simas-Zurauskas/notion-docs-agent/.github/workflows/rebuild-product.yml@master
+    with:
+      notion_root_id: 338c2628-ef95-81c1-afd6-de5c29af8bd1
+    secrets: inherit
