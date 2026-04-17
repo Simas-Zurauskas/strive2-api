@@ -1,4 +1,5 @@
 import Mailjet from 'node-mailjet';
+import * as Sentry from '@sentry/node';
 import { MAILJET_API_KEY, MAILJET_API_SECRET, FRONTEND_URL } from '@conf/env';
 
 export const SENDER_EMAIL_ACCOUNT = 'accounts@strive-learning.com';
@@ -8,6 +9,12 @@ const mailjet = new Mailjet({
   apiSecret: MAILJET_API_SECRET,
 });
 
+/**
+ * Low-level Mailjet send. Callers should prefer `sendVerificationEmailAsync`
+ * below — the request-path controllers must never block on Mailjet's p99.
+ * This remains exported for tests and for the rare case where the caller
+ * genuinely needs a sync round-trip.
+ */
 export const sendVerificationEmail = async (params: { to: string; token: string }): Promise<void> => {
   const { to, token } = params;
   const verificationUrl = `${FRONTEND_URL}/verify-email?token=${token}&email=${encodeURIComponent(to)}`;
@@ -41,5 +48,66 @@ export const sendVerificationEmail = async (params: { to: string; token: string 
         TextPart: `Verify your email address\n\nThanks for signing up for Strive. Visit the link below to verify your email:\n\n${verificationUrl}\n\nThis link expires in 24 hours. If you didn't create an account, you can safely ignore this email.`,
       },
     ],
+  });
+};
+
+/**
+ * Fire-and-forget version of `sendVerificationEmail`.
+ *
+ * The caller returns to the HTTP request immediately; the actual Mailjet
+ * round-trip runs on the next tick with three exponential-backoff retries
+ * (1s → 4s → 16s). All failures land in Sentry tagged `email_delivery` so
+ * we can spot outage trends without blocking every signup on Mailjet's
+ * happy-path latency.
+ *
+ * Trade-off: if the process dies between signup and the email attempt,
+ * the email is lost — but the user can always trigger a resend from
+ * `/api/auth/resend-verification` or the authenticated equivalent. That's
+ * a much smaller loss than a 30-second signup stall during a Mailjet
+ * degradation, which would 5xx every signup attempt synchronously.
+ *
+ * Durable cross-restart delivery (Redis queue, BullMQ, or an email-job
+ * row in JobModel) is a legitimate follow-up once we have Redis in the
+ * stack. The current in-process approach needs zero new infra.
+ */
+export const sendVerificationEmailAsync = (params: { to: string; token: string }): void => {
+  // Pushed to a microtask so the HTTP handler resolves first and we don't
+  // accidentally inherit a cancelled async context from a slow client.
+  setImmediate(async () => {
+    const delays = [1_000, 4_000, 16_000]; // ms
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      try {
+        await sendVerificationEmail(params);
+        if (attempt > 0) {
+          console.log(
+            `[email] Verification email to ${params.to} succeeded on retry ${attempt}`.cyan,
+          );
+        }
+        return;
+      } catch (err) {
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[email] Verification email attempt ${attempt + 1} to ${params.to} failed: ${message}`.yellow,
+        );
+
+        if (attempt < delays.length) {
+          await new Promise((r) => setTimeout(r, delays[attempt]));
+        }
+      }
+    }
+
+    // Exhausted retries — record as a breadcrumb so ops sees the trend.
+    // The end user can still self-recover via the resend-verification
+    // endpoint; we don't surface this failure to them.
+    console.error(
+      `[email] Verification email to ${params.to} failed after ${delays.length + 1} attempts`.red,
+    );
+    Sentry.captureException(lastError, {
+      tags: { email_delivery: 'verification' },
+      extra: { to: params.to, attempts: delays.length + 1 },
+    });
   });
 };

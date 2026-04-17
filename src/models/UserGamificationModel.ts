@@ -26,9 +26,6 @@ export interface IUserGamification {
   currentStreak: number;
   longestStreak: number;
   lastActiveDate: string | null; // YYYY-MM-DD
-  streakFreezeAvailable: number;
-  streakFreezeLastGrantedWeek: string | null; // ISO week "2026-W15"
-  streakFreezeUsedDates: string[];
 
   // Achievements
   earnedAchievements: IEarnedAchievement[];
@@ -80,9 +77,6 @@ const schema = new Schema<IUserGamification>(
     currentStreak: { type: Number, default: 0 },
     longestStreak: { type: Number, default: 0 },
     lastActiveDate: { type: String, default: null },
-    streakFreezeAvailable: { type: Number, default: 1 },
-    streakFreezeLastGrantedWeek: { type: String, default: null },
-    streakFreezeUsedDates: { type: [String], default: [] },
 
     // Achievements
     earnedAchievements: { type: [earnedAchievementSchema], default: [] },

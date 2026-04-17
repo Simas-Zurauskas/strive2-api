@@ -82,6 +82,9 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
         delete ret.emailVerificationToken;
         delete ret.emailVerificationExpiry;
         delete ret.passwordResetToken;
+        // tokenVersion is a server-side session-invalidation counter;
+        // clients don't need it and leaking it exposes revocation state.
+        delete ret.tokenVersion;
         delete ret.__v;
         return ret;
       },

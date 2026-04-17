@@ -2,14 +2,13 @@ import mongoose from 'mongoose';
 import UserGamificationModel, { IUserGamification } from '@models/UserGamificationModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
+import UserInsightProgressModel from '@models/UserInsightProgressModel';
 import CourseModel from '@models/CourseModel';
 import {
   XP_VALUES,
   XpSource,
   computeLevel,
   xpForNextLevel,
-  STREAK_FREEZE_WEEKLY_GRANT,
-  STREAK_FREEZE_MAX,
   ACHIEVEMENT_DEFINITIONS,
   AchievementDefinition,
 } from '@lib/gamificationConstants';
@@ -49,42 +48,26 @@ const missedWeekdays = (a: string, b: string): number => {
 
 // ── Live Streak (read-time adjustment) ────────────────────
 
-export const computeLiveStreak = (profile: {
-  activeDates: string[];
-  streakFreezeAvailable: number;
-  streakFreezeUsedDates: string[];
-}): number => {
+/**
+ * Compute the user's current streak from their activity history.
+ * Weekends are "free" — missing a Sat/Sun never breaks the streak —
+ * but missing any weekday (Mon–Fri) without activity does.
+ */
+export const computeLiveStreak = (profile: { activeDates: string[] }): number => {
   const today = todayStr();
   const sorted = [...new Set(profile.activeDates)].sort((a, b) => b.localeCompare(a));
 
   if (sorted.length === 0) return 0;
 
-  // Check if streak is alive: no missed weekdays between most recent activity and today
+  // Streak is alive only if no missed weekdays between most recent activity and today.
   const mostRecent = sorted[0];
-  if (mostRecent !== today) {
-    const missed = missedWeekdays(mostRecent, today);
-    if (missed > 1) return 0;
-    if (missed === 1 && profile.streakFreezeAvailable <= 0) return 0;
-  }
+  if (mostRecent !== today && missedWeekdays(mostRecent, today) > 0) return 0;
 
-  // Recompute streak from activeDates going backwards
-  const freezeSet = new Set(profile.streakFreezeUsedDates);
+  // Walk backwards; any missed weekday between consecutive entries ends the streak.
   let streak = 1;
-
   for (let i = 1; i < sorted.length; i++) {
-    const missed = missedWeekdays(sorted[i], sorted[i - 1]);
-    if (missed === 0) {
+    if (missedWeekdays(sorted[i], sorted[i - 1]) === 0) {
       streak++;
-    } else if (missed === 1) {
-      // Check if the missed weekday was covered by a freeze
-      const d = new Date(sorted[i] + 'T00:00:00Z');
-      d.setUTCDate(d.getUTCDate() + 1);
-      while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() + 1);
-      if (freezeSet.has(d.toISOString().slice(0, 10))) {
-        streak++;
-      } else {
-        break;
-      }
     } else {
       break;
     }
@@ -134,19 +117,36 @@ export const awardXp = async (userId: string, amount: number, source: XpSource):
     { userId: new mongoose.Types.ObjectId(userId) },
     {
       $inc: { totalXp: amount },
-      $push: { xpLog: { date: today, xp: amount, source } },
+      // Rolling window on xpLog. Every consumer (`getGamificationStats`
+      // lines 553 & 602) filters entries to the last 90 days or to the
+      // current / previous ISO week — nothing reads entries older than
+      // that. Capping at 2000 entries keeps the document under Mongo's
+      // 16 MB ceiling even for a power user with multiple XP awards per
+      // day over several years, and spares every stats read from
+      // deserializing a forever-growing array.
+      $push: { xpLog: { $each: [{ date: today, xp: amount, source }], $slice: -2000 } },
       $setOnInsert: { userId: new mongoose.Types.ObjectId(userId) },
     },
     { upsert: true, returnDocument: 'after' },
   );
 
-  // Recompute level
+  // Recompute level.
+  //
+  // `$inc` and `returnDocument: 'after'` above already make the XP increment
+  // atomic and give us the post-increment totalXp. The remaining race is on
+  // the level WRITE: if two concurrent awards compute newLevel=4 and
+  // newLevel=5 respectively, and the 4-write lands after the 5-write, the
+  // DB regresses. The conditional `level: { $lt: newLevel }` filter on
+  // updateOne prevents that — a higher saved level can never be clobbered
+  // by a lower-level save that arrives late.
   const newLevel = computeLevel(doc!.totalXp);
   const leveledUp = newLevel > doc!.level;
 
   if (newLevel !== doc!.level) {
-    doc!.level = newLevel;
-    await doc!.save();
+    await UserGamificationModel.updateOne(
+      { _id: doc!._id, level: { $lt: newLevel } },
+      { $set: { level: newLevel } },
+    );
   }
 
   // Check level-based achievements
@@ -166,13 +166,11 @@ export const awardXp = async (userId: string, amount: number, source: XpSource):
 export interface RecordActivityResult {
   currentStreak: number;
   longestStreak: number;
-  streakFreezeUsed: boolean;
   newAchievements: AchievementDefinition[];
 }
 
 export const recordActivity = async (userId: string): Promise<RecordActivityResult> => {
   const today = todayStr();
-  const currentWeek = getISOWeek(new Date());
 
   const doc = await UserGamificationModel.findOne({ userId: new mongoose.Types.ObjectId(userId) });
   if (!doc) {
@@ -180,51 +178,25 @@ export const recordActivity = async (userId: string): Promise<RecordActivityResu
     return recordActivity(userId);
   }
 
-  // Grant weekly streak freeze
-  if (doc.streakFreezeLastGrantedWeek !== currentWeek) {
-    doc.streakFreezeAvailable = Math.min(doc.streakFreezeAvailable + STREAK_FREEZE_WEEKLY_GRANT, STREAK_FREEZE_MAX);
-    doc.streakFreezeLastGrantedWeek = currentWeek;
-  }
-
-  let streakFreezeUsed = false;
-
   if (doc.lastActiveDate === today) {
     // Already active today — no streak change
     return {
       currentStreak: doc.currentStreak,
       longestStreak: doc.longestStreak,
-      streakFreezeUsed: false,
       newAchievements: [],
     };
   }
 
-  // Track this date as active
-  doc.activeDates.push(today);
+  // Track this date as active (addToSet semantics — avoid duplicates if racing).
+  if (!doc.activeDates.includes(today)) {
+    doc.activeDates.push(today);
+  }
 
-  if (doc.lastActiveDate) {
-    const missed = missedWeekdays(doc.lastActiveDate, today);
-
-    if (missed === 0) {
-      // Consecutive (or only weekends between)
-      doc.currentStreak += 1;
-    } else if (missed === 1 && doc.streakFreezeAvailable > 0) {
-      // Missed exactly 1 weekday — auto-apply freeze
-      doc.streakFreezeAvailable -= 1;
-      // Find the actual missed weekday
-      const d = new Date(doc.lastActiveDate + 'T00:00:00Z');
-      d.setUTCDate(d.getUTCDate() + 1);
-      while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
-        d.setUTCDate(d.getUTCDate() + 1);
-      }
-      doc.streakFreezeUsedDates.push(d.toISOString().slice(0, 10));
-      doc.currentStreak += 1;
-      streakFreezeUsed = true;
-    } else {
-      // Streak broken
-      doc.currentStreak = 1;
-    }
+  if (doc.lastActiveDate && missedWeekdays(doc.lastActiveDate, today) === 0) {
+    // Consecutive weekday (or only weekends between) — streak continues.
+    doc.currentStreak += 1;
   } else {
-    // First ever activity
+    // Either first-ever activity or at least one weekday was missed — streak resets.
     doc.currentStreak = 1;
   }
 
@@ -235,13 +207,11 @@ export const recordActivity = async (userId: string): Promise<RecordActivityResu
 
   await doc.save();
 
-  // Check streak achievements
   const newAchievements = await checkAchievements(userId, 'streak', { streak: doc.currentStreak });
 
   return {
     currentStreak: doc.currentStreak,
     longestStreak: doc.longestStreak,
-    streakFreezeUsed,
     newAchievements,
   };
 };
@@ -262,6 +232,62 @@ const checkAchievements = async (
 
   const userObjId = new mongoose.Types.ObjectId(userId);
   const newlyEarned: AchievementDefinition[] = [];
+
+  // ── Precompute shared aggregates ──────────────────────────
+  //
+  // The per-achievement switch below would otherwise fire the same query
+  // up to three times when multiple lesson-count thresholds are all
+  // candidates (first / ten / fifty), and loop N countDocuments per course
+  // for the course-completion family. Compute each aggregate once up
+  // front and stash it on `context` so the switch can read a plain number
+  // instead of re-hitting Mongo. The aggregates are only materialized when
+  // at least one achievement needs them, so a streak-only trigger is still
+  // a single query.
+  const candidateIds = new Set(candidates.map((c) => c.id));
+  const needsLessonCount = ['lesson_first', 'lessons_ten', 'lessons_fifty'].some((id) => candidateIds.has(id));
+  const needsCourseCompletion = ['course_first', 'courses_three', 'courses_five'].some((id) => candidateIds.has(id));
+  const needsTotalTime = ['hours_one', 'hours_ten', 'hours_twentyfive'].some((id) => candidateIds.has(id));
+
+  if (needsLessonCount) {
+    context.__completedLessonCount = await UserLessonProgressModel.countDocuments({
+      userId: userObjId,
+      status: 'completed',
+    });
+  }
+  if (needsCourseCompletion) {
+    // Per-course completed-lesson counts in a single aggregation instead
+    // of one countDocuments per course inside the handler loop.
+    const courses = await CourseModel.find({ userId: userObjId, status: 'ready' })
+      .select('structure')
+      .lean();
+    const courseIds = courses.map((c) => c._id);
+    const perCourseAgg = courseIds.length
+      ? await UserLessonProgressModel.aggregate([
+          { $match: { userId: userObjId, courseId: { $in: courseIds }, status: 'completed' } },
+          { $group: { _id: '$courseId', completed: { $sum: 1 } } },
+        ])
+      : [];
+    const completedByCourse = new Map<string, number>(
+      perCourseAgg.map((row) => [String(row._id), row.completed as number]),
+    );
+    let fullyCompleted = 0;
+    for (const course of courses) {
+      const total = course.structure?.modules?.reduce(
+        (s, m) => s + (m.lessons?.length ?? 0),
+        0,
+      ) ?? 0;
+      if (total === 0) continue;
+      if ((completedByCourse.get(String(course._id)) ?? 0) >= total) fullyCompleted++;
+    }
+    context.__fullyCompletedCourses = fullyCompleted;
+  }
+  if (needsTotalTime) {
+    const agg = await UserLessonProgressModel.aggregate([
+      { $match: { userId: userObjId } },
+      { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
+    ]);
+    context.__totalTimeSpentSeconds = (agg[0]?.total as number | undefined) ?? 0;
+  }
 
   for (const achievement of candidates) {
     const earned = await isAchievementEarned(achievement, userObjId, context);
@@ -287,41 +313,32 @@ const isAchievementEarned = async (
   userObjId: mongoose.Types.ObjectId,
   context: Record<string, unknown>,
 ): Promise<boolean> => {
+  // Lesson-count and course-completion values were precomputed once by
+  // `checkAchievements` and stashed on `context` under `__`-prefixed keys.
+  // The handlers below just read them — no fall-back queries here, because
+  // if the precompute was skipped we wouldn't be in that achievement's
+  // handler in the first place (the `needs*` guards upstream ensure the
+  // value is populated whenever a candidate needs it).
+  const completedLessonCount = (context.__completedLessonCount as number | undefined) ?? 0;
+  const fullyCompletedCourses = (context.__fullyCompletedCourses as number | undefined) ?? 0;
+  const totalTimeSpentSeconds = (context.__totalTimeSpentSeconds as number | undefined) ?? 0;
+
   switch (achievement.id) {
-    // Lesson milestones
-    case 'lesson_first': {
-      const count = await UserLessonProgressModel.countDocuments({ userId: userObjId, status: 'completed' });
-      return count >= 1;
-    }
-    case 'lessons_ten': {
-      const count = await UserLessonProgressModel.countDocuments({ userId: userObjId, status: 'completed' });
-      return count >= 10;
-    }
-    case 'lessons_fifty': {
-      const count = await UserLessonProgressModel.countDocuments({ userId: userObjId, status: 'completed' });
-      return count >= 50;
-    }
+    // Lesson milestones (single aggregate read from context)
+    case 'lesson_first':
+      return completedLessonCount >= 1;
+    case 'lessons_ten':
+      return completedLessonCount >= 10;
+    case 'lessons_fifty':
+      return completedLessonCount >= 50;
 
-    // Course completion milestones
+    // Course completion milestones (single aggregate read from context)
     case 'course_first':
+      return fullyCompletedCourses >= 1;
     case 'courses_three':
-    case 'courses_five': {
-      const threshold = achievement.id === 'course_first' ? 1 : achievement.id === 'courses_three' ? 3 : 5;
-      const courses = await CourseModel.find({ userId: userObjId, status: 'ready' }).select('structure').lean();
-      let completedCourses = 0;
-
-      for (const course of courses) {
-        const totalLessons = course.structure?.modules?.reduce((s, m) => s + (m.lessons?.length ?? 0), 0) ?? 0;
-        if (totalLessons === 0) continue;
-        const completedCount = await UserLessonProgressModel.countDocuments({
-          userId: userObjId,
-          courseId: course._id,
-          status: 'completed',
-        });
-        if (completedCount >= totalLessons) completedCourses++;
-      }
-      return completedCourses >= threshold;
-    }
+      return fullyCompletedCourses >= 3;
+    case 'courses_five':
+      return fullyCompletedCourses >= 5;
 
     // Streak achievements
     case 'streak_3':
@@ -350,17 +367,45 @@ const isAchievementEarned = async (
       return masteredCount >= totalModules;
     }
 
-    // Dedication achievements
-    case 'hours_one':
-    case 'hours_ten':
-    case 'hours_twentyfive': {
-      const threshold = achievement.id === 'hours_one' ? 3600 : achievement.id === 'hours_ten' ? 36000 : 90000;
-      const agg = await UserLessonProgressModel.aggregate([
-        { $match: { userId: userObjId } },
-        { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
-      ]);
-      return (agg[0]?.total ?? 0) >= threshold;
+    // Insight achievements (trigger: 'insight'). Cheap count-based
+    // checks first; the cross-course-day query is an aggregation and
+    // only runs while the user hasn't earned it (earnedIds guard
+    // short-circuits in checkAchievements).
+    case 'insight_first': {
+      const count = await UserInsightProgressModel.countDocuments({ userId: userObjId });
+      return count >= 1;
     }
+    case 'insight_mastered_first': {
+      const count = await UserInsightProgressModel.countDocuments({
+        userId: userObjId,
+        masteredAt: { $ne: null },
+      });
+      return count >= 1;
+    }
+    case 'insight_cross_course_day': {
+      // "3+ distinct courses reviewed today (UTC)."
+      const startOfDay = new Date(todayStr() + 'T00:00:00Z');
+      const agg = await UserInsightProgressModel.aggregate([
+        { $match: { userId: userObjId } },
+        { $unwind: '$history' },
+        { $match: { 'history.ratedAt': { $gte: startOfDay } } },
+        // Collection name for Insight model is 'Insight' (3rd arg passed
+        // explicitly in InsightModel.ts). Not Mongoose's default 'insights'.
+        { $lookup: { from: 'Insight', localField: 'insightId', foreignField: '_id', as: 'insight' } },
+        { $unwind: '$insight' },
+        { $group: { _id: '$insight.courseId' } },
+        { $count: 'distinctCourses' },
+      ]);
+      return ((agg[0]?.distinctCourses as number | undefined) ?? 0) >= 3;
+    }
+
+    // Dedication achievements (single aggregate read from context)
+    case 'hours_one':
+      return totalTimeSpentSeconds >= 3600;
+    case 'hours_ten':
+      return totalTimeSpentSeconds >= 36000;
+    case 'hours_twentyfive':
+      return totalTimeSpentSeconds >= 90000;
 
     // Level achievements
     case 'level_5':
@@ -447,12 +492,70 @@ export const onExercisePass = async (userId: string): Promise<AwardXpResult> => 
   return awardXp(userId, XP_VALUES.EXERCISE_PASS, 'exercise_pass');
 };
 
+// ── On Insight Review (orchestrator) ───────────────────────
+
+export interface OnInsightReviewResult {
+  xp: AwardXpResult;
+  streak: RecordActivityResult;
+  newAchievements: AchievementDefinition[];
+}
+
+/**
+ * Fire XP + streak credit + insight-achievement check for a graded review.
+ * Streak updates happen via recordActivity which is idempotent per-day.
+ * Achievement check uses the `earnedIds` guard, so expensive queries
+ * (cross-course) short-circuit once the user has earned the achievement.
+ */
+export const onInsightReview = async (
+  userId: string,
+  insightId: string,
+  courseId: string,
+): Promise<OnInsightReviewResult> => {
+  const xp = await awardXp(userId, XP_VALUES.INSIGHT_REVIEW, 'insight_review');
+  const streak = await recordActivity(userId);
+  const ach = await checkAchievements(userId, 'insight', { insightId, courseId, mastered: false });
+  xp.newAchievements.push(...ach);
+  return { xp, streak, newAchievements: ach };
+};
+
+// ── On Insight Mastered (orchestrator) ─────────────────────
+
+export interface OnInsightMasteredResult {
+  xp: AwardXpResult;
+  streak: RecordActivityResult;
+  newAchievements: AchievementDefinition[];
+}
+
+/**
+ * Fire the one-time mastery reward when an insight first reaches
+ * Leitner box 4. Idempotency is guaranteed upstream in the scheduler
+ * (`justMastered` is true exactly once per insight).
+ */
+export const onInsightMastered = async (
+  userId: string,
+  insightId: string,
+  courseId: string,
+): Promise<OnInsightMasteredResult> => {
+  const xp = await awardXp(userId, XP_VALUES.INSIGHT_MASTERY, 'insight_mastery');
+  const streak = await recordActivity(userId);
+  const ach = await checkAchievements(userId, 'insight', { insightId, courseId, mastered: true });
+  xp.newAchievements.push(...ach);
+  return { xp, streak, newAchievements: ach };
+};
+
 // ── Get Gamification Stats ─────────────────────────────────
 
 interface XpByDayEntry {
   date: string;
   xp: number;
-  sources: { lesson_complete: number; quiz_score: number; exercise_pass: number; review_complete: number };
+  sources: {
+    lesson_complete: number;
+    quiz_score: number;
+    exercise_pass: number;
+    review_complete: number;
+    insight_review: number;
+    insight_mastery: number;
+  };
 }
 
 interface WeeklySummaryPeriod {
@@ -460,6 +563,7 @@ interface WeeklySummaryPeriod {
   timeSeconds: number;
   lessons: number;
   quizzes: number;
+  insights: number;
 }
 
 export interface GamificationStats {
@@ -493,7 +597,7 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
   ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 89); // 89 + today = 90 days
   const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().slice(0, 10);
 
-  const emptySources = () => ({ lesson_complete: 0, quiz_score: 0, exercise_pass: 0, review_complete: 0 });
+  const emptySources = () => ({ lesson_complete: 0, quiz_score: 0, exercise_pass: 0, review_complete: 0, insight_review: 0, insight_mastery: 0 });
   const xpByDayMap = new Map<string, ReturnType<typeof emptySources>>();
 
   for (const entry of profile.xpLog) {
@@ -511,7 +615,13 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
   while (cursor <= now) {
     const dateStr = cursor.toISOString().slice(0, 10);
     const sources = xpByDayMap.get(dateStr) ?? emptySources();
-    const xp = sources.lesson_complete + sources.quiz_score + sources.exercise_pass + sources.review_complete;
+    const xp =
+      sources.lesson_complete +
+      sources.quiz_score +
+      sources.exercise_pass +
+      sources.review_complete +
+      sources.insight_review +
+      sources.insight_mastery;
     xpByDay.push({ date: dateStr, xp, sources });
     cursor.setDate(cursor.getDate() + 1);
   }
@@ -547,40 +657,62 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
     }
   }
 
-  // Time, lessons, quizzes — parallel queries
-  const [thisWeekTime, lastWeekTime, lessonsThisWeek, lessonsLastWeek, quizzesThisWeek, quizzesLastWeek] =
-    await Promise.all([
-      UserLessonProgressModel.aggregate([
-        { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfWeek } } },
-        { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
-      ]).then((r) => r[0]?.total ?? 0),
-      UserLessonProgressModel.aggregate([
-        { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfLastWeek, $lt: startOfWeek } } },
-        { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
-      ]).then((r) => r[0]?.total ?? 0),
-      UserLessonProgressModel.countDocuments({
-        userId: userObjId,
-        status: 'completed',
-        completedAt: { $gte: startOfWeek },
-      }),
-      UserLessonProgressModel.countDocuments({
-        userId: userObjId,
-        status: 'completed',
-        completedAt: { $gte: startOfLastWeek, $lt: startOfWeek },
-      }),
-      UserModuleQuizProgressModel.countDocuments({
-        userId: userObjId,
-        'attempts.completedAt': { $gte: startOfWeek },
-      }),
-      UserModuleQuizProgressModel.countDocuments({
-        userId: userObjId,
-        'attempts.completedAt': { $gte: startOfLastWeek, $lt: startOfWeek },
-      }),
-    ]);
+  // Time, lessons, quizzes, insights — parallel queries.
+  // Insight counts use an aggregation that unwinds the history[] array, since
+  // a single UserInsightProgress row can contain many reviews.
+  const countInsightReviews = (match: Record<string, unknown>) =>
+    UserInsightProgressModel.aggregate([
+      { $match: { userId: userObjId } },
+      { $unwind: '$history' },
+      { $match: match },
+      { $count: 'total' },
+    ]).then((r) => (r[0]?.total as number | undefined) ?? 0);
+
+  const [
+    thisWeekTime, lastWeekTime,
+    lessonsThisWeek, lessonsLastWeek,
+    quizzesThisWeek, quizzesLastWeek,
+    insightsThisWeek, insightsLastWeek,
+  ] = await Promise.all([
+    UserLessonProgressModel.aggregate([
+      { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfWeek } } },
+      { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
+    ]).then((r) => r[0]?.total ?? 0),
+    UserLessonProgressModel.aggregate([
+      { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfLastWeek, $lt: startOfWeek } } },
+      { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
+    ]).then((r) => r[0]?.total ?? 0),
+    UserLessonProgressModel.countDocuments({
+      userId: userObjId,
+      status: 'completed',
+      completedAt: { $gte: startOfWeek },
+    }),
+    UserLessonProgressModel.countDocuments({
+      userId: userObjId,
+      status: 'completed',
+      completedAt: { $gte: startOfLastWeek, $lt: startOfWeek },
+    }),
+    UserModuleQuizProgressModel.countDocuments({
+      userId: userObjId,
+      'attempts.completedAt': { $gte: startOfWeek },
+    }),
+    UserModuleQuizProgressModel.countDocuments({
+      userId: userObjId,
+      'attempts.completedAt': { $gte: startOfLastWeek, $lt: startOfWeek },
+    }),
+    countInsightReviews({ 'history.ratedAt': { $gte: startOfWeek } }),
+    countInsightReviews({ 'history.ratedAt': { $gte: startOfLastWeek, $lt: startOfWeek } }),
+  ]);
 
   const weeklySummary = {
-    thisWeek: { xp: thisWeekXp, timeSeconds: thisWeekTime, lessons: lessonsThisWeek, quizzes: quizzesThisWeek },
-    lastWeek: { xp: lastWeekXp, timeSeconds: lastWeekTime, lessons: lessonsLastWeek, quizzes: quizzesLastWeek },
+    thisWeek: {
+      xp: thisWeekXp, timeSeconds: thisWeekTime, lessons: lessonsThisWeek,
+      quizzes: quizzesThisWeek, insights: insightsThisWeek,
+    },
+    lastWeek: {
+      xp: lastWeekXp, timeSeconds: lastWeekTime, lessons: lessonsLastWeek,
+      quizzes: quizzesLastWeek, insights: insightsLastWeek,
+    },
   };
 
   return { xpByDay, xpByWeek, totalTimeLearned, lessonsThisWeek, weeklySummary };
@@ -658,18 +790,3 @@ export const getQuizTrends = async (userId: string): Promise<QuizTrendsResult> =
   return { attempts, averageScore, recentTrend };
 };
 
-// ── Use Streak Freeze ──────────────────────────────────────
-
-export const useStreakFreeze = async (userId: string): Promise<{ success: boolean; freezesRemaining: number }> => {
-  const doc = await UserGamificationModel.findOne({ userId: new mongoose.Types.ObjectId(userId) });
-  if (!doc || doc.streakFreezeAvailable <= 0) {
-    return { success: false, freezesRemaining: doc?.streakFreezeAvailable ?? 0 };
-  }
-
-  const today = todayStr();
-  doc.streakFreezeAvailable -= 1;
-  doc.streakFreezeUsedDates.push(today);
-  await doc.save();
-
-  return { success: true, freezesRemaining: doc.streakFreezeAvailable };
-};

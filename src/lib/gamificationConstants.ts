@@ -5,6 +5,8 @@ export const XP_VALUES = {
   QUIZ_SCORE_MULTIPLIER: 2, // score (0-100) * multiplier = 0-200 XP
   EXERCISE_PASS: 30,
   REVIEW_COMPLETE: 40,
+  INSIGHT_REVIEW: 5, // per graded rating — modest to discourage grinding
+  INSIGHT_MASTERY: 25, // one-time, first time an insight reaches Leitner box 4
 } as const;
 
 // ── Levels ─────────────────────────────────────────────────
@@ -56,14 +58,9 @@ export const xpForNextLevel = (level: number): number => {
   return xpForLevel(level + 1);
 };
 
-// ── Streaks ────────────────────────────────────────────────
-
-export const STREAK_FREEZE_WEEKLY_GRANT = 1;
-export const STREAK_FREEZE_MAX = 3;
-
 // ── XP Sources ─────────────────────────────────────────────
 
-export const XP_SOURCES = ['lesson_complete', 'quiz_score', 'exercise_pass', 'review_complete'] as const;
+export const XP_SOURCES = ['lesson_complete', 'quiz_score', 'exercise_pass', 'review_complete', 'insight_review', 'insight_mastery'] as const;
 export type XpSource = (typeof XP_SOURCES)[number];
 
 // ── Achievement Definitions ────────────────────────────────
@@ -77,7 +74,7 @@ export interface AchievementDefinition {
   name: string;
   description: string;
   icon: string;
-  trigger: 'lesson' | 'quiz' | 'streak' | 'level';
+  trigger: 'lesson' | 'quiz' | 'streak' | 'level' | 'insight';
 }
 
 export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
@@ -181,6 +178,32 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
     description: 'Complete your first spaced review',
     icon: 'refresh-cw',
     trigger: 'quiz',
+  },
+
+  // Insights
+  {
+    id: 'insight_first',
+    category: 'mastery',
+    name: 'First Recall',
+    description: 'Rate your first insight',
+    icon: 'sparkles',
+    trigger: 'insight',
+  },
+  {
+    id: 'insight_mastered_first',
+    category: 'mastery',
+    name: 'Committed to Memory',
+    description: 'Master your first insight',
+    icon: 'brain',
+    trigger: 'insight',
+  },
+  {
+    id: 'insight_cross_course_day',
+    category: 'mastery',
+    name: 'Interleaved Mind',
+    description: 'Review insights from 3 different courses in one day',
+    icon: 'shuffle',
+    trigger: 'insight',
   },
 
   // Dedication

@@ -2,7 +2,7 @@ import UserModel from '@models/UserModel';
 import { AuthProvider } from '@lib/constants';
 import asyncHandler from 'express-async-handler';
 import { generateAuthToken, hashPassword, generateVerificationToken, VERIFICATION_TOKEN_EXPIRY_MS } from '@lib/auth';
-import { sendVerificationEmail } from '@services/emailService';
+import { sendVerificationEmailAsync } from '@services/emailService';
 import { signUpSchema } from './validation';
 
 /**
@@ -60,12 +60,19 @@ export const signUpController = asyncHandler(async (req, res) => {
     authProviders: [{ provider: AuthProvider.CREDENTIALS }],
   });
 
-  try {
-    await sendVerificationEmail({ to: email, token: plainToken });
-  } catch (err) {
-    console.error('[API] Failed to send verification email:'.red, err);
-    // Don't block signup — user can resend from profile
-  }
+  // Fire-and-forget: signup returns to the client before the Mailjet round
+  // trip. Retries + Sentry capture happen inside `sendVerificationEmailAsync`.
+  // If every retry fails the user is still signed up and can trigger
+  // `/api/auth/resend-verification` manually.
+  sendVerificationEmailAsync({ to: email, token: plainToken });
 
+  // ⚠ A JWT is issued here BEFORE the user verifies their email. That
+  // contradicts `signIn`, which refuses unverified users with
+  // EMAIL_NOT_VERIFIED — meaning a signup-then-logout-then-signin cycle
+  // locks the user out until they verify, but a signup-then-keep-going
+  // flow gives them full authenticated access. Changing this requires the
+  // client to handle a signup response that has no session (stay on
+  // check-email) rather than an immediate session start. Deferred until
+  // the client change can be coordinated.
   res.status(201).json({ data: generateAuthToken({ id: user._id.toString(), tokenVersion: user.tokenVersion }) });
 });

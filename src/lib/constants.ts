@@ -6,6 +6,9 @@ export type CourseDepth = (typeof COURSE_DEPTHS)[number];
 export const COURSE_STATUSES = ['creating', 'ready', 'archived'] as const;
 export type CourseStatus = (typeof COURSE_STATUSES)[number];
 
+export const COURSE_DOMAINS = ['programming', 'stem', 'humanities', 'language', 'creative', 'other'] as const;
+export type CourseDomain = (typeof COURSE_DOMAINS)[number];
+
 // ── Jobs ──────────────────────────────────────────────────
 
 export const JOB_TYPES = ['clarify', 'generate_structure', 'refine_structure', 'generate_lesson', 'generate_depth_previews', 'generate_module_quiz'] as const;

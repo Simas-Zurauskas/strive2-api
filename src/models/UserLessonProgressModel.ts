@@ -102,6 +102,18 @@ schema.index({ userId: 1, courseId: 1, moduleIndex: 1, lessonIndex: 1 }, { uniqu
 schema.index({ userId: 1, courseId: 1 });
 schema.index({ userId: 1, lastAccessedAt: -1 });
 
+// `countDocuments({ userId, status: 'completed' })` is fired on every
+// continue-learning / progress-summary request; without a covering index
+// it forces a scan over every lesson the user has ever touched. At ~100
+// lessons per user the scan is free; at several hundred it becomes the p99
+// bottleneck on the dashboard.
+schema.index({ userId: 1, status: 1 });
+
+// Bookmarked-lessons feed is small (<100 items per user) but queried
+// frequently; the boolean filter benefits from a sparse index more than a
+// dense one because most rows have `bookmarked: false`.
+schema.index({ userId: 1, bookmarked: 1 }, { sparse: true });
+
 // ── Model ──────────────────────────────────────────────────
 
 const UserLessonProgressModel = mongoose.model<IUserLessonProgress>(

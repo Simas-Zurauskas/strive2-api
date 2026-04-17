@@ -1,7 +1,6 @@
 import UserModel from '@models/UserModel';
 import { generateVerificationToken, VERIFICATION_TOKEN_EXPIRY_MS } from '@lib/auth';
-import { AppError } from '@middleware/errorMiddleware';
-import { sendVerificationEmail } from '@services/emailService';
+import { sendVerificationEmailAsync } from '@services/emailService';
 import asyncHandler from 'express-async-handler';
 import { resendVerificationSchema } from './validation';
 
@@ -38,12 +37,8 @@ import { resendVerificationSchema } from './validation';
  *                   properties:
  *                     message:
  *                       type: string
- *       400:
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ApiError'
  *       401:
+ *         description: Invalid email or password. Returned identically whether the email is unknown or the password is wrong — the endpoint intentionally does not disclose which.
  *         content:
  *           application/json:
  *             schema:
@@ -66,22 +61,30 @@ export const resendVerificationController = asyncHandler(async (req, res) => {
     throw new Error('Invalid email or password');
   }
 
-  if (user.emailVerified) {
-    res.status(400);
-    throw new AppError('Email is already verified', { errorCode: 'EMAIL_ALREADY_VERIFIED' });
+  // Always respond 200 past this point. Returning a distinct
+  // `EMAIL_ALREADY_VERIFIED` error let an unauthenticated caller who knew a
+  // user's password enumerate verification state. We now silently skip the
+  // send for already-verified accounts: the user gets no email, won't
+  // complete verification (they don't need to), and the signal to a
+  // credential-stuffing attacker is identical to a normal send.
+  //
+  // The authenticated version of this endpoint (`/resend-verification-authenticated`)
+  // still returns the distinct error because by then the caller IS the
+  // account owner — no enumeration risk, and they benefit from the clear
+  // "you're already verified" signal.
+  if (!user.emailVerified) {
+    const { plainToken, hashedToken } = generateVerificationToken();
+
+    await UserModel.updateOne(
+      { _id: user._id },
+      {
+        emailVerificationToken: hashedToken,
+        emailVerificationExpiry: new Date(Date.now() + VERIFICATION_TOKEN_EXPIRY_MS),
+      },
+    );
+
+    sendVerificationEmailAsync({ to: email, token: plainToken });
   }
-
-  const { plainToken, hashedToken } = generateVerificationToken();
-
-  await UserModel.updateOne(
-    { _id: user._id },
-    {
-      emailVerificationToken: hashedToken,
-      emailVerificationExpiry: new Date(Date.now() + VERIFICATION_TOKEN_EXPIRY_MS),
-    },
-  );
-
-  await sendVerificationEmail({ to: email, token: plainToken });
 
   res.status(200).json({ data: { message: 'Verification email sent' } });
 });

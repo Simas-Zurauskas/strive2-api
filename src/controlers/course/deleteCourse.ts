@@ -1,7 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
-import CourseDesignChatModel from '@models/CourseDesignChatModel';
+import UserModel from '@models/UserModel';
 import { cleanupCourseContent } from '@services/courseCleanupService';
 import { getUserCourse } from '@services/courseDbService';
 
@@ -41,8 +41,17 @@ export const deleteCourseController = asyncHandler(async (req, res) => {
 
   await Promise.all([
     JobModel.deleteMany({ courseId: course._id }),
-    CourseDesignChatModel.deleteMany({ courseId: course._id }),
+    // `cleanupCourseContent` already deletes CourseDesignChat for this
+    // course, so we don't double up here. It also covers lesson content,
+    // progress, quizzes, insights, insight-progress, and S3 assets.
     cleanupCourseContent(course._id.toString()),
+    // Pull this course from every user's favoriteCourseIds. Without this,
+    // deleted courses leave dangling ObjectIds in users' favorites arrays
+    // that show up as 404s when the home screen tries to hydrate them.
+    UserModel.updateMany(
+      { favoriteCourseIds: course._id },
+      { $pull: { favoriteCourseIds: course._id } },
+    ),
   ]);
   await CourseModel.findByIdAndDelete(course._id);
 

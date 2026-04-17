@@ -7,7 +7,7 @@ import CourseModel from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import { TAVILY_API_KEY } from '@conf/env';
-import { CourseDepth } from '@lib/constants';
+import { CourseDepth, CourseDomain } from '@lib/constants';
 import { generateUniqueSlug } from '@lib/slugify';
 
 // ── modify_structure ──────────────────────────────────────
@@ -24,9 +24,10 @@ export const modifyStructure = tool(
     }
 
     try {
-      // Load feedback history and check for existing content/progress
-      const course = await CourseModel.findById(courseId).select('feedbackHistory userId').lean();
+      // Load feedback history, current domain, and check for existing content/progress
+      const course = await CourseModel.findById(courseId).select('feedbackHistory userId domain').lean();
       const feedbackHistory = (course?.feedbackHistory as string[]) ?? [];
+      const currentDomain = (course?.domain as CourseDomain | null | undefined) ?? null;
 
       const [contentCount, progressCount] = await Promise.all([
         LessonContentModel.countDocuments({ courseId }),
@@ -40,6 +41,7 @@ export const modifyStructure = tool(
         answers: answers ?? [],
         depth: (depth as CourseDepth) ?? 'comprehensive',
         currentStructure,
+        currentDomain,
         feedback: input.instruction,
         feedbackHistory,
       });
@@ -48,6 +50,7 @@ export const modifyStructure = tool(
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
         slug: await generateUniqueSlug(course!.userId.toString(), result.courseName),
+        domain: result.domain,
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [...feedbackHistory, input.instruction],
         pendingFeedback: null,

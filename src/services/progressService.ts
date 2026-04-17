@@ -3,6 +3,7 @@ import UserLessonProgressModel, { IUserLessonProgress } from '@models/UserLesson
 import LessonContentModel from '@models/LessonContentModel';
 import CourseModel from '@models/CourseModel';
 import { LessonProgressStatus } from '@lib/constants';
+import { bgError } from '@lib/bg';
 import * as gamificationService from '@services/gamificationService';
 
 // ── Status transition guard ───────────────────────────────
@@ -95,28 +96,54 @@ export const upsertLessonProgress = async (params: UpsertParams): Promise<IUserL
     { upsert: true, returnDocument: 'after' },
   );
 
-  // Handle status forward-only transition for existing docs
-  if (params.status && doc) {
-    const currentOrder = STATUS_ORDER[doc.status];
+  // Atomic forward-only status promotion.
+  //
+  // Previously this read the post-upsert doc, compared STATUS_ORDER in JS,
+  // and called doc.save(). Two concurrent calls (one in_progress, one
+  // completed) could both read the same pre-state and both save, letting
+  // the lower status overwrite the higher one. That also meant the
+  // gamification side-effect could fire zero or two times for a single
+  // user-visible completion.
+  //
+  // Now: a single conditional updateOne with a filter on the *current*
+  // status-order set. Mongo's per-document locking guarantees only one
+  // concurrent caller's filter will match, so modifiedCount === 1 is an
+  // unambiguous signal that THIS call was the one that advanced the state.
+  if (params.status) {
     const requestedOrder = STATUS_ORDER[params.status];
+    const statusesBelow = (Object.keys(STATUS_ORDER) as LessonProgressStatus[]).filter(
+      (s) => STATUS_ORDER[s] < requestedOrder,
+    );
 
-    if (requestedOrder > currentOrder) {
-      doc.status = params.status;
-      if (params.status === 'completed') {
-        doc.completedAt = now;
-      }
-      await doc.save();
+    if (statusesBelow.length > 0) {
+      const promotion = await UserLessonProgressModel.updateOne(
+        { userId, courseId, moduleIndex, lessonIndex, status: { $in: statusesBelow } },
+        {
+          $set: {
+            status: params.status,
+            ...(params.status === 'completed' ? { completedAt: now } : {}),
+          },
+        },
+      );
 
-      // Fire-and-forget gamification side effects on lesson completion
-      if (params.status === 'completed') {
-        gamificationService.onLessonComplete(userId, courseId).catch(() => {});
+      if (promotion.modifiedCount > 0) {
+        // Reflect the promotion in the returned doc so the API response
+        // matches the new state without a second read.
+        if (doc) {
+          doc.status = params.status;
+          if (params.status === 'completed') doc.completedAt = now;
+        }
+        if (params.status === 'completed') {
+          // Fire-and-forget gamification — exactly once per real transition.
+          gamificationService.onLessonComplete(userId, courseId).catch(bgError('gamification.onLessonComplete'));
+        }
       }
     }
   }
 
   // Fire-and-forget gamification for first exercise pass
   if (params.exerciseAttempt?.passed) {
-    gamificationService.onExercisePass(userId).catch(() => {});
+    gamificationService.onExercisePass(userId).catch(bgError('gamification.onExercisePass'));
   }
 
   // Record streak activity for any meaningful interaction
@@ -124,7 +151,7 @@ export const upsertLessonProgress = async (params: UpsertParams): Promise<IUserL
   const completionFired = params.status === 'completed';
   const hadMeaningfulInteraction = params.status === 'in_progress' || params.timeSpentDelta || params.quizResponse || params.exerciseAttempt;
   if (!completionFired && hadMeaningfulInteraction) {
-    gamificationService.recordActivity(userId).catch(() => {});
+    gamificationService.recordActivity(userId).catch(bgError('gamification.recordActivity'));
   }
 
   return doc!.toJSON();

@@ -14,6 +14,8 @@ export type ErrorCode = (typeof ERROR_CODES)[number];
 export interface IError {
   message?: string;
   status?: number;
+  /** Explicit HTTP status set on the error itself (honored when the controller did not call `res.status()`). */
+  statusCode?: number;
   stack?: string;
   errorCode?: ErrorCode;
 }
@@ -42,7 +44,12 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
     return;
   }
 
-  const statusCode = res.statusCode >= 400 ? res.statusCode : 500;
+  // Precedence: an explicit `res.status(4xx)` the controller set wins; next
+  // we honor `err.statusCode` (used by `parseIndexParam` / `parseInsightIdParam`
+  // and similar throw-with-code helpers); fallback is 500. Without the err
+  // branch those validation throws silently escalated to 500s in logs.
+  const errStatus = typeof err.statusCode === 'number' ? err.statusCode : undefined;
+  const statusCode = res.statusCode >= 400 ? res.statusCode : errStatus ?? 500;
   const message = err.message || 'Something went wrong';
   const errorCode = (err as AppError).errorCode;
 
@@ -52,9 +59,14 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
   const url = req.originalUrl;
   const userAgent = req.get('User-Agent');
   const userId = req.userId || 'anonymous';
+  // Correlation id from the requestId middleware — always set in practice,
+  // but we defensively allow it to be missing so a misordered middleware
+  // chain doesn't swallow the whole error handler.
+  const requestIdVal = req.id ?? '-';
 
   console.log(
     `[ERROR ${timestamp}] ${statusCode} ${method} ${url}`.bgRed.bold,
+    `\nRequest: ${requestIdVal}`,
     `\nUser: ${userId}`,
     `\nMessage: ${message}`.red,
     errorCode ? `\nCode: ${errorCode}` : '',
@@ -65,6 +77,9 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
   res.status(statusCode).json({
     message,
     ...(errorCode && { errorCode }),
+    // Echo the correlation id in the error body too — clients can quote it
+    // verbatim in bug reports and we can grep logs for the same value.
+    requestId: requestIdVal,
     stack: ENVIRONMENT === 'production' ? null : err.stack,
   });
 };

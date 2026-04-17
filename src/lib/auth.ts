@@ -10,14 +10,20 @@ export interface AuthTokenPayload {
   exp: number;
 }
 
+// 30-day expiry matches the default NextAuth session lifetime on the client.
+// Previously 100d — reduced to shorten the exposure window for stolen tokens.
+// Existing tokens retain their original baked-in exp; only newly issued tokens
+// get the shorter lifetime. A proper refresh-token flow remains a follow-up.
 export const generateAuthToken = (params: { id: string; tokenVersion: number }): string => {
   const { id, tokenVersion } = params;
-  return jwt.sign({ id, tokenVersion }, JWT_SECRET, { expiresIn: '100d' });
+  return jwt.sign({ id, tokenVersion }, JWT_SECRET, { expiresIn: '30d', algorithm: 'HS256' });
 };
 
 export const decodeAuthToken = (token: string): AuthTokenPayload | undefined => {
   try {
-    return jwt.verify(token, JWT_SECRET) as AuthTokenPayload;
+    // Explicit algorithm allowlist defends against the classic `alg: 'none'`
+    // downgrade attack and against key-confusion swaps to asymmetric algorithms.
+    return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }) as AuthTokenPayload;
   } catch {
     return undefined;
   }

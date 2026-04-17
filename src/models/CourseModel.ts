@@ -1,5 +1,5 @@
 import mongoose, { HydratedDocument, Schema, Types } from 'mongoose';
-import { COURSE_STATUSES, CourseStatus } from '@lib/constants';
+import { COURSE_DOMAINS, COURSE_STATUSES, CourseDomain, CourseStatus } from '@lib/constants';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -9,6 +9,7 @@ export interface ICourse {
   slug: string | null;
   status: CourseStatus;
   goal: string;
+  domain: CourseDomain | null;
   clarifyData: {
     questions: { id: string; question: string; type: string; options: string[] | null }[];
   } | null;
@@ -54,14 +55,25 @@ const schema = new Schema<ICourse>(
       required: true,
       index: true,
     },
-    name: { type: String, default: '' },
-    slug: { type: String, default: null },
+    // Bounds protect against DoS via oversized writes. The limits below were
+    // picked generously relative to product expectations (course names stay
+    // under ~100 chars, goals tend to be 1-3 sentences) while still
+    // preventing gigabyte-sized documents from a misbehaving client or LLM.
+    // Mongoose only enforces maxlength on new writes — existing docs over
+    // the limit are unaffected until they're next saved.
+    name: { type: String, default: '', maxlength: 200 },
+    slug: { type: String, default: null, maxlength: 200 },
     status: {
       type: String,
       enum: [...COURSE_STATUSES],
       default: 'creating',
     },
-    goal: { type: String, required: true },
+    goal: { type: String, required: true, maxlength: 5000 },
+    domain: {
+      type: String,
+      enum: [...COURSE_DOMAINS],
+      default: null,
+    },
     clarifyData: {
       type: Schema.Types.Mixed,
       default: null,
@@ -83,12 +95,18 @@ const schema = new Schema<ICourse>(
       default: null,
     },
     feedbackHistory: {
-      type: [String],
+      // Each entry is one chat-driven structure-refinement message. 5k per
+      // entry is generous for prose feedback; we do not cap the array length
+      // here because the feedback loop clears history on major events
+      // (see jobRunner.ts `generate_structure` / `refine_structure`), so
+      // unbounded growth in practice is bounded by session churn.
+      type: [{ type: String, maxlength: 5000 }],
       default: [],
     },
     pendingFeedback: {
       type: String,
       default: null,
+      maxlength: 5000,
     },
     currentStep: { type: Number, default: 1 },
     activeJobId: {

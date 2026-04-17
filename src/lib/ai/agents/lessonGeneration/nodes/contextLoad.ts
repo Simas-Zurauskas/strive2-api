@@ -26,7 +26,7 @@ const formatCourseOutline = (
 };
 
 export const contextLoad = async (state: LessonState, _config?: RunnableConfig): Promise<Partial<LessonState>> => {
-  const { answers, depth, structure, moduleIndex, lessonIndex } = state;
+  const { answers, depth, domain, structure, moduleIndex, lessonIndex } = state;
   const goal = sanitizePromptInput(state.goal);
 
   const mod = structure.modules[moduleIndex];
@@ -72,7 +72,7 @@ export const contextLoad = async (state: LessonState, _config?: RunnableConfig):
   const humanMessage = `## Course context
 
 Learning goal: ${goal}
-Course depth: ${depth}
+Course depth: ${depth}${domain ? `\nCourse domain: ${domain}` : ''}
 
 Learner's answers to clarifying questions:
 ${formatAnswers(answers)}
@@ -93,10 +93,17 @@ Generate the full lesson content as structured blocks.`;
 
   console.log(`[contextLoad] ✓ Built prompts for "${lesson.name}"`.green);
 
+  // Defensive sanitization of the state fields that later prompt nodes
+  // interpolate directly (interactiveGeneration embeds lessonName,
+  // lessonDescription, moduleName into its human message). These are
+  // LLM-generated — and the first-stage LLM has a strong system prompt —
+  // but second-order prompt injection via a malformed lesson name has
+  // essentially zero latency to defend against, so we strip the obvious
+  // override patterns here rather than relying on downstream discipline.
   return {
     humanMessage,
-    lessonName: lesson.name,
-    lessonDescription: lesson.description,
-    moduleName: mod.name,
+    lessonName: sanitizePromptInput(lesson.name),
+    lessonDescription: sanitizePromptInput(lesson.description),
+    moduleName: sanitizePromptInput(mod.name),
   };
 };

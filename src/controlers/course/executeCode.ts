@@ -157,8 +157,20 @@ export const executeCodeController = asyncHandler(async (req, res) => {
 
   const result = await response.json();
 
-  // Decode base64 outputs
-  const decode = (val: string | null) => (val ? Buffer.from(val, 'base64').toString('utf-8') : null);
+  // Decode base64 outputs and clamp to a sane upper bound. A program that
+  // logs megabytes would otherwise be decoded in full and buffered into the
+  // response JSON — a cheap way to spike API memory use or fill the wire
+  // with useless bytes. 1 MB per stream is plenty for lesson exercises;
+  // anything larger is truncated with an explicit marker so the learner
+  // knows the output was cut.
+  const OUTPUT_CAP_BYTES = 1_000_000;
+  const TRUNCATE_MARKER = '\n\n[output truncated — exceeded 1 MB]';
+  const decode = (val: string | null): string | null => {
+    if (!val) return null;
+    const raw = Buffer.from(val, 'base64').toString('utf-8');
+    if (Buffer.byteLength(raw, 'utf-8') <= OUTPUT_CAP_BYTES) return raw;
+    return raw.slice(0, OUTPUT_CAP_BYTES) + TRUNCATE_MARKER;
+  };
 
   res.status(200).json({
     data: {

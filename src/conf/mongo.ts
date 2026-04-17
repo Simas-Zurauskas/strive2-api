@@ -9,24 +9,34 @@ import { MONGO_URI } from './env';
 
 const cleanupOrphanedJobs = async () => {
   try {
-    const orphanedCourses = await CourseModel.find({ activeJobId: { $ne: null } }).lean();
-
-    for (const course of orphanedCourses) {
-      const job = await JobModel.findById(course.activeJobId).lean();
-
-      if (!job || job.status === 'completed' || job.status === 'failed') {
-        await CourseModel.findByIdAndUpdate(course._id, { activeJobId: null });
-      } else {
-        await JobModel.findByIdAndUpdate(course.activeJobId, {
-          status: 'failed',
-          error: 'Server restarted during processing',
-        });
-        await CourseModel.findByIdAndUpdate(course._id, { activeJobId: null });
-      }
+    // Step 1: fail every in-flight job in one sweep.
+    //
+    // This runs before the server accepts traffic (see connectDB awaiters in
+    // index.ts), so nothing in this process could have created a legitimate
+    // in-flight job yet — any `pending` or `processing` row is a carcass
+    // from the previous run. Covers three carcass classes in one update:
+    //   (a) jobs whose course still points at them  →  locked courses
+    //   (b) jobs whose course had `activeJobId` cleared elsewhere  →  zombies
+    //   (c) jobs created by `submitJob` where the process crashed between
+    //       `JobModel.create` and the `activeJobId` claim step  →  orphans
+    const now = new Date();
+    const failed = await JobModel.updateMany(
+      { status: { $in: ['pending', 'processing'] } },
+      { $set: { status: 'failed', error: 'Server restarted during processing', completedAt: now } },
+    );
+    if (failed.modifiedCount > 0) {
+      console.log(`[Startup] Failed ${failed.modifiedCount} in-flight job(s) from previous run`.cyan);
     }
 
-    if (orphanedCourses.length > 0) {
-      console.log(`[Startup] Cleaned up ${orphanedCourses.length} orphaned job reference(s)`.cyan);
+    // Step 2: clear every course.activeJobId. No in-flight job exists
+    // anywhere after Step 1, so any remaining pointer is stale. Single
+    // sweep is O(1) queries vs the previous per-course N+1 loop.
+    const cleared = await CourseModel.updateMany(
+      { activeJobId: { $ne: null } },
+      { $set: { activeJobId: null } },
+    );
+    if (cleared.modifiedCount > 0) {
+      console.log(`[Startup] Cleared activeJobId on ${cleared.modifiedCount} course(s)`.cyan);
     }
 
     // Delete partial content left by interrupted generations

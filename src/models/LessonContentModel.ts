@@ -37,9 +37,14 @@ export type LessonContentDocument = HydratedDocument<ILessonContent>;
 
 const blockSchema = new Schema<ILessonBlock>(
   {
-    id: { type: String, required: true },
+    id: { type: String, required: true, maxlength: 200 },
     type: { type: String, enum: [...BLOCK_TYPES], required: true },
-    content: { type: String, required: true },
+    // Block content is LLM-generated. Lesson sections are typically a few
+    // paragraphs; code blocks occasionally run longer. 50k covers realistic
+    // cases with headroom while still bounding a runaway generation. Above
+    // this we'd rather fail the write loudly than persist a pathological
+    // document. Applied on new writes only — existing blocks are unaffected.
+    content: { type: String, required: true, maxlength: 50000 },
     metadata: { type: Schema.Types.Mixed, default: null },
     order: { type: Number, required: true },
   },

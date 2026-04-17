@@ -1,7 +1,7 @@
 import UserModel from '@models/UserModel';
 import { generateVerificationToken, VERIFICATION_TOKEN_EXPIRY_MS } from '@lib/auth';
 import { AppError } from '@middleware/errorMiddleware';
-import { sendVerificationEmail } from '@services/emailService';
+import { sendVerificationEmailAsync } from '@services/emailService';
 import asyncHandler from 'express-async-handler';
 
 /**
@@ -62,7 +62,7 @@ export const resendVerificationAuthenticatedController = asyncHandler(async (req
     },
   );
 
-  await sendVerificationEmail({ to: user.email, token: plainToken });
+  sendVerificationEmailAsync({ to: user.email, token: plainToken });
 
   res.status(200).json({ data: { message: 'Verification email sent' } });
 });
