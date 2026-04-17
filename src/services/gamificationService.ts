@@ -449,64 +449,213 @@ export const onExercisePass = async (userId: string): Promise<AwardXpResult> => 
 
 // ── Get Gamification Stats ─────────────────────────────────
 
+interface XpByDayEntry {
+  date: string;
+  xp: number;
+  sources: { lesson_complete: number; quiz_score: number; exercise_pass: number; review_complete: number };
+}
+
+interface WeeklySummaryPeriod {
+  xp: number;
+  timeSeconds: number;
+  lessons: number;
+  quizzes: number;
+}
+
 export interface GamificationStats {
-  xpByDay: { date: string; xp: number }[];
+  xpByDay: XpByDayEntry[];
   xpByWeek: { week: string; xp: number }[];
   totalTimeLearned: number;
   lessonsThisWeek: number;
+  weeklySummary: { thisWeek: WeeklySummaryPeriod; lastWeek: WeeklySummaryPeriod };
 }
 
 export const getGamificationStats = async (userId: string): Promise<GamificationStats> => {
   const userObjId = new mongoose.Types.ObjectId(userId);
   const profile = await getOrCreateProfile(userId);
 
-  // XP by day (last 30 days)
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-  const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().slice(0, 10);
+  const now = new Date();
+  const today = todayStr();
 
-  const xpByDayMap = new Map<string, number>();
+  // ── Week boundaries ──────────────────────────────
+  const startOfWeek = new Date(now);
+  startOfWeek.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+  startOfWeek.setHours(0, 0, 0, 0);
+
+  const startOfLastWeek = new Date(startOfWeek);
+  startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
+
+  const startOfWeekStr = startOfWeek.toISOString().slice(0, 10);
+  const startOfLastWeekStr = startOfLastWeek.toISOString().slice(0, 10);
+
+  // ── Dense XP by day (90 days, with source breakdown) ─────
+  const ninetyDaysAgo = new Date(now);
+  ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 89); // 89 + today = 90 days
+  const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().slice(0, 10);
+
+  const emptySources = () => ({ lesson_complete: 0, quiz_score: 0, exercise_pass: 0, review_complete: 0 });
+  const xpByDayMap = new Map<string, ReturnType<typeof emptySources>>();
+
   for (const entry of profile.xpLog) {
-    if (entry.date >= thirtyDaysAgoStr) {
-      xpByDayMap.set(entry.date, (xpByDayMap.get(entry.date) ?? 0) + entry.xp);
+    if (entry.date >= ninetyDaysAgoStr) {
+      if (!xpByDayMap.has(entry.date)) xpByDayMap.set(entry.date, emptySources());
+      const sources = xpByDayMap.get(entry.date)!;
+      const key = entry.source as keyof ReturnType<typeof emptySources>;
+      if (key in sources) sources[key] += entry.xp;
     }
   }
-  const xpByDay = [...xpByDayMap.entries()]
-    .map(([date, xp]) => ({ date, xp }))
-    .sort((a, b) => a.date.localeCompare(b.date));
 
-  // XP by week (last 8 weeks)
+  // Fill all 90 days (dense)
+  const xpByDay: XpByDayEntry[] = [];
+  const cursor = new Date(ninetyDaysAgo);
+  while (cursor <= now) {
+    const dateStr = cursor.toISOString().slice(0, 10);
+    const sources = xpByDayMap.get(dateStr) ?? emptySources();
+    const xp = sources.lesson_complete + sources.quiz_score + sources.exercise_pass + sources.review_complete;
+    xpByDay.push({ date: dateStr, xp, sources });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  // ── XP by week (from 90-day window) ──────────────
   const xpByWeekMap = new Map<string, number>();
-  for (const entry of profile.xpLog) {
-    if (entry.date >= thirtyDaysAgoStr) {
-      const week = getISOWeek(new Date(entry.date + 'T00:00:00Z'));
-      xpByWeekMap.set(week, (xpByWeekMap.get(week) ?? 0) + entry.xp);
+  for (const day of xpByDay) {
+    if (day.xp > 0) {
+      const week = getISOWeek(new Date(day.date + 'T00:00:00Z'));
+      xpByWeekMap.set(week, (xpByWeekMap.get(week) ?? 0) + day.xp);
     }
   }
   const xpByWeek = [...xpByWeekMap.entries()]
     .map(([week, xp]) => ({ week, xp }))
     .sort((a, b) => a.week.localeCompare(b.week));
 
-  // Total time learned
+  // ── Total time learned ───────────────────────────
   const timeAgg = await UserLessonProgressModel.aggregate([
     { $match: { userId: userObjId } },
     { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
   ]);
   const totalTimeLearned = timeAgg[0]?.total ?? 0;
 
-  // Lessons completed this week
-  const now = new Date();
-  const startOfWeek = new Date(now);
-  startOfWeek.setDate(now.getDate() - ((now.getDay() + 6) % 7));
-  startOfWeek.setHours(0, 0, 0, 0);
+  // ── Weekly summary (this week vs last week) ──────
+  // XP from xpLog
+  let thisWeekXp = 0;
+  let lastWeekXp = 0;
+  for (const entry of profile.xpLog) {
+    if (entry.date >= startOfWeekStr) {
+      thisWeekXp += entry.xp;
+    } else if (entry.date >= startOfLastWeekStr && entry.date < startOfWeekStr) {
+      lastWeekXp += entry.xp;
+    }
+  }
 
-  const lessonsThisWeek = await UserLessonProgressModel.countDocuments({
-    userId: userObjId,
-    status: 'completed',
-    completedAt: { $gte: startOfWeek },
-  });
+  // Time, lessons, quizzes — parallel queries
+  const [thisWeekTime, lastWeekTime, lessonsThisWeek, lessonsLastWeek, quizzesThisWeek, quizzesLastWeek] =
+    await Promise.all([
+      UserLessonProgressModel.aggregate([
+        { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfWeek } } },
+        { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
+      ]).then((r) => r[0]?.total ?? 0),
+      UserLessonProgressModel.aggregate([
+        { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfLastWeek, $lt: startOfWeek } } },
+        { $group: { _id: null, total: { $sum: '$timeSpentSeconds' } } },
+      ]).then((r) => r[0]?.total ?? 0),
+      UserLessonProgressModel.countDocuments({
+        userId: userObjId,
+        status: 'completed',
+        completedAt: { $gte: startOfWeek },
+      }),
+      UserLessonProgressModel.countDocuments({
+        userId: userObjId,
+        status: 'completed',
+        completedAt: { $gte: startOfLastWeek, $lt: startOfWeek },
+      }),
+      UserModuleQuizProgressModel.countDocuments({
+        userId: userObjId,
+        'attempts.completedAt': { $gte: startOfWeek },
+      }),
+      UserModuleQuizProgressModel.countDocuments({
+        userId: userObjId,
+        'attempts.completedAt': { $gte: startOfLastWeek, $lt: startOfWeek },
+      }),
+    ]);
 
-  return { xpByDay, xpByWeek, totalTimeLearned, lessonsThisWeek };
+  const weeklySummary = {
+    thisWeek: { xp: thisWeekXp, timeSeconds: thisWeekTime, lessons: lessonsThisWeek, quizzes: quizzesThisWeek },
+    lastWeek: { xp: lastWeekXp, timeSeconds: lastWeekTime, lessons: lessonsLastWeek, quizzes: quizzesLastWeek },
+  };
+
+  return { xpByDay, xpByWeek, totalTimeLearned, lessonsThisWeek, weeklySummary };
+};
+
+// ── Quiz Trends ───────────────────────────────────────────
+
+export interface QuizTrendsResult {
+  attempts: {
+    date: string;
+    score: number;
+    courseId: string;
+    courseName: string;
+    moduleName: string;
+    moduleIndex: number;
+  }[];
+  averageScore: number;
+  recentTrend: number;
+}
+
+export const getQuizTrends = async (userId: string): Promise<QuizTrendsResult> => {
+  const userObjId = new mongoose.Types.ObjectId(userId);
+
+  const progressDocs = await UserModuleQuizProgressModel.find({ userId: userObjId }).lean();
+  if (progressDocs.length === 0) return { attempts: [], averageScore: 0, recentTrend: 0 };
+
+  // Gather all courseIds and fetch course names + module names
+  const courseIds = [...new Set(progressDocs.map((d) => d.courseId.toString()))];
+  const courses = await CourseModel.find({ _id: { $in: courseIds } })
+    .select('name structure')
+    .lean();
+  const courseMap = new Map(courses.map((c) => [c._id.toString(), c]));
+
+  // Flatten all attempts
+  const attempts: QuizTrendsResult['attempts'] = [];
+  for (const doc of progressDocs) {
+    const course = courseMap.get(doc.courseId.toString());
+    if (!course) continue;
+    const moduleName = course.structure?.modules?.[doc.moduleIndex]?.name ?? `Module ${doc.moduleIndex + 1}`;
+
+    for (const attempt of doc.attempts) {
+      attempts.push({
+        date: attempt.completedAt.toISOString().slice(0, 10),
+        score: attempt.score,
+        courseId: doc.courseId.toString(),
+        courseName: course.name,
+        moduleName,
+        moduleIndex: doc.moduleIndex,
+      });
+    }
+  }
+
+  attempts.sort((a, b) => a.date.localeCompare(b.date));
+
+  if (attempts.length === 0) return { attempts: [], averageScore: 0, recentTrend: 0 };
+
+  const averageScore = Math.round(attempts.reduce((s, a) => s + a.score, 0) / attempts.length);
+
+  // Recent trend: average of last 30 days vs previous 30 days
+  const today = todayStr();
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const sixtyDaysAgo = new Date();
+  sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+  const thirtyStr = thirtyDaysAgo.toISOString().slice(0, 10);
+  const sixtyStr = sixtyDaysAgo.toISOString().slice(0, 10);
+
+  const recent = attempts.filter((a) => a.date >= thirtyStr && a.date <= today);
+  const prior = attempts.filter((a) => a.date >= sixtyStr && a.date < thirtyStr);
+
+  const recentAvg = recent.length > 0 ? recent.reduce((s, a) => s + a.score, 0) / recent.length : 0;
+  const priorAvg = prior.length > 0 ? prior.reduce((s, a) => s + a.score, 0) / prior.length : 0;
+  const recentTrend = prior.length > 0 ? Math.round(recentAvg - priorAvg) : 0;
+
+  return { attempts, averageScore, recentTrend };
 };
 
 // ── Use Streak Freeze ──────────────────────────────────────
