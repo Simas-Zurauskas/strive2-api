@@ -22,7 +22,7 @@ function getOpenAI(): OpenAI {
 
 // ── Helpers ───────────────────────────────────────────────
 
-function timedStep(step: number, name: string) {
+function timedStep({ step, name }: { step: number; name: string }) {
   const startedAt = new Date();
   return {
     finish(notes?: string): StepResult {
@@ -39,7 +39,7 @@ function timedStep(step: number, name: string) {
   };
 }
 
-async function aiJsonCall<T>(systemPrompt: string, userPrompt: string): Promise<{ result: T; raw: string }> {
+async function aiJsonCall<T>({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }): Promise<{ result: T; raw: string }> {
   const response = await getOpenAI().chat.completions.create({
     model: 'gpt-4o',
     messages: [
@@ -69,10 +69,13 @@ WHAT YOU CARE ABOUT:
 ${persona.priorities}`;
 }
 
-async function answerQuestionsAsPersona(
-  persona: Persona,
-  questions: ClarifyQuestion[],
-): Promise<{ answers: Record<string, unknown>; reasoning: string }> {
+async function answerQuestionsAsPersona({
+  persona,
+  questions,
+}: {
+  persona: Persona;
+  questions: ClarifyQuestion[];
+}): Promise<{ answers: Record<string, unknown>; reasoning: string }> {
   const systemPrompt = `${personaContext(persona)}
 
 YOUR SPECIFIC SURVEY BEHAVIOR:
@@ -95,18 +98,21 @@ Return JSON:
 - "answers": { "q1": <answer>, "q2": <answer>, ... }
 - "reasoning": 1-2 sentences describing your actual behavior (e.g. "Rushed through the last two questions, picked too many options on q3 because everything sounded relevant")`;
 
-  const { result } = await aiJsonCall<{ answers: Record<string, unknown>; reasoning: string }>(
+  const { result } = await aiJsonCall<{ answers: Record<string, unknown>; reasoning: string }>({
     systemPrompt,
-    JSON.stringify(questions, null, 2),
-  );
+    userPrompt: JSON.stringify(questions, null, 2),
+  });
 
   return result;
 }
 
-async function selectDepthAsPersona(
-  persona: Persona,
-  depthPreviews: DepthPreviews,
-): Promise<{ depth: 'overview' | 'comprehensive' | 'deep_dive'; reasoning: string }> {
+async function selectDepthAsPersona({
+  persona,
+  depthPreviews,
+}: {
+  persona: Persona;
+  depthPreviews: DepthPreviews;
+}): Promise<{ depth: 'overview' | 'comprehensive' | 'deep_dive'; reasoning: string }> {
   const systemPrompt = `${personaContext(persona)}
 
 YOUR SPECIFIC DEPTH-SELECTION BEHAVIOR:
@@ -120,18 +126,21 @@ Return JSON:
 - "depth": one of "overview", "comprehensive", or "deep_dive"
 - "reasoning": 1 sentence — the REAL reason, not a rationalization. (e.g. "Just picked recommended, didn't really read the others" or "Went with deep_dive because I always want the most complete version of everything")`;
 
-  const { result } = await aiJsonCall<{ depth: 'overview' | 'comprehensive' | 'deep_dive'; reasoning: string }>(
+  const { result } = await aiJsonCall<{ depth: 'overview' | 'comprehensive' | 'deep_dive'; reasoning: string }>({
     systemPrompt,
-    JSON.stringify(depthPreviews, null, 2),
-  );
+    userPrompt: JSON.stringify(depthPreviews, null, 2),
+  });
 
   return result;
 }
 
-async function reviewStructureAsPersona(
-  persona: Persona,
-  structure: CourseStructure,
-): Promise<{ satisfied: boolean; feedback: string }> {
+async function reviewStructureAsPersona({
+  persona,
+  structure,
+}: {
+  persona: Persona;
+  structure: CourseStructure;
+}): Promise<{ satisfied: boolean; feedback: string }> {
   const systemPrompt = `${personaContext(persona)}
 
 YOUR SPECIFIC STRUCTURE REVIEW BEHAVIOR:
@@ -149,23 +158,29 @@ Return JSON:
 - "satisfied": boolean
 - "feedback": your chat message if not satisfied, empty string if satisfied`;
 
-  const { result } = await aiJsonCall<{ satisfied: boolean; feedback: string }>(
+  const { result } = await aiJsonCall<{ satisfied: boolean; feedback: string }>({
     systemPrompt,
-    JSON.stringify(structure, null, 2),
-  );
+    userPrompt: JSON.stringify(structure, null, 2),
+  });
 
   return result;
 }
 
 // ── Main Pipeline ────────────────────────────────────────
 
-export async function runPersonaFlow(
-  persona: Persona,
-  client: ApiClient,
-  recorder: MarkdownRecorder,
-  config: OrchestratorConfig,
-  label: string,
-): Promise<PersonaRun> {
+export async function runPersonaFlow({
+  persona,
+  client,
+  recorder,
+  config,
+  label,
+}: {
+  persona: Persona;
+  client: ApiClient;
+  recorder: MarkdownRecorder;
+  config: OrchestratorConfig;
+  label: string;
+}): Promise<PersonaRun> {
   const log = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`);
   const logDone = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`.green);
   const logDetail = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`.gray);
@@ -180,94 +195,95 @@ export async function runPersonaFlow(
   try {
     // ── Step 1: Create Course ────────────────────────────
     log('Step 1: Creating course...');
-    const s1 = timedStep(1, 'Create Course');
+    const s1 = timedStep({ step: 1, name: 'Create Course' });
     courseId = await client.createCourse(persona.goal);
     const r1 = s1.finish();
     steps.push(r1);
     recorder.setCourseId(courseId);
-    recorder.addStep1_CreateCourse(r1, courseId);
+    recorder.addStep1_CreateCourse({ result: r1, courseId });
     logDone(`Step 1 done → courseId: ${courseId}`);
 
     // ── Step 2: Clarify (Question Generation) ───────────
     log('Step 2: Generating clarify questions...');
-    const s2 = timedStep(2, 'Clarify Questions');
+    const s2 = timedStep({ step: 2, name: 'Clarify Questions' });
     const pollStart2 = Date.now();
-    const clarifyJobId = await client.submitJob(courseId, 'clarify');
-    await client.pollJob(clarifyJobId);
+    const clarifyJobId = await client.submitJob({ courseId, path: 'clarify' });
+    await client.pollJob({ jobId: clarifyJobId });
     const pollDuration2 = Date.now() - pollStart2;
     course = await client.getCourse(courseId);
     const questions = (course.clarifyData?.questions ?? []) as ClarifyQuestion[];
     const r2 = s2.finish(`${questions.length} questions generated`);
     steps.push(r2);
-    recorder.addStep2_Clarify(r2, questions, pollDuration2);
+    recorder.addStep2_Clarify({ result: r2, questions, pollDuration: pollDuration2 });
     logDone(`Step 2 done → ${questions.length} questions`);
 
     // ── Step 3: Answer Questions (AI as Persona) ────────
     log('Step 3: Answering questions as persona...');
-    const s3 = timedStep(3, 'Answer Questions');
-    const { answers, reasoning: answerReasoning } = await answerQuestionsAsPersona(persona, questions);
-    await client.updateCourse(courseId, { answers });
+    const s3 = timedStep({ step: 3, name: 'Answer Questions' });
+    const { answers, reasoning: answerReasoning } = await answerQuestionsAsPersona({ persona, questions });
+    await client.updateCourse({ courseId, updates: { answers } });
     const r3 = s3.finish(answerReasoning);
     steps.push(r3);
-    recorder.addStep3_Answers(r3, answers, questions, answerReasoning);
+    recorder.addStep3_Answers({ result: r3, answers, questions, aiReasoning: answerReasoning });
     logDone('Step 3 done → answers submitted');
 
     // ── Step 4: Depth Previews ──────────────────────────
     log('Step 4: Generating depth previews...');
-    const s4 = timedStep(4, 'Depth Previews');
+    const s4 = timedStep({ step: 4, name: 'Depth Previews' });
     const pollStart4 = Date.now();
-    const depthJobId = await client.submitJob(courseId, 'depth-previews');
-    await client.pollJob(depthJobId);
+    const depthJobId = await client.submitJob({ courseId, path: 'depth-previews' });
+    await client.pollJob({ jobId: depthJobId });
     const pollDuration4 = Date.now() - pollStart4;
     course = await client.getCourse(courseId);
     const depthPreviews = course.depthPreviews!;
     const r4 = s4.finish(`recommended: ${depthPreviews.recommended}`);
     steps.push(r4);
-    recorder.addStep4_DepthPreviews(r4, depthPreviews, pollDuration4);
+    recorder.addStep4_DepthPreviews({ result: r4, previews: depthPreviews, pollDuration: pollDuration4 });
     logDone(`Step 4 done → recommended: ${depthPreviews.recommended}`);
 
     // ── Step 5: Select Depth (AI as Persona) ────────────
     log('Step 5: Selecting depth as persona...');
-    const s5 = timedStep(5, 'Select Depth');
-    const { depth, reasoning: depthReasoning } = await selectDepthAsPersona(persona, depthPreviews);
-    await client.updateCourse(courseId, { depth });
+    const s5 = timedStep({ step: 5, name: 'Select Depth' });
+    const { depth, reasoning: depthReasoning } = await selectDepthAsPersona({ persona, depthPreviews });
+    await client.updateCourse({ courseId, updates: { depth } });
     const r5 = s5.finish(depthReasoning);
     steps.push(r5);
-    recorder.addStep5_DepthSelection(r5, depth, depthPreviews.recommended, depthReasoning);
+    recorder.addStep5_DepthSelection({ result: r5, selected: depth, recommended: depthPreviews.recommended, aiReasoning: depthReasoning });
     logDone(`Step 5 done → selected: ${depth}` + (depth !== depthPreviews.recommended ? ` (recommended: ${depthPreviews.recommended})`.yellow : ` (recommended: ${depthPreviews.recommended})`));
 
     // ── Step 6: Generate Structure ──────────────────────
     log('Step 6: Generating course structure...');
-    const s6 = timedStep(6, 'Generate Structure');
+    const s6 = timedStep({ step: 6, name: 'Generate Structure' });
     const pollStart6 = Date.now();
-    const structJobId = await client.submitJob(courseId, 'generate-structure');
-    await client.pollJob(structJobId);
+    const structJobId = await client.submitJob({ courseId, path: 'generate-structure' });
+    await client.pollJob({ jobId: structJobId });
     const pollDuration6 = Date.now() - pollStart6;
     course = await client.getCourse(courseId);
     const structure = course.structure!;
     const totalLessons = structure.modules.reduce((sum, m) => sum + m.lessons.length, 0);
     const r6 = s6.finish(`${structure.modules.length} modules, ${totalLessons} lessons`);
     steps.push(r6);
-    recorder.addStep6_Structure(r6, structure, pollDuration6);
+    recorder.addStep6_Structure({ result: r6, structure, pollDuration: pollDuration6 });
     logDone(`Step 6 done → ${structure.modules.length} modules, ${totalLessons} lessons`);
 
     // ── Step 7: Review Structure (AI as Persona) ────────
     log('Step 7: Reviewing structure...');
-    const s7 = timedStep(7, 'Review Structure');
+    const s7 = timedStep({ step: 7, name: 'Review Structure' });
     let feedback: string | null = null;
     let chatResponse: string | null = null;
     let structureChanged = false;
 
     if (config.enableChatReview) {
-      const review = await reviewStructureAsPersona(persona, structure);
+      const review = await reviewStructureAsPersona({ persona, structure });
 
       if (!review.satisfied && review.feedback) {
         feedback = review.feedback;
         logDetail(`Step 7: Sending feedback: "${feedback}"`);
 
         const structureBefore = JSON.stringify(course.structure?.modules);
-        chatResponse = await client.postSSE(`/api/course/${courseId}/chat`, {
-          messages: [{ role: 'user', content: feedback }],
+        chatResponse = await client.postSSE({
+          path: `/api/course/${courseId}/chat`,
+          body: { messages: [{ role: 'user', content: feedback }] },
         });
 
         // Wait a moment for structure update to settle, then refetch
@@ -283,13 +299,13 @@ export async function runPersonaFlow(
 
     const r7 = s7.finish(feedback ? `Feedback: ${feedback}` : 'Accepted as-is');
     steps.push(r7);
-    recorder.addStep7_Review(r7, feedback, chatResponse, structureChanged);
+    recorder.addStep7_Review({ result: r7, feedback, aiResponse: chatResponse, structureChanged });
     logDone(`Step 7 done → ${feedback ? `feedback sent, structure ${structureChanged ? 'changed'.green : 'unchanged'.yellow}` : 'accepted as-is'}`);
 
     // ── Step 8: Accept Course ───────────────────────────
     log('Step 8: Accepting course...');
-    const s8 = timedStep(8, 'Accept Course');
-    await client.updateCourse(courseId, { status: 'ready' });
+    const s8 = timedStep({ step: 8, name: 'Accept Course' });
+    await client.updateCourse({ courseId, updates: { status: 'ready' } });
     course = await client.getCourse(courseId);
     const r8 = s8.finish();
     steps.push(r8);
@@ -319,12 +335,12 @@ export async function runPersonaFlow(
 
           // ── Step 9: Generate & Log ──────────────
           logDetail(`Generating lesson ${lessonLabel}...`);
-          const s9 = timedStep(9, `Generate Lesson ${mi}/${li}`);
+          const s9 = timedStep({ step: 9, name: `Generate Lesson ${mi}/${li}` });
           const genStart = Date.now();
 
-          const jobId = await client.generateLesson(courseId, mi, li);
-          await client.pollJob(jobId, LESSON_POLL_TIMEOUT_MS);
-          const content = await client.getLessonContent(courseId, mi, li);
+          const jobId = await client.generateLesson({ courseId, moduleIndex: mi, lessonIndex: li });
+          await client.pollJob({ jobId, timeoutMs: LESSON_POLL_TIMEOUT_MS });
+          const content = await client.getLessonContent({ courseId, moduleIndex: mi, lessonIndex: li });
 
           const generationMs = Date.now() - genStart;
           const r9 = s9.finish(`${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s`);
@@ -342,8 +358,8 @@ export async function runPersonaFlow(
           logDone(`Generated lesson ${lessonLabel} (${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s)`);
 
           // ── Step 10: Complete Lesson ────────────
-          const s10 = timedStep(10, `Complete Lesson ${mi}/${li}`);
-          await client.completeLessonProgress(courseId, mi, li);
+          const s10 = timedStep({ step: 10, name: `Complete Lesson ${mi}/${li}` });
+          await client.completeLessonProgress({ courseId, moduleIndex: mi, lessonIndex: li });
           const r10 = s10.finish();
           steps.push(r10);
 
@@ -357,7 +373,12 @@ export async function runPersonaFlow(
 
     // ── Write report ────────────────────────────────────
     const totalDurationMs = Date.now() - flowStart;
-    recorder.addSummary(totalDurationMs, course, 'completed', undefined, lessonsGenerated > 0 ? lessonsGenerated : undefined);
+    recorder.addSummary({
+      totalDurationMs,
+      course,
+      status: 'completed',
+      lessonsGenerated: lessonsGenerated > 0 ? lessonsGenerated : undefined,
+    });
     const filepath = await recorder.writeToFile(config.outputDir);
     logDetail(`Report written → ${filepath}`);
 
@@ -381,7 +402,7 @@ export async function runPersonaFlow(
         // can't fetch course, use what we have
       }
       if (course) {
-        recorder.addSummary(totalDurationMs, course, 'failed', errorMsg);
+        recorder.addSummary({ totalDurationMs, course, status: 'failed', error: errorMsg });
       }
     }
     try {

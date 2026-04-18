@@ -93,11 +93,15 @@ function detectStructuralGaps(blocks: LessonState['contentBlocks']): StructuralG
   };
 }
 
-async function repairStructuralGaps(
-  blocks: LessonState['contentBlocks'],
-  gaps: StructuralGaps,
-  writer?: (event: Record<string, unknown>) => void,
-): Promise<LessonState['contentBlocks']> {
+async function repairStructuralGaps({
+  blocks,
+  gaps,
+  writer,
+}: {
+  blocks: LessonState['contentBlocks'];
+  gaps: StructuralGaps;
+  writer?: (event: Record<string, unknown>) => void;
+}): Promise<LessonState['contentBlocks']> {
   const missing: string[] = [];
   if (gaps.missingIntro) missing.push('1 "intro" block (2-4 sentence compelling opening)');
   if (gaps.missingSummary) missing.push('1 "summary" block (4-6 bullet points of key takeaways, no heading)');
@@ -224,7 +228,7 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
   // ── Structural repair: attempt to generate missing required blocks ──
   const gaps = detectStructuralGaps(blocks);
   if (gaps.missingIntro || gaps.missingSummary || gaps.needMoreSections > 0) {
-    blocks = await repairStructuralGaps(blocks, gaps, writer);
+    blocks = await repairStructuralGaps({ blocks, gaps, writer });
 
     // Log post-repair validation
     const postIntro = blocks.filter((b) => b.type === 'intro').length;

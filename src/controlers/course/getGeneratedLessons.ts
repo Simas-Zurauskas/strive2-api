@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { getGeneratedLessons } from '@services/progressService';
 
 /**
@@ -38,7 +38,7 @@ import { getGeneratedLessons } from '@services/progressService';
  */
 export const getGeneratedLessonsController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   const generated = await getGeneratedLessons({ courseId });

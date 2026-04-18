@@ -30,7 +30,7 @@ export const getProfileController = asyncHandler(async (req, res) => {
 
   // Sync stored streak + award any missed achievements if live value is higher
   if (liveStreak > profile.currentStreak) {
-    syncLiveStreak(userId, liveStreak).catch(bgError('gamification.syncLiveStreak'));
+    syncLiveStreak({ userId, liveStreak }).catch(bgError('gamification.syncLiveStreak'));
   }
 
   res.status(200).json({

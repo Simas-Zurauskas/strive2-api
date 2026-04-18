@@ -10,7 +10,7 @@ export const generateSlug = (name: string): string => {
     .slice(0, 80);
 };
 
-export const generateUniqueSlug = async (userId: string, name: string): Promise<string> => {
+export const generateUniqueSlug = async ({ userId, name }: { userId: string; name: string }): Promise<string> => {
   const base = generateSlug(name);
   if (!base) return null as unknown as string;
 

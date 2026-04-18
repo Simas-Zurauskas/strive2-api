@@ -71,9 +71,9 @@ export const submitQuizAttemptSchema = z.object({
 /**
  * Parses a route param as a non-negative integer. Throws 400 if invalid.
  */
-export const parseIndexParam = (value: string | string[] | undefined, name: string): number => {
-  if (Array.isArray(value)) value = value[0];
-  const num = Number(value);
+export const parseIndexParam = ({ value, name }: { value: string | string[] | undefined; name: string }): number => {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const num = Number(raw);
   if (!Number.isInteger(num) || num < 0) {
     throw Object.assign(new Error(`Invalid ${name}: must be a non-negative integer`), { statusCode: 400 });
   }
@@ -85,12 +85,17 @@ export const parseIndexParam = (value: string | string[] | undefined, name: stri
  * generation of the current one. Enforces sequential lesson generation order.
  * The very first lesson (module 0, lesson 0) is always allowed.
  */
-export const assertPreviousLessonGenerated = async (
-  courseId: string,
-  moduleIndex: number,
-  lessonIndex: number,
-  structure: { modules: { lessons: unknown[] }[] },
-): Promise<void> => {
+export const assertPreviousLessonGenerated = async ({
+  courseId,
+  moduleIndex,
+  lessonIndex,
+  structure,
+}: {
+  courseId: string;
+  moduleIndex: number;
+  lessonIndex: number;
+  structure: { modules: { lessons: unknown[] }[] };
+}): Promise<void> => {
   // First lesson in the course — always allowed
   if (moduleIndex === 0 && lessonIndex === 0) return;
 

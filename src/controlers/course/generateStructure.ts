@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { submitJob } from '@services/jobRunner';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 
 /**
  * @swagger
@@ -34,7 +34,7 @@ import { getUserCourse } from '@services/courseDbService';
  */
 export const generateStructureController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   console.log(`[API] Submitting generate structure job, courseId: ${courseId}`.cyan);

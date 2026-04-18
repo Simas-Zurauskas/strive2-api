@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { submitJob } from '@services/jobRunner';
 import LessonContentModel from '@models/LessonContentModel';
 import { parseIndexParam } from './validation';
@@ -41,8 +41,8 @@ import { parseIndexParam } from './validation';
  */
 export const generateModuleQuizController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const moduleIndex = parseIndexParam({ value: req.params.moduleIndex, name: 'moduleIndex' });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   const mod = course.structure?.modules?.[moduleIndex];

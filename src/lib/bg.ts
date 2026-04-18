@@ -10,7 +10,7 @@ import * as Sentry from '@sentry/node';
  * meant every missed failure went unnoticed.
  *
  * Usage:
- *   gamificationService.onLessonComplete(userId, courseId)
+ *   gamificationService.onLessonComplete({ userId, courseId })
  *     .catch(bgError('gamification.onLessonComplete'));
  *
  * The returned handler:

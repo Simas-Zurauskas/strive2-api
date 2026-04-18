@@ -16,13 +16,13 @@ const POLL_INTERVAL_MS = 2_000;
 const POLL_TIMEOUT_MS = 300_000; // 5 minutes
 export const LESSON_POLL_TIMEOUT_MS = 600_000; // 10 minutes — lesson generation is slow
 
-export function createApiClient(baseUrl: string, token: string) {
+export function createApiClient({ baseUrl, token }: { baseUrl: string; token: string }) {
   const headers = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token}`,
   };
 
-  async function request<T>(method: string, path: string, body?: unknown): Promise<ApiResponse<T>> {
+  async function request<T>({ method, path, body }: { method: string; path: string; body?: unknown }): Promise<ApiResponse<T>> {
     const url = `${baseUrl}${path}`;
     const res = await fetch(url, {
       method,
@@ -38,13 +38,13 @@ export function createApiClient(baseUrl: string, token: string) {
     return res.json() as Promise<ApiResponse<T>>;
   }
 
-  async function pollJob(jobId: string, timeoutMs: number = POLL_TIMEOUT_MS): Promise<JobStatus> {
+  async function pollJob({ jobId, timeoutMs = POLL_TIMEOUT_MS }: { jobId: string; timeoutMs?: number }): Promise<JobStatus> {
     const deadline = Date.now() + timeoutMs;
     let iterations = 0;
 
     while (Date.now() < deadline) {
       iterations++;
-      const { data } = await request<JobStatus>('GET', `/api/course/job/${jobId}`);
+      const { data } = await request<JobStatus>({ method: 'GET', path: `/api/course/job/${jobId}` });
 
       if (data.status === 'completed') return data;
       if (data.status === 'failed') {
@@ -57,7 +57,7 @@ export function createApiClient(baseUrl: string, token: string) {
     throw new Error(`Job ${jobId} timed out after ${timeoutMs / 1000}s (${iterations} polls)`);
   }
 
-  async function postSSE(path: string, body: unknown): Promise<string> {
+  async function postSSE({ path, body }: { path: string; body: unknown }): Promise<string> {
     const url = `${baseUrl}${path}`;
     const res = await fetch(url, {
       method: 'POST',
@@ -100,47 +100,55 @@ export function createApiClient(baseUrl: string, token: string) {
   }
 
   return {
-    post: <T = unknown>(path: string, body?: unknown) => request<T>('POST', path, body),
-    get: <T = unknown>(path: string) => request<T>('GET', path),
-    patch: <T = unknown>(path: string, body: unknown) => request<T>('PATCH', path, body),
+    post: <T = unknown>({ path, body }: { path: string; body?: unknown }) => request<T>({ method: 'POST', path, body }),
+    get: <T = unknown>(path: string) => request<T>({ method: 'GET', path }),
+    patch: <T = unknown>({ path, body }: { path: string; body: unknown }) => request<T>({ method: 'PATCH', path, body }),
     pollJob,
     postSSE,
 
     async createCourse(goal: string): Promise<string> {
-      const { data } = await request<{ courseId: string }>('POST', '/api/course', { goal });
+      const { data } = await request<{ courseId: string }>({ method: 'POST', path: '/api/course', body: { goal } });
       return data.courseId;
     },
 
     async getCourse(courseId: string): Promise<CourseData> {
-      const { data } = await request<CourseData>('GET', `/api/course/${courseId}`);
+      const { data } = await request<CourseData>({ method: 'GET', path: `/api/course/${courseId}` });
       return data;
     },
 
-    async submitJob(courseId: string, path: string): Promise<string> {
-      const { data } = await request<{ jobId: string }>('POST', `/api/course/${courseId}/${path}`, {});
+    async submitJob({ courseId, path }: { courseId: string; path: string }): Promise<string> {
+      const { data } = await request<{ jobId: string }>({ method: 'POST', path: `/api/course/${courseId}/${path}`, body: {} });
       return data.jobId;
     },
 
-    async updateCourse(courseId: string, updates: Record<string, unknown>): Promise<CourseData> {
-      const { data } = await request<CourseData>('PATCH', `/api/course/${courseId}`, updates);
+    async updateCourse({ courseId, updates }: { courseId: string; updates: Record<string, unknown> }): Promise<CourseData> {
+      const { data } = await request<CourseData>({ method: 'PATCH', path: `/api/course/${courseId}`, body: updates });
       return data;
     },
 
-    async generateLesson(courseId: string, moduleIndex: number, lessonIndex: number): Promise<string> {
-      const { data } = await request<{ jobId: string }>('POST', `/api/course/${courseId}/generate-lesson`, {
-        moduleIndex,
-        lessonIndex,
+    async generateLesson({ courseId, moduleIndex, lessonIndex }: { courseId: string; moduleIndex: number; lessonIndex: number }): Promise<string> {
+      const { data } = await request<{ jobId: string }>({
+        method: 'POST',
+        path: `/api/course/${courseId}/generate-lesson`,
+        body: { moduleIndex, lessonIndex },
       });
       return data.jobId;
     },
 
-    async getLessonContent(courseId: string, moduleIndex: number, lessonIndex: number): Promise<ILessonContent> {
-      const { data } = await request<ILessonContent>('GET', `/api/course/${courseId}/lesson-content/${moduleIndex}/${lessonIndex}`);
+    async getLessonContent({ courseId, moduleIndex, lessonIndex }: { courseId: string; moduleIndex: number; lessonIndex: number }): Promise<ILessonContent> {
+      const { data } = await request<ILessonContent>({
+        method: 'GET',
+        path: `/api/course/${courseId}/lesson-content/${moduleIndex}/${lessonIndex}`,
+      });
       return data;
     },
 
-    async completeLessonProgress(courseId: string, moduleIndex: number, lessonIndex: number): Promise<void> {
-      await request('POST', `/api/course/${courseId}/progress/${moduleIndex}/${lessonIndex}`, { status: 'completed' });
+    async completeLessonProgress({ courseId, moduleIndex, lessonIndex }: { courseId: string; moduleIndex: number; lessonIndex: number }): Promise<void> {
+      await request({
+        method: 'POST',
+        path: `/api/course/${courseId}/progress/${moduleIndex}/${lessonIndex}`,
+        body: { status: 'completed' },
+      });
     },
   };
 }
@@ -151,7 +159,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function authenticate(baseUrl: string, email: string, password: string): Promise<string> {
+export async function authenticate({ baseUrl, email, password }: { baseUrl: string; email: string; password: string }): Promise<string> {
   const res = await fetch(`${baseUrl}/api/auth/signin`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -87,23 +87,30 @@ const IMAGE_STYLES = [
   'Blueprint / technical-drawing style with white linework on deep indigo background, precise geometric constructions, and occasional chalk-like annotations.',
 ] as const;
 
-const getStyleForLesson = (moduleIndex: number, lessonIndex: number): string => {
+const getStyleForLesson = ({ moduleIndex, lessonIndex }: { moduleIndex: number; lessonIndex: number }): string => {
   const index = (moduleIndex * 7 + lessonIndex) % IMAGE_STYLES.length;
   return IMAGE_STYLES[index];
 };
 
-const generateHeroImage = async (
-  lessonName: string,
-  moduleName: string,
-  courseGoal: string,
-  courseId: string,
-  moduleIndex: number,
-  lessonIndex: number,
-): Promise<string | null> => {
+const generateHeroImage = async ({
+  lessonName,
+  moduleName,
+  courseGoal,
+  courseId,
+  moduleIndex,
+  lessonIndex,
+}: {
+  lessonName: string;
+  moduleName: string;
+  courseGoal: string;
+  courseId: string;
+  moduleIndex: number;
+  lessonIndex: number;
+}): Promise<string | null> => {
   try {
     console.log(`[assetsGeneration] Generating hero image...`.cyan);
 
-    const style = getStyleForLesson(moduleIndex, lessonIndex);
+    const style = getStyleForLesson({ moduleIndex, lessonIndex });
     const prompt = `A wide editorial illustration about "${lessonName}" (part of "${moduleName}" in a course on ${courseGoal}). The image must clearly depict the specific subject matter of this lesson — show recognisable objects, diagrams, or scenes that someone familiar with the topic would instantly connect to "${lessonName}". Style: ${style} Wide 16:9 composition. No text, no letters, no digits, no human faces.`;
 
     // 1. Submit generation task
@@ -166,7 +173,7 @@ const generateHeroImage = async (
     }
 
     const key = `lessons/${courseId}/${moduleIndex}/${lessonIndex}/hero.png`;
-    await uploadBuffer(key, buffer, 'image/png');
+    await uploadBuffer({ key, body: buffer, contentType: 'image/png' });
 
     console.log(`[assetsGeneration] ✓ Hero image uploaded to S3: ${key}`.green);
     return key;
@@ -204,11 +211,15 @@ Rules:
 - Write a thoughtful 1-sentence description for each — not a generic summary but WHY this specific resource is worth the learner's time after this lesson
 - If none of the search results are genuinely valuable, return an empty links array. Do not pad with mediocre content.`;
 
-const generateCuratedLinks = async (
-  lessonName: string,
-  lessonSummary: string,
-  contentBlocks: ILessonBlock[],
-): Promise<ILessonBlock | null> => {
+const generateCuratedLinks = async ({
+  lessonName,
+  lessonSummary,
+  contentBlocks,
+}: {
+  lessonName: string;
+  lessonSummary: string;
+  contentBlocks: ILessonBlock[];
+}): Promise<ILessonBlock | null> => {
   try {
     // Step 1: Extract key concepts from lesson content for targeted search
     const sectionContent = contentBlocks
@@ -290,12 +301,17 @@ export const imageGeneration = async (state: LessonState, config?: RunnableConfi
 
   const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
 
-  const s3Key = await generateHeroImage(
-    state.lessonName, state.moduleName, state.goal, state.courseId, state.moduleIndex, state.lessonIndex,
-  );
+  const s3Key = await generateHeroImage({
+    lessonName: state.lessonName,
+    moduleName: state.moduleName,
+    courseGoal: state.goal,
+    courseId: state.courseId,
+    moduleIndex: state.moduleIndex,
+    lessonIndex: state.lessonIndex,
+  });
 
   if (s3Key) {
-    const presignedUrl = await getPresignedUrl(s3Key);
+    const presignedUrl = await getPresignedUrl({ key: s3Key });
     writer?.({ type: 'hero_image', url: presignedUrl, s3Key });
   }
 
@@ -312,7 +328,11 @@ export const linksGeneration = async (state: LessonState, config?: RunnableConfi
 
   const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
 
-  const linksBlock = await generateCuratedLinks(state.lessonName, state.contentSummary, state.contentBlocks);
+  const linksBlock = await generateCuratedLinks({
+    lessonName: state.lessonName,
+    lessonSummary: state.contentSummary,
+    contentBlocks: state.contentBlocks,
+  });
 
   if (linksBlock) {
     writer?.({ type: 'block', block: linksBlock });

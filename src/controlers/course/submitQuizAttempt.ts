@@ -1,7 +1,6 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { submitQuizAttempt } from '@services/quizProgressService';
-import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { submitQuizAttemptSchema, parseIndexParam } from './validation';
 
 /**
@@ -54,25 +53,18 @@ import { submitQuizAttemptSchema, parseIndexParam } from './validation';
  */
 export const submitQuizAttemptController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const moduleIndex = parseIndexParam({ value: req.params.moduleIndex, name: 'moduleIndex' });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   const body = submitQuizAttemptSchema.parse(req.body);
 
-  const { attempt, nextReviewAt, reviewIntervalDays } = await submitQuizAttempt({
+  const { attempt, nextReviewAt, reviewIntervalDays, quiz } = await submitQuizAttempt({
     userId,
     courseId,
     moduleIndex,
     responses: body.responses,
   });
-
-  // Load quiz content to return full feedback (with correctIndex + explanation)
-  const quiz = await ModuleQuizContentModel.findOne({ courseId, moduleIndex }).lean();
-  if (!quiz) {
-    res.status(500).json({ message: 'Quiz content not found after grading' });
-    return;
-  }
 
   const questionsWithFeedback = quiz.questions.map((q) => {
     const response = attempt.responses.find((r) => r.questionId === q.id);

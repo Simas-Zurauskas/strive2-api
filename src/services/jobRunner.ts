@@ -20,7 +20,7 @@ const JOB_TIMEOUT_MS = 600_000; // 10 minutes
 
 export const jobLimit = pLimit(MAX_JOB_CONCURRENCY);
 
-const jobTimeout = (ms: number, jobId: string) =>
+const jobTimeout = ({ ms, jobId }: { ms: number; jobId: string }) =>
   new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error(`Job ${jobId} timed out after ${ms / 1000}s`)), ms),
   );
@@ -97,7 +97,7 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
 
 // ── Execute (core job logic) ──────────────────────────────
 
-const executeJob = async (courseId: string, type: string, metadata?: Record<string, unknown> | null): Promise<void> => {
+const executeJob = async ({ courseId, type, metadata }: { courseId: string; type: string; metadata?: Record<string, unknown> | null }): Promise<void> => {
   const course = await CourseModel.findById(courseId);
   if (!course) throw new Error('Course not found');
 
@@ -108,7 +108,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
         clarifyData: result,
         ...(result.courseName && {
           name: result.courseName,
-          slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
+          slug: await generateUniqueSlug({ userId: course.userId.toString(), name: result.courseName }),
         }),
         // Clear all downstream data — answers may no longer match new questions
         depthPreviews: null,
@@ -128,7 +128,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       });
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
-        slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
+        slug: await generateUniqueSlug({ userId: course.userId.toString(), name: result.courseName }),
         domain: result.domain,
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [],
@@ -151,7 +151,7 @@ const executeJob = async (courseId: string, type: string, metadata?: Record<stri
       });
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
-        slug: await generateUniqueSlug(course.userId.toString(), result.courseName),
+        slug: await generateUniqueSlug({ userId: course.userId.toString(), name: result.courseName }),
         domain: result.domain,
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [...course.feedbackHistory, feedback],
@@ -275,8 +275,8 @@ const processJob = async (jobId: string): Promise<void> => {
 
   try {
     await Promise.race([
-      executeJob(job.courseId.toString(), job.type, job.metadata),
-      jobTimeout(JOB_TIMEOUT_MS, jobId),
+      executeJob({ courseId: job.courseId.toString(), type: job.type, metadata: job.metadata }),
+      jobTimeout({ ms: JOB_TIMEOUT_MS, jobId }),
     ]);
     status = 'completed';
   } catch (error: unknown) {

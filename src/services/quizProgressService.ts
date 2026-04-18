@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import UserModuleQuizProgressModel, { IUserModuleQuizProgress, IQuizAttempt } from '@models/UserModuleQuizProgressModel';
-import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
+import ModuleQuizContentModel, { IModuleQuizContent } from '@models/ModuleQuizContentModel';
 import {
   QuizMasteryTier,
   REVIEW_INITIAL_INTERVALS,
@@ -48,6 +48,11 @@ export interface SubmitQuizAttemptResult {
   attempt: IQuizAttempt;
   nextReviewAt: Date;
   reviewIntervalDays: number;
+  /**
+   * The quiz content used for grading. Returned so callers building a
+   * per-question feedback payload don't need to re-fetch the same doc.
+   */
+  quiz: IModuleQuizContent;
 }
 
 export const submitQuizAttempt = async (params: SubmitQuizAttemptParams): Promise<SubmitQuizAttemptResult> => {
@@ -153,8 +158,8 @@ export const submitQuizAttempt = async (params: SubmitQuizAttemptParams): Promis
   const isReview = !!existing && attemptNumber > 1;
   const prevBestScore = existing?.bestScore ?? 0;
   gamificationService
-    .onQuizComplete(userId, courseId, score, prevBestScore, isReview)
+    .onQuizComplete({ userId, courseId, score, previousBestScore: prevBestScore, isReview })
     .catch(bgError('gamification.onQuizComplete'));
 
-  return { attempt, nextReviewAt, reviewIntervalDays };
+  return { attempt, nextReviewAt, reviewIntervalDays, quiz: quizContent };
 };

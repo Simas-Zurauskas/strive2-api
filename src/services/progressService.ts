@@ -135,7 +135,7 @@ export const upsertLessonProgress = async (params: UpsertParams): Promise<IUserL
         }
         if (params.status === 'completed') {
           // Fire-and-forget gamification — exactly once per real transition.
-          gamificationService.onLessonComplete(userId, courseId).catch(bgError('gamification.onLessonComplete'));
+          gamificationService.onLessonComplete({ userId, courseId }).catch(bgError('gamification.onLessonComplete'));
         }
       }
     }

@@ -49,7 +49,7 @@ export const modifyStructure = tool(
       // Persist the updated structure and feedback history
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
-        slug: await generateUniqueSlug(course!.userId.toString(), result.courseName),
+        slug: await generateUniqueSlug({ userId: course!.userId.toString(), name: result.courseName }),
         domain: result.domain,
         structure: { reasoning: result.reasoning, modules: result.modules },
         feedbackHistory: [...feedbackHistory, input.instruction],

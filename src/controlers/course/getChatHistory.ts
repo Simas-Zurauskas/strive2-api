@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 
 /**
@@ -45,7 +45,7 @@ import CourseDesignChatModel from '@models/CourseDesignChatModel';
  */
 export const getChatHistoryController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   const session = await CourseDesignChatModel.findOne({ courseId, userId }).lean();

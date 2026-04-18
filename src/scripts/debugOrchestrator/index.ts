@@ -79,14 +79,14 @@ async function main() {
 
   // Authenticate
   console.log(`\nAuthenticating as ${config.email}...`.gray);
-  const token = await authenticate(config.apiUrl, config.email, config.password);
+  const token = await authenticate({ baseUrl: config.apiUrl, email: config.email, password: config.password });
   console.log('Authenticated successfully.'.green);
 
   // Generate personas
   const personas = await generatePersonas(personaCount);
 
   // Run all persona flows
-  const runs = await runAll(personas, token, config);
+  const runs = await runAll({ personas, token, config });
 
   // Exit code based on results
   const allOk = runs.every((r) => r.status === 'completed');

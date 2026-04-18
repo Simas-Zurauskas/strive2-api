@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { updateCourseSchema } from './validation';
-import { updateCourse, getUserCourse } from '@services/courseDbService';
+import { updateCourse, getUserCourseLean } from '@services/courseDbService';
 
 /**
  * @swagger
@@ -48,7 +48,7 @@ import { updateCourse, getUserCourse } from '@services/courseDbService';
 export const updateCourseController = asyncHandler(async (req, res) => {
   const updates = updateCourseSchema.parse(req.body);
   const userId = req.userId!;
-  const resolved = await getUserCourse({ userId, courseId: req.params.id as string });
+  const resolved = await getUserCourseLean({ userId, courseId: req.params.id as string });
   const courseId = resolved._id.toString();
 
   // Guard: accepted courses cannot be moved back to creating status

@@ -3,7 +3,7 @@ import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import UserModel from '@models/UserModel';
 import { cleanupCourseContent } from '@services/courseCleanupService';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 
 /**
  * @swagger
@@ -37,7 +37,7 @@ import { getUserCourse } from '@services/courseDbService';
  */
 export const deleteCourseController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const course = await getUserCourse({ userId, courseId: req.params.id as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.id as string });
 
   await Promise.all([
     JobModel.deleteMany({ courseId: course._id }),

@@ -36,7 +36,7 @@ Generated: ${new Date().toISOString()}
 `);
   }
 
-  addStep1_CreateCourse(result: StepResult, courseId: string): void {
+  addStep1_CreateCourse({ result, courseId }: { result: StepResult; courseId: string }): void {
     this.sections.push(`---
 
 ## Step 1: Create Course (${fmtDuration(result.durationMs)})
@@ -45,7 +45,7 @@ Generated: ${new Date().toISOString()}
 `);
   }
 
-  addStep2_Clarify(result: StepResult, questions: ClarifyQuestion[], pollDuration: number): void {
+  addStep2_Clarify({ result, questions, pollDuration }: { result: StepResult; questions: ClarifyQuestion[]; pollDuration: number }): void {
     let questionsTable = '| # | Question | Type | Options |\n|---|----------|------|---------|';
     for (const q of questions) {
       const opts = q.options ? q.options.join(', ') : '_free text_';
@@ -62,7 +62,7 @@ ${questionsTable}
 `);
   }
 
-  addStep3_Answers(result: StepResult, answers: Record<string, unknown>, questions: ClarifyQuestion[], aiReasoning: string): void {
+  addStep3_Answers({ result, answers, questions, aiReasoning }: { result: StepResult; answers: Record<string, unknown>; questions: ClarifyQuestion[]; aiReasoning: string }): void {
     let answersTable = '| Question | Answer |\n|----------|--------|';
     for (const q of questions) {
       const answer = answers[q.id];
@@ -79,8 +79,8 @@ ${answersTable}
 `);
   }
 
-  addStep4_DepthPreviews(result: StepResult, previews: DepthPreviews, pollDuration: number): void {
-    const fmtPreview = (label: string, p: { summary: string; bullets: string[] }, isRec: boolean) => {
+  addStep4_DepthPreviews({ result, previews, pollDuration }: { result: StepResult; previews: DepthPreviews; pollDuration: number }): void {
+    const fmtPreview = ({ label, p, isRec }: { label: string; p: { summary: string; bullets: string[] }; isRec: boolean }) => {
       const badge = isRec ? ' **(Recommended)**' : '';
       return `### ${label}${badge}
 ${p.summary}
@@ -93,15 +93,15 @@ ${p.bullets.map((b) => `- ${b}`).join('\n')}`;
 **Job poll duration:** ${fmtDuration(pollDuration)}
 **Recommendation reason:** ${previews.recommendationReason}
 
-${fmtPreview('Overview', previews.overview, previews.recommended === 'overview')}
+${fmtPreview({ label: 'Overview', p: previews.overview, isRec: previews.recommended === 'overview' })}
 
-${fmtPreview('Comprehensive', previews.comprehensive, previews.recommended === 'comprehensive')}
+${fmtPreview({ label: 'Comprehensive', p: previews.comprehensive, isRec: previews.recommended === 'comprehensive' })}
 
-${fmtPreview('Deep Dive', previews.deep_dive, previews.recommended === 'deep_dive')}
+${fmtPreview({ label: 'Deep Dive', p: previews.deep_dive, isRec: previews.recommended === 'deep_dive' })}
 `);
   }
 
-  addStep5_DepthSelection(result: StepResult, selected: string, recommended: string, aiReasoning: string): void {
+  addStep5_DepthSelection({ result, selected, recommended, aiReasoning }: { result: StepResult; selected: string; recommended: string; aiReasoning: string }): void {
     this.sections.push(`---
 
 ## Step 5: Depth Selection (${fmtDuration(result.durationMs)})
@@ -112,7 +112,7 @@ ${fmtPreview('Deep Dive', previews.deep_dive, previews.recommended === 'deep_div
 `);
   }
 
-  addStep6_Structure(result: StepResult, structure: CourseStructure, pollDuration: number): void {
+  addStep6_Structure({ result, structure, pollDuration }: { result: StepResult; structure: CourseStructure; pollDuration: number }): void {
     let modulesList = '';
     let totalLessons = 0;
     for (let i = 0; i < structure.modules.length; i++) {
@@ -142,7 +142,7 @@ ${modulesList}
 `);
   }
 
-  addStep7_Review(result: StepResult, feedback: string | null, aiResponse: string | null, structureChanged: boolean): void {
+  addStep7_Review({ result, feedback, aiResponse, structureChanged }: { result: StepResult; feedback: string | null; aiResponse: string | null; structureChanged: boolean }): void {
     if (!feedback) {
       this.sections.push(`---
 
@@ -204,7 +204,7 @@ ${modulesList}
       md += `- **Generation time:** ${fmtDuration(generationMs)}\n`;
       md += `- **Blocks:** ${blocks.length} (${typeCountStr})\n`;
       md += `- **Hero image:** ${content.heroImageUrl ? 'Yes' : 'No'}\n`;
-      md += `- **Summary:** ${content.summary ? truncate(content.summary, 200) : '_none_'}\n\n`;
+      md += `- **Summary:** ${content.summary ? truncate({ str: content.summary, maxLen: 200 }) : '_none_'}\n\n`;
 
       md += `<details>\n<summary>Block details (${blocks.length} blocks)</summary>\n\n`;
       for (const block of blocks) {
@@ -216,7 +216,7 @@ ${modulesList}
     this.sections.push(md);
   }
 
-  addSummary(totalDurationMs: number, course: CourseData, status: 'completed' | 'failed', error?: string, lessonsGenerated?: number): void {
+  addSummary({ totalDurationMs, course, status, error, lessonsGenerated }: { totalDurationMs: number; course: CourseData; status: 'completed' | 'failed'; error?: string; lessonsGenerated?: number }): void {
     const totalLessons = course.structure?.modules.reduce((sum, m) => sum + m.lessons.length, 0) ?? 0;
 
     // Insert summary right after header
@@ -260,7 +260,7 @@ function fmtDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function truncate(str: string, maxLen: number): string {
+function truncate({ str, maxLen }: { str: string; maxLen: number }): string {
   if (str.length <= maxLen) return str;
   return str.slice(0, maxLen) + '...';
 }
@@ -272,17 +272,17 @@ function formatBlock(block: ILessonBlock): string {
   switch (block.type) {
     case 'intro':
     case 'summary':
-      md += `\n> ${truncate(block.content.replace(/\n/g, ' '), 200)}\n\n`;
+      md += `\n> ${truncate({ str: block.content.replace(/\n/g, ' '), maxLen: 200 })}\n\n`;
       break;
 
     case 'section':
-      md += `\n> ${truncate(block.content.replace(/\n/g, ' '), 500)}\n\n`;
+      md += `\n> ${truncate({ str: block.content.replace(/\n/g, ' '), maxLen: 500 })}\n\n`;
       break;
 
     case 'code':
       md += ` (${meta?.language ?? 'unknown'})\n`;
       md += '```' + (meta?.language ?? '') + '\n';
-      md += truncate(block.content, 500) + '\n';
+      md += truncate({ str: block.content, maxLen: 500 }) + '\n';
       md += '```\n\n';
       break;
 
@@ -304,10 +304,10 @@ function formatBlock(block: ILessonBlock): string {
     case 'exercise': {
       const ex = meta as { language?: string; starterCode?: string; expectedOutput?: string } | null;
       md += ex?.language ? ` (${ex.language})\n` : '\n';
-      md += `- **Content:** ${truncate(block.content, 150)}\n`;
+      md += `- **Content:** ${truncate({ str: block.content, maxLen: 150 })}\n`;
       if (ex?.starterCode) {
         md += '```' + (ex.language ?? '') + '\n';
-        md += truncate(ex.starterCode, 200) + '\n';
+        md += truncate({ str: ex.starterCode, maxLen: 200 }) + '\n';
         md += '```\n';
       }
       if (ex?.expectedOutput) md += `- **Expected output:** ${ex.expectedOutput}\n`;
@@ -319,7 +319,7 @@ function formatBlock(block: ILessonBlock): string {
       const diag = meta as { diagramType?: string } | null;
       md += ` (${diag?.diagramType ?? 'unknown'})\n`;
       md += '```mermaid\n';
-      md += truncate(block.content, 600) + '\n';
+      md += truncate({ str: block.content, maxLen: 600 }) + '\n';
       md += '```\n\n';
       break;
     }
@@ -327,7 +327,7 @@ function formatBlock(block: ILessonBlock): string {
     case 'callout': {
       const co = meta as { variant?: string } | null;
       md += ` (${co?.variant ?? 'info'})\n`;
-      md += `> ${truncate(block.content.replace(/\n/g, ' '), 200)}\n\n`;
+      md += `> ${truncate({ str: block.content.replace(/\n/g, ' '), maxLen: 200 })}\n\n`;
       break;
     }
 
@@ -336,11 +336,11 @@ function formatBlock(block: ILessonBlock): string {
       break;
 
     case 'image':
-      md += '\n- ' + truncate(block.content, 200) + '\n\n';
+      md += '\n- ' + truncate({ str: block.content, maxLen: 200 }) + '\n\n';
       break;
 
     default:
-      md += '\n> ' + truncate(block.content, 200) + '\n\n';
+      md += '\n> ' + truncate({ str: block.content, maxLen: 200 }) + '\n\n';
   }
 
   return md;

@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { submitJob } from '@services/jobRunner';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { generateLessonSchema, assertPreviousLessonGenerated } from './validation';
 
 /**
@@ -50,7 +50,7 @@ import { generateLessonSchema, assertPreviousLessonGenerated } from './validatio
 export const generateLessonController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
   const { moduleIndex, lessonIndex } = generateLessonSchema.parse(req.body);
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   // Validate that the module and lesson exist in the structure
@@ -72,7 +72,12 @@ export const generateLessonController = asyncHandler(async (req, res) => {
   }
 
   // Enforce sequential generation — previous lesson must exist
-  await assertPreviousLessonGenerated(courseId, moduleIndex, lessonIndex, course.structure as { modules: { lessons: unknown[] }[] });
+  await assertPreviousLessonGenerated({
+    courseId,
+    moduleIndex,
+    lessonIndex,
+    structure: course.structure as { modules: { lessons: unknown[] }[] },
+  });
 
   console.log(`[API] Submitting generate_lesson job, courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
   const jobId = await submitJob({

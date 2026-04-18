@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { getCourseProgress } from '@services/progressService';
 import { getCourseQuizProgress } from '@services/reviewSchedulingService';
 
@@ -43,7 +43,7 @@ import { getCourseQuizProgress } from '@services/reviewSchedulingService';
  */
 export const getCourseProgressController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
   const totalModules = course.structure?.modules?.length ?? 0;
 

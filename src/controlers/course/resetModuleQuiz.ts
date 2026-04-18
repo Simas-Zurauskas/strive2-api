@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { ENVIRONMENT } from '@conf/env';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import { parseIndexParam } from './validation';
@@ -13,8 +13,8 @@ export const resetModuleQuizController = asyncHandler(async (req, res) => {
   }
 
   const userId = req.userId!;
-  const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const moduleIndex = parseIndexParam({ value: req.params.moduleIndex, name: 'moduleIndex' });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   const [quizContent, quizProgress] = await Promise.all([

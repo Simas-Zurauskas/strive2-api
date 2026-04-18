@@ -85,7 +85,7 @@ export interface EditImpactResult {
  * Assesses the impact of editing a course — how much content and progress exists
  * that would be lost if the course structure changes.
  */
-export const getEditImpact = async (courseId: string, userId: string): Promise<EditImpactResult> => {
+export const getEditImpact = async ({ courseId, userId }: { courseId: string; userId: string }): Promise<EditImpactResult> => {
   const [contentCount, quizContentCount, lessonProgressAgg, quizProgressAgg] = await Promise.all([
     LessonContentModel.countDocuments({ courseId }),
     ModuleQuizContentModel.countDocuments({ courseId }),

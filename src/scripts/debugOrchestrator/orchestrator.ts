@@ -4,11 +4,15 @@ import { runPersonaFlow } from './courseFlow';
 import { MarkdownRecorder } from './markdownRecorder';
 import type { Persona, PersonaRun, OrchestratorConfig } from './types';
 
-export async function runAll(
-  personas: Persona[],
-  token: string,
-  config: OrchestratorConfig,
-): Promise<PersonaRun[]> {
+export async function runAll({
+  personas,
+  token,
+  config,
+}: {
+  personas: Persona[];
+  token: string;
+  config: OrchestratorConfig;
+}): Promise<PersonaRun[]> {
   const limit = pLimit(config.concurrency);
 
   console.log(`\n${'='.repeat(60).dim}`);
@@ -25,10 +29,10 @@ export async function runAll(
         const label = `Persona ${index + 1}/${personas.length} (${persona.name})`;
         console.log(`[${label}]`.cyan + ' Starting...');
 
-        const client = createApiClient(config.apiUrl, token);
+        const client = createApiClient({ baseUrl: config.apiUrl, token });
         const recorder = new MarkdownRecorder();
 
-        return runPersonaFlow(persona, client, recorder, config, label);
+        return runPersonaFlow({ persona, client, recorder, config, label });
       }),
     ),
   );
