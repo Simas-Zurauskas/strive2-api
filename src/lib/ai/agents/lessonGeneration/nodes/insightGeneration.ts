@@ -3,6 +3,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { getUtilityModel } from '@lib/langchain';
 import { withRetry } from '@lib/retry';
+import { jsonish } from '@lib/zodHelpers';
 import { INSIGHT_KINDS, INSIGHT_MAX_PER_LESSON, INSIGHT_MIN_PER_LESSON } from '@lib/insightConstants';
 import { GeneratedInsight } from '@services/insightContentService';
 import { LessonState } from '../state';
@@ -12,13 +13,13 @@ import { LessonState } from '../state';
 const insightCandidateSchema = z.object({
   sourceBlockId: z.string().describe("The id of the block this insight is derived from (e.g. 'section-1')"),
   kind: z.enum(INSIGHT_KINDS).describe("'qa' for a question+answer card, 'cloze' for a sentence with one {{blank}}"),
-  prompt: z.string().min(5).max(400).describe('For qa: the question text. For cloze: the sentence with exactly one {{blank}} placeholder.'),
-  answer: z.string().min(1).max(200).describe('For qa: a terse answer (5-15 words ideal). For cloze: the word or short phrase that fills the blank.'),
-  conceptTags: z.array(z.string()).min(1).max(4).describe('1-4 short lowercase tags representing the concepts covered (e.g. ["spaced-repetition", "memory"])'),
+  prompt: z.string().min(5).describe('For qa: the question text (target ≤ 400 chars). For cloze: the sentence with exactly one {{blank}} placeholder.'),
+  answer: z.string().min(1).describe('For qa: a terse answer (5-15 words ideal, target ≤ 200 chars). For cloze: the word or short phrase that fills the blank.'),
+  conceptTags: z.array(z.string()).min(1).describe('1-4 short lowercase tags representing the concepts covered (e.g. ["spaced-repetition", "memory"])'),
 });
 
 const insightsOutputSchema = z.object({
-  insights: z.array(insightCandidateSchema).min(0).max(8),
+  insights: jsonish(z.array(insightCandidateSchema).min(0)),
 });
 
 const INSIGHT_SYSTEM_PROMPT = `You extract atomic retrieval-ready "insight cards" from a lesson a learner has just read.

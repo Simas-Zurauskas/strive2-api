@@ -1,7 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import { refineStructureSchema } from './validation';
 import { submitJob } from '@services/jobRunner';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import CourseModel from '@models/CourseModel';
 
 /**
@@ -49,7 +49,7 @@ import CourseModel from '@models/CourseModel';
 export const refineStructureController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
   const parsed = refineStructureSchema.parse(req.body);
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   console.log(`[API] Submitting refine structure job, courseId: ${courseId} feedback: ${parsed.feedback}`.cyan);

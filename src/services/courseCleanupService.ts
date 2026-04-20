@@ -6,6 +6,7 @@ import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import InsightModel from '@models/InsightModel';
 import UserInsightProgressModel from '@models/UserInsightProgressModel';
 import { deleteByPrefix } from '@services/s3Service';
+import { bgError } from '@lib/bg';
 
 export interface CleanupResult {
   chatSessionsDeleted: number;
@@ -46,9 +47,7 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
     .then((count) => {
       if (count > 0) console.log(`[Cleanup] S3: deleted ${count} objects for course ${courseId}`.gray);
     })
-    .catch((e) => {
-      console.warn(`[Cleanup] S3 failed for course ${courseId}:`, e instanceof Error ? e.message : e);
-    });
+    .catch(bgError('courseCleanup.s3'));
 
   const result: CleanupResult = {
     chatSessionsDeleted: chatSessions.deletedCount,
@@ -85,7 +84,7 @@ export interface EditImpactResult {
  * Assesses the impact of editing a course — how much content and progress exists
  * that would be lost if the course structure changes.
  */
-export const getEditImpact = async (courseId: string, userId: string): Promise<EditImpactResult> => {
+export const getEditImpact = async ({ courseId, userId }: { courseId: string; userId: string }): Promise<EditImpactResult> => {
   const [contentCount, quizContentCount, lessonProgressAgg, quizProgressAgg] = await Promise.all([
     LessonContentModel.countDocuments({ courseId }),
     ModuleQuizContentModel.countDocuments({ courseId }),

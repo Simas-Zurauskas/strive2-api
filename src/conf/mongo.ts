@@ -4,6 +4,8 @@ import * as Sentry from '@sentry/node';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
+import { deleteByPrefix } from '@services/s3Service';
+import { bgError } from '@lib/bg';
 
 import { MONGO_URI } from './env';
 
@@ -39,7 +41,20 @@ const cleanupOrphanedJobs = async () => {
       console.log(`[Startup] Cleared activeJobId on ${cleared.modifiedCount} course(s)`.cyan);
     }
 
-    // Delete partial content left by interrupted generations
+    // Delete partial content left by interrupted generations. Enumerate first so
+    // we can fire S3 cleanup per (courseId, moduleIndex, lessonIndex) — the course
+    // itself may still have good completed lessons, so we can't drop the whole
+    // `lessons/{courseId}/` prefix.
+    const incomplete = await LessonContentModel
+      .find({ completed: false })
+      .select('courseId moduleIndex lessonIndex')
+      .lean();
+
+    for (const row of incomplete) {
+      deleteByPrefix(`lessons/${row.courseId}/${row.moduleIndex}/${row.lessonIndex}/`)
+        .catch(bgError('startupReaper.s3'));
+    }
+
     const deleted = await LessonContentModel.deleteMany({ completed: false });
     if (deleted.deletedCount > 0) {
       console.log(`[Startup] Deleted ${deleted.deletedCount} incomplete lesson content document(s)`.cyan);
@@ -58,6 +73,16 @@ const connectDB = async () => {
       minPoolSize: 10,
     });
     console.log(colors.cyan(`MongoDB Connected - ${conn.connection.host}`.bgCyan));
+
+    // Reconcile indexes whose spec has changed since last boot (Mongoose's
+    // autoIndex only *adds* missing indexes; it won't drop an existing index
+    // whose options have diverged, e.g. `sparse: true` → `partialFilterExpression`).
+    try {
+      await CourseModel.syncIndexes();
+    } catch (error: unknown) {
+      console.error('[Startup] CourseModel.syncIndexes failed:'.red, error);
+      Sentry.captureException(error);
+    }
 
     await cleanupOrphanedJobs();
   } catch (error: unknown) {

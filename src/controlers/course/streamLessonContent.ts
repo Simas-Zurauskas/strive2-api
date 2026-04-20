@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { Types } from 'mongoose';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { jobEvents } from '@services/jobEvents';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import CourseModel from '@models/CourseModel';
@@ -53,7 +53,7 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
   const { moduleIndex, lessonIndex, includeImage, includeLinks } = generateLessonSchema.parse(req.body);
 
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   // Validate lesson exists
@@ -67,7 +67,12 @@ export const streamLessonContentController = asyncHandler(async (req, res) => {
   if (!lesson) { res.status(400); throw new Error(`Lesson ${lessonIndex} does not exist in module ${moduleIndex}`); }
 
   // Enforce sequential generation — previous lesson must exist
-  await assertPreviousLessonGenerated(courseId, moduleIndex, lessonIndex, course.structure as { modules: { lessons: unknown[] }[] });
+  await assertPreviousLessonGenerated({
+    courseId,
+    moduleIndex,
+    lessonIndex,
+    structure: course.structure as { modules: { lessons: unknown[] }[] },
+  });
 
   // ── Atomic guard: one generation at a time per course ──
   const guarded = await CourseModel.findOneAndUpdate(

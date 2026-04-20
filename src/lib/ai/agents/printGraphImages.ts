@@ -8,7 +8,7 @@ import { lessonGenerationAgent } from './lessonGeneration';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../../../graphs');
 
-const saveGraphImage = async (graph: CompiledGraph<any>, name: string) => {
+const saveGraphImage = async ({ graph, name }: { graph: CompiledGraph<any>; name: string }) => {
   try {
     const drawable = await graph.getGraphAsync({ xray: true });
     const blob = await drawable.drawMermaidPng({ curveStyle: 'basis' });
@@ -30,7 +30,7 @@ export const printGraphImages = async () => {
   }
 
   await Promise.all([
-    saveGraphImage(courseDesignAgent, 'courseDesignAgent'),
-    saveGraphImage(lessonGenerationAgent, 'lessonGenerationAgent'),
+    saveGraphImage({ graph: courseDesignAgent, name: 'courseDesignAgent' }),
+    saveGraphImage({ graph: lessonGenerationAgent, name: 'lessonGenerationAgent' }),
   ]);
 };

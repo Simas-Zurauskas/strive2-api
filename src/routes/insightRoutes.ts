@@ -9,7 +9,7 @@ import {
   getInsightsDueCountController,
   gradeInsightAnswerController,
 } from '@controlers/insight';
-import { protect } from '@middleware/authMiddleware';
+import { protect, requireVerified } from '@middleware/authMiddleware';
 
 const router = Router();
 
@@ -26,15 +26,17 @@ const gradeLimiter = rateLimit({
   validate: { keyGeneratorIpFallback: false },
 });
 
+router.use(protect, requireVerified);
+
 // Static paths must precede any parameterized ones (CLAUDE.md convention).
-router.get('/queue', protect, getInsightQueueController);
-router.get('/stats', protect, getInsightStatsController);
-router.get('/due-count', protect, getInsightsDueCountController);
+router.get('/queue', getInsightQueueController);
+router.get('/stats', getInsightStatsController);
+router.get('/due-count', getInsightsDueCountController);
 
 // Parameterized (all POST) — per-insight actions.
-router.post('/:insightId/rate', protect, rateInsightController);
-router.post('/:insightId/skip', protect, skipInsightController);
-router.post('/:insightId/mode', protect, setInsightModeController);
-router.post('/:insightId/grade', protect, gradeLimiter, gradeInsightAnswerController);
+router.post('/:insightId/rate', rateInsightController);
+router.post('/:insightId/skip', skipInsightController);
+router.post('/:insightId/mode', setInsightModeController);
+router.post('/:insightId/grade', gradeLimiter, gradeInsightAnswerController);
 
 export { router as insightRoutes };

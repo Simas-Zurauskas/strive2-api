@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 
 /**
  * @swagger
@@ -28,7 +28,7 @@ import { getUserCourse } from '@services/courseDbService';
  *                   $ref: '#/components/schemas/Course'
  */
 export const getCourseController = asyncHandler(async (req, res) => {
-  const course = await getUserCourse({ userId: req.userId!, courseId: req.params.id as string });
+  const course = await getUserCourseLean({ userId: req.userId!, courseId: req.params.id as string });
 
   res.status(200).json({ data: course });
 });

@@ -71,9 +71,9 @@ export const rateInsightController = asyncHandler(async (req, res) => {
   const courseId = insight.courseId.toString();
   // Fire-and-forget gamification side effects (XP + streak + achievements).
   // Never fail the rating response on a gamification error.
-  gamificationService.onInsightReview(userId, insightId, courseId).catch(bgError('gamification.onInsightReview'));
+  gamificationService.onInsightReview({ userId, insightId, courseId }).catch(bgError('gamification.onInsightReview'));
   if (justMastered) {
-    gamificationService.onInsightMastered(userId, insightId, courseId).catch(bgError('gamification.onInsightMastered'));
+    gamificationService.onInsightMastered({ userId, insightId, courseId }).catch(bgError('gamification.onInsightMastered'));
   }
 
   res.status(200).json({

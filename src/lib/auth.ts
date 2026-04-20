@@ -38,6 +38,10 @@ export const hashPassword = async (password: string): Promise<string> => {
 
 export const VERIFICATION_TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+// Shorter than the email-verification window: a reset link can fully take over
+// the account, so the exposure budget is smaller.
+export const PASSWORD_RESET_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+
 export const generateVerificationToken = (): { plainToken: string; hashedToken: string } => {
   const plainToken = crypto.randomBytes(32).toString('hex');
   const hashedToken = crypto.createHash('sha256').update(plainToken).digest('hex');

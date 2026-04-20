@@ -1,21 +1,74 @@
 import { z } from 'zod';
+import { jsonish } from '@lib/zodHelpers';
+import { COURSE_DOMAINS, CourseDomain } from '@lib/constants';
 
 // ── Schemas ────────────────────────────────────────────
 
 export const quizQuestionSchema = z.object({
   id: z.string(),
   question: z.string(),
-  options: z.array(z.string()).length(4),
+  options: jsonish(z.array(z.string()).length(4)),
   correctIndex: z.number().min(0).max(3),
   explanation: z.string(),
-  sourceLessons: z.array(z.number()),
+  sourceLessons: jsonish(z.array(z.number())),
   isInterleaved: z.boolean(),
   interleavedModuleIndex: z.number().optional(),
 });
 
 export const quizOutputSchema = z.object({
-  questions: z.array(quizQuestionSchema).min(5).max(8),
+  questions: jsonish(z.array(quizQuestionSchema).min(5).max(8)),
 });
+
+// ── Per-domain guidance ────────────────────────────────
+// Two typed maps drive the domain section below. `LABELS` controls the
+// visible bullet-label (parenthetical examples are here), `BRANCHES` holds
+// the guidance body. Both are typed `Record<CourseDomain, string>`, so
+// adding a new value to COURSE_DOMAINS causes a compile-time error in BOTH
+// maps — no silent drift. The section text is auto-assembled by iterating
+// COURSE_DOMAINS, so new domains also appear in the rendered prompt
+// automatically.
+//
+// Null-domain courses (unclassified) fall through to the explicit null branch
+// rendered after the enum-driven bullets.
+
+const MODULE_QUIZ_DOMAIN_LABELS: Record<CourseDomain, string> = {
+  programming: '**programming**',
+  stem: '**stem** (mathematics, physics, chemistry, statistics, engineering, economics)',
+  humanities: '**humanities**',
+  language: '**language**',
+  creative: '**creative**',
+  business: '**business** (management, marketing, product, sales, strategy, PM, personal finance)',
+  practical: '**practical** (trades, crafts, cooking, gardening, home repair, applied fitness)',
+  'life-skills': '**life-skills** (communication, public speaking, productivity, career, soft skills)',
+  other: '**other / unknown**',
+};
+
+const MODULE_QUIZ_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
+  programming: 'questions can reference code snippets, API behavior, error messages, stack traces, performance trade-offs. Distractors should reflect common misunderstandings a developer at this depth might hold.',
+  stem: 'use numeric scenarios, formula applications, derivation traps, unit errors. LaTeX is welcome in question text (`$E = mc^2$`) when it clarifies. Distractors reflect common algebraic slips or misapplied formulas.',
+  humanities: 'interpretation, comparison of viewpoints, identifying arguments vs claims, historical cause-and-effect. Distractors are plausible but less defensible readings, not opposite positions.',
+  language: 'grammar in context, translation nuance, collocation, register. Distractors are near-miss choices a learner at this level would be tempted by.',
+  creative: 'craft decisions, technique recognition, stylistic intent. Distractors reflect common amateur choices.',
+  business: "scenario-based stems naming a named role / company / constraint ('the CFO pushes back on…', 'your team of 8 at a seed-stage SaaS…'); options are plausible management decisions. Distractors reflect common managerial anti-patterns — solving for vanity metrics, 'shipped = done', consensus for its own sake, framework-as-cargo-cult. Numeric scenarios welcome for finance items (ROI, unit economics). Avoid code blocks; use `$…$` only for explicit quant (NPV, CAC).",
+  practical: "procedural-scenario stems ('your bread is over-proofed and dense', 'the cabinet door binds on the top-right corner'); options are plausible next-step actions. Distractors reflect common amateur mistakes — wrong tool for the material, skipping a safety or timing-critical step, reversing the correct sequence, using the right technique at the wrong stage. Avoid code and LaTeX; measurements and units in prose are fine.",
+  'life-skills': "interpersonal scenario stems ('a direct report just told you they're burned out', 'you're preparing for a salary negotiation next Tuesday'); options are possible responses. Distractors reflect common pitfalls — reassurance in place of specificity, avoiding the hard conversation, pep-talks instead of concrete feedback, rehearsing content without rehearsing delivery. Avoid code and LaTeX.",
+  other: 'let the lesson summaries drive the framing; stay neutral on domain-specific styling.',
+};
+
+const MODULE_QUIZ_NULL_DOMAIN_BRANCH = 'let the lesson summaries drive the framing; stay neutral on domain-specific styling.';
+
+const MODULE_QUIZ_DOMAIN_BULLETS = COURSE_DOMAINS
+  .map((d) => `- ${MODULE_QUIZ_DOMAIN_LABELS[d]}: ${MODULE_QUIZ_DOMAIN_BRANCHES[d]}`)
+  .join('\n');
+
+const MODULE_QUIZ_DOMAIN_SECTION = `## Adapting to the course domain
+
+The \`## Course context\` may include a \`Course domain\` field. Shape questions and distractors to the discipline so the assessment feels native to the subject, not generic:
+
+${MODULE_QUIZ_DOMAIN_BULLETS}
+- **null / unclassified**: ${MODULE_QUIZ_NULL_DOMAIN_BRANCH}
+
+Never emit code snippets as question content for non-programming domains, and never use prose-only questions for a deep programming module — the mismatch reads as a bug to the learner.`;
 
 // ── System prompt ──────────────────────────────────────
 
@@ -59,18 +112,7 @@ Adjust question difficulty based on the course depth:
   - "Critique this approach — what does it get wrong?"
   - 20% apply, 40% analyze, 40% evaluate
 
-## Adapting to the course domain
-
-The \`## Course context\` may include a \`Course domain\` field. Shape questions and distractors to the discipline so the assessment feels native to the subject, not generic:
-
-- **programming**: questions can reference code snippets, API behavior, error messages, stack traces, performance trade-offs. Distractors should reflect common misunderstandings a developer at this depth might hold.
-- **stem** (mathematics, physics, chemistry, statistics, engineering, economics): use numeric scenarios, formula applications, derivation traps, unit errors. LaTeX is welcome in question text (\`$E = mc^2$\`) when it clarifies. Distractors reflect common algebraic slips or misapplied formulas.
-- **humanities**: interpretation, comparison of viewpoints, identifying arguments vs claims, historical cause-and-effect. Distractors are plausible but less defensible readings, not opposite positions.
-- **language**: grammar in context, translation nuance, collocation, register. Distractors are near-miss choices a learner at this level would be tempted by.
-- **creative**: craft decisions, technique recognition, stylistic intent. Distractors reflect common amateur choices.
-- **other / unknown**: let the lesson summaries drive the framing; stay neutral on domain-specific styling.
-
-Never emit code snippets as question content for non-programming domains, and never use prose-only questions for a deep programming module — the mismatch reads as a bug to the learner.
+${MODULE_QUIZ_DOMAIN_SECTION}
 
 ## Synthesis questions
 

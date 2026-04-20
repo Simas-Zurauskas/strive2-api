@@ -2,20 +2,37 @@ import pLimit from 'p-limit';
 import { createApiClient } from './apiClient';
 import { runPersonaFlow } from './courseFlow';
 import { MarkdownRecorder } from './markdownRecorder';
+import { createVerifiedTestUser, deleteTestUser } from './testUser';
 import type { Persona, PersonaRun, OrchestratorConfig } from './types';
 
-export async function runAll(
-  personas: Persona[],
-  token: string,
-  config: OrchestratorConfig,
-): Promise<PersonaRun[]> {
+const slugifyPersonaName = (name: string): string =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 40) || 'persona';
+
+export async function runAll({
+  personas,
+  config,
+}: {
+  personas: Persona[];
+  config: OrchestratorConfig;
+}): Promise<PersonaRun[]> {
   const limit = pLimit(config.concurrency);
+
+  // One runId per orchestrator invocation — scopes test-account emails so
+  // parallel local runs (or leftover orphans) don't collide.
+  const runId = Date.now().toString(36);
 
   console.log(`\n${'='.repeat(60).dim}`);
   console.log(`Starting ${personas.length} persona flows (concurrency: ${config.concurrency})`.cyan);
   console.log(`API: ${config.apiUrl}`.gray);
+  console.log(`Run ID: ${runId}`.gray);
   console.log(`Chat review: ${config.enableChatReview ? 'enabled'.green : 'disabled'.yellow}`.gray);
   console.log(`Lessons: ${config.maxLessons === 0 ? 'skipped'.yellow : String(config.maxLessons)}`.gray);
+  console.log(`Quizzes: ${config.enableQuiz ? 'enabled'.green : 'disabled'.yellow}`.gray);
+  console.log(`Insights: ${config.enableInsights ? 'enabled (review all returned)'.green : 'disabled'.yellow}`.gray);
   console.log(`Output: ${config.outputDir}`.gray);
   console.log(`${'='.repeat(60).dim}\n`);
 
@@ -25,10 +42,23 @@ export async function runAll(
         const label = `Persona ${index + 1}/${personas.length} (${persona.name})`;
         console.log(`[${label}]`.cyan + ' Starting...');
 
-        const client = createApiClient(config.apiUrl, token);
+        const personaSlug = slugifyPersonaName(persona.name);
+        const testUser = await createVerifiedTestUser({
+          baseUrl: config.apiUrl,
+          runId,
+          personaSlug,
+        });
+        console.log(`[${label}]`.cyan + ` Provisioned test user ${testUser.email}`.gray);
+
+        const client = createApiClient({ baseUrl: config.apiUrl, token: testUser.token });
         const recorder = new MarkdownRecorder();
 
-        return runPersonaFlow(persona, client, recorder, config, label);
+        try {
+          return await runPersonaFlow({ persona, client, recorder, config, label, runId, personaSlug });
+        } finally {
+          await deleteTestUser({ client, password: testUser.password, email: testUser.email });
+          console.log(`[${label}]`.cyan + ` Cleaned up test user ${testUser.email}`.gray);
+        }
       }),
     ),
   );

@@ -1,5 +1,12 @@
 import CourseModel from '@models/CourseModel';
 import { CourseDocument, ICourse } from '@models/CourseModel';
+import { Types } from 'mongoose';
+
+/**
+ * Lean course shape — plain object with `_id`, no Mongoose methods. Returned
+ * from `getUserCourseLean` and safe to pass straight into `res.json()`.
+ */
+export type LeanCourse = ICourse & { _id: Types.ObjectId };
 
 // ── Create ─────────────────────────────────────────────────
 
@@ -47,6 +54,36 @@ export const getUserCourse = async (params: {
 
   if (!course && isObjectId(params.courseId)) {
     course = await CourseModel.findOne({ _id: params.courseId, userId: params.userId });
+  }
+
+  if (!course) {
+    throw new Error('Course not found');
+  }
+
+  return course;
+};
+
+/**
+ * Read-only variant of `getUserCourse`. Returns a plain object (no Mongoose
+ * hydration / instance methods) — cheaper on the request path for controllers
+ * that only need to read fields. Use `getUserCourse` when the caller intends
+ * to mutate and `.save()`.
+ *
+ * Ownership, slug-first resolution, and error shape are identical to the
+ * hydrated variant.
+ */
+export const getUserCourseLean = async (params: {
+  userId: string;
+  courseId: string;
+}): Promise<LeanCourse> => {
+  let course = await CourseModel.findOne({ slug: params.courseId, userId: params.userId })
+    .select('-__v')
+    .lean<LeanCourse>();
+
+  if (!course && isObjectId(params.courseId)) {
+    course = await CourseModel.findOne({ _id: params.courseId, userId: params.userId })
+      .select('-__v')
+      .lean<LeanCourse>();
   }
 
   if (!course) {

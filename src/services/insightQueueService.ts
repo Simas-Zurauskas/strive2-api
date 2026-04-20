@@ -11,6 +11,10 @@ import {
   INSIGHT_QUEUE_FRESH_THRESHOLD,
   InsightMode,
 } from '@lib/insightConstants';
+import {
+  bumpInsightQueueFreshReason,
+  recordInsightQueueFreshCounts,
+} from '@lib/metrics';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -126,7 +130,10 @@ const toQueueItem = (
     answer: insight.answer,
     conceptTags: insight.conceptTags,
     sourceBlockId: insight.sourceBlockId,
-    isNew: !progress,
+    // "New" = never rated. A progress row alone isn't enough: skipInsight
+    // and setInsightMode both upsert a row with reps: 0 before any rating,
+    // which used to flip the badge off after a mode-toggle or skip.
+    isNew: !progress || progress.reps === 0,
     mode: progress?.mode ?? 'tap-reveal',
     box: progress?.box ?? 0,
     dueAt: progress?.nextDue ? progress.nextDue.toISOString() : null,
@@ -192,6 +199,34 @@ const interleaveByCourse = <T extends { courseId: string }>(items: T[]): T[] => 
   return result;
 };
 
+/**
+ * When a `currentCourseId` is known (user is mid-lesson in a specific course),
+ * place that course's items first in their input order, then round-robin
+ * interleave the remaining courses behind them. Without a `currentCourseId`
+ * this degrades to plain `interleaveByCourse` so global/tab views are
+ * unaffected.
+ *
+ * Preserves input relative ordering within the active-course slice — the
+ * caller has already sorted by due-ness (for the due pool) or by
+ * createdAt-desc (for the fresh pool).
+ */
+const partitionByCourse = ({
+  items,
+  currentCourseId,
+}: {
+  items: QueueInsightItem[];
+  currentCourseId: string | undefined;
+}): QueueInsightItem[] => {
+  if (!currentCourseId) return interleaveByCourse(items);
+  const active: QueueInsightItem[] = [];
+  const rest: QueueInsightItem[] = [];
+  for (const item of items) {
+    if (item.courseId === currentCourseId) active.push(item);
+    else rest.push(item);
+  }
+  return [...active, ...interleaveByCourse(rest)];
+};
+
 // ── Main: build the daily queue ───────────────────────────
 
 /**
@@ -204,38 +239,54 @@ const interleaveByCourse = <T extends { courseId: string }>(items: T[]): T[] => 
  */
 export const getInsightQueue = async (params: {
   userId: string;
+  currentCourseId?: string;
 }): Promise<GetInsightQueueResult> => {
   const userObjId = new mongoose.Types.ObjectId(params.userId);
+  const { currentCourseId } = params;
   const now = new Date();
+
+  // Counters observed across the fresh-pool decision path. Recorded on all
+  // exit branches below so `/metrics` shows the distribution — essential
+  // for diagnosing "0 fresh despite Learned: 28" in production.
+  let completedLessonCount = 0;
+  let candidateCount = 0;
+
+  // `totalLearnedCount` is independent of everything else — kick it off
+  // immediately so it can complete in parallel with the two queries that
+  // gate on `activeInsightIds`.
+  const totalLearnedCountP = UserInsightProgressModel.countDocuments({
+    userId: userObjId,
+    reps: { $gte: 1 },
+  });
 
   // Scope: insights in non-archived courses only. Used as the `$in` filter
   // for every progress query below so archived content never surfaces.
   const activeInsightIds = await loadActiveInsightIds(userObjId);
 
-  // ── Step 1: due items (scoped to active courses) ──
-  const dueProgress = activeInsightIds.length === 0
-    ? []
-    : await UserInsightProgressModel.find({
-      userId: userObjId,
-      nextDue: { $lte: now },
-      insightId: { $in: activeInsightIds },
-    })
-      .sort({ nextDue: 1 })
-      .limit(INSIGHT_QUEUE_DUE_LIMIT)
-      .lean();
-
-  const totalDueCount = activeInsightIds.length === 0
-    ? 0
-    : await UserInsightProgressModel.countDocuments({
-      userId: userObjId,
-      nextDue: { $lte: now },
-      insightId: { $in: activeInsightIds },
-    });
-
-  const totalLearnedCount = await UserInsightProgressModel.countDocuments({
-    userId: userObjId,
-    reps: { $gte: 1 },
-  });
+  // ── Step 1: due items + total-due-count (both scoped to active courses) ──
+  // Run in parallel: find-with-limit and countDocuments are the same filter
+  // but return different shapes, so they can't be combined server-side.
+  type LeanProgress = IUserInsightProgress & { _id: Types.ObjectId };
+  const [dueProgress, totalDueCount, totalLearnedCount] = await Promise.all([
+    activeInsightIds.length === 0
+      ? Promise.resolve<LeanProgress[]>([])
+      : UserInsightProgressModel.find({
+        userId: userObjId,
+        nextDue: { $lte: now },
+        insightId: { $in: activeInsightIds },
+      })
+        .sort({ nextDue: 1 })
+        .limit(INSIGHT_QUEUE_DUE_LIMIT)
+        .lean<LeanProgress[]>(),
+    activeInsightIds.length === 0
+      ? Promise.resolve(0)
+      : UserInsightProgressModel.countDocuments({
+        userId: userObjId,
+        nextDue: { $lte: now },
+        insightId: { $in: activeInsightIds },
+      }),
+    totalLearnedCountP,
+  ]);
 
   const dueInsightIds = dueProgress.map((p) => p.insightId);
   const dueInsights = dueInsightIds.length === 0
@@ -246,38 +297,94 @@ export const getInsightQueue = async (params: {
   // ── Step 2: fresh items (active courses + completed lessons only) ──
   const shouldLoadFresh = totalDueCount < INSIGHT_QUEUE_FRESH_THRESHOLD;
   let freshInsights: LeanInsight[] = [];
+  // Fresh-pool decision path — set on every branch. `bumpInsightQueueFreshReason`
+  // is invoked once at the bottom so the distribution surfaces in /metrics.
+  let freshReason: Parameters<typeof bumpInsightQueueFreshReason>[0];
 
-  if (shouldLoadFresh && activeInsightIds.length > 0) {
+  if (!shouldLoadFresh) {
+    // Plenty of due items already — don't even probe the fresh pool.
+    freshReason = 'due_gated_fresh_skipped';
+  } else if (activeInsightIds.length === 0) {
+    freshReason = 'no_active_insights';
+  } else {
     const [completedLessonKeys, seenInsightIds] = await Promise.all([
       loadCompletedLessonKeys(userObjId),
       UserInsightProgressModel.find({ userId: userObjId }).select('insightId').lean(),
     ]);
+    completedLessonCount = completedLessonKeys.size;
 
-    if (completedLessonKeys.size > 0) {
-      const seenSet = new Set(seenInsightIds.map((r) => r.insightId.toString()));
+    if (completedLessonKeys.size === 0) {
+      freshReason = 'no_completed_lessons';
+    } else {
+      const seenIdList = Array.from(
+        new Set(seenInsightIds.map((r) => r.insightId.toString())),
+      ).map((id) => new Types.ObjectId(id));
 
       // Over-fetch fresh candidates by a margin, then filter by completed
       // lessons in memory. Can't express the (courseId, moduleIndex,
       // lessonIndex) tuple filter cleanly in a single Mongo query.
-      const freshCandidates = await InsightModel.find({
-        _id: { $in: activeInsightIds, $nin: Array.from(seenSet).map((id) => new Types.ObjectId(id)) },
-      })
-        // Favor newer insights — most-recently generated lessons first.
-        .sort({ createdAt: -1 })
-        .limit(INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT * 6)
-        .lean();
-
-      // Apply completed-lesson gate + dedup to one card per lesson.
-      const perLesson = new Map<string, LeanInsight>();
-      for (const i of freshCandidates) {
-        const lessonKey = `${i.courseId.toString()}:${i.moduleIndex}:${i.lessonIndex}`;
-        if (!completedLessonKeys.has(lessonKey)) continue;
-        if (!perLesson.has(i.lessonId.toString())) perLesson.set(i.lessonId.toString(), i);
-        if (perLesson.size >= INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT) break;
+      //
+      // When `currentCourseId` is present we run the same find twice —
+      // once constrained to the active course, once for everything else —
+      // so the active course's candidates consistently win the `perLesson`
+      // dedup race even when the global createdAt-desc ordering would have
+      // placed another course first. Keeps the gate + cap logic unchanged.
+      const overFetch = INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT * 6;
+      let freshCandidates: LeanInsight[];
+      if (currentCourseId) {
+        const activeCourseObjId = new Types.ObjectId(currentCourseId);
+        const [activeCandidates, otherCandidates] = await Promise.all([
+          InsightModel.find({
+            _id: { $in: activeInsightIds, $nin: seenIdList },
+            courseId: activeCourseObjId,
+          })
+            .sort({ createdAt: -1 })
+            .limit(overFetch)
+            .lean(),
+          InsightModel.find({
+            _id: { $in: activeInsightIds, $nin: seenIdList },
+            courseId: { $ne: activeCourseObjId },
+          })
+            .sort({ createdAt: -1 })
+            .limit(overFetch)
+            .lean(),
+        ]);
+        freshCandidates = [...activeCandidates, ...otherCandidates];
+      } else {
+        freshCandidates = await InsightModel.find({
+          _id: { $in: activeInsightIds, $nin: seenIdList },
+        })
+          // Favor newer insights — most-recently generated lessons first.
+          .sort({ createdAt: -1 })
+          .limit(overFetch)
+          .lean();
       }
-      freshInsights = [...perLesson.values()];
+      candidateCount = freshCandidates.length;
+
+      if (freshCandidates.length === 0) {
+        freshReason = 'candidates_zero';
+      } else {
+        // Apply completed-lesson gate + dedup to one card per lesson.
+        const perLesson = new Map<string, LeanInsight>();
+        for (const i of freshCandidates) {
+          const lessonKey = `${i.courseId.toString()}:${i.moduleIndex}:${i.lessonIndex}`;
+          if (!completedLessonKeys.has(lessonKey)) continue;
+          if (!perLesson.has(i.lessonId.toString())) perLesson.set(i.lessonId.toString(), i);
+          if (perLesson.size >= INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT) break;
+        }
+        freshInsights = [...perLesson.values()];
+        freshReason = freshInsights.length === 0 ? 'all_gated_by_lesson' : 'ok';
+      }
     }
   }
+
+  bumpInsightQueueFreshReason(freshReason);
+  recordInsightQueueFreshCounts({
+    activeInsightCount: activeInsightIds.length,
+    completedLessonCount,
+    candidateCount,
+    freshOutCount: freshInsights.length,
+  });
 
   // ── Step 3: hydrate with course/lesson names ──────
   const allCourseIds = new Set<string>();
@@ -306,13 +413,15 @@ export const getInsightQueue = async (params: {
     if (item) freshItems.push(item);
   }
 
-  // Interleave both slices across courses.
-  const interleavedDue = interleaveByCourse(dueItems);
-  const interleavedFresh = interleaveByCourse(freshItems);
+  // Partition-then-interleave: when a `currentCourseId` is known, the active
+  // course's items are placed first; otherwise fall back to pure
+  // round-robin interleave across courses.
+  const orderedDue = partitionByCourse({ items: dueItems, currentCourseId });
+  const orderedFresh = partitionByCourse({ items: freshItems, currentCourseId });
 
   return {
-    due: interleavedDue,
-    fresh: interleavedFresh,
+    due: orderedDue,
+    fresh: orderedFresh,
     counts: {
       dueTotal: totalDueCount,
       freshAvailable: freshItems.length,
@@ -361,17 +470,116 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
   const startOfLastWeek = new Date(startOfWeek);
   startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
 
-  // Scope due-counts to non-archived courses so the dashboard agrees with
-  // what the queue actually serves. totalInsights counts all content the
-  // user has ever had (archived courses remain part of the learning record).
-  const activeInsightIds = await loadActiveInsightIds(userObjId);
+  const fourteenDaysAgo = new Date(now);
+  fourteenDaysAgo.setUTCDate(fourteenDaysAgo.getUTCDate() - 13);
 
-  const [totalInsights, totalReviewed, totalMastered, dueToday, dueThisWeek, allProgress] = await Promise.all([
-    InsightModel.countDocuments({
-      courseId: {
-        $in: (await CourseModel.find({ userId: userObjId }).select('_id').lean()).map((c) => c._id),
+  // Load the user's courses once. Previous implementation did this twice:
+  // once via loadActiveInsightIds (filtered to non-archived) and again inline
+  // inside Promise.all for totalInsights (all statuses). Keeping the `status`
+  // field lets us partition into active and all-courses sets in memory.
+  //
+  // totalInsights counts every card the user has ever had — archived content
+  // stays part of the learning record. Active set scopes the scheduler
+  // queries (dueToday/dueThisWeek) so archived courses don't nag.
+  const allCourses = await CourseModel.find({ userId: userObjId })
+    .select('_id status')
+    .lean();
+  const allCourseIds = allCourses.map((c) => c._id);
+  const activeCourseIds = allCourses
+    .filter((c) => c.status !== 'archived')
+    .map((c) => c._id);
+
+  const activeInsightIds = activeCourseIds.length === 0
+    ? []
+    : (
+      await InsightModel.find({ courseId: { $in: activeCourseIds } })
+        .select('_id')
+        .lean()
+    ).map((i) => i._id);
+
+  // Single $facet replaces the previous pattern of loading every progress
+  // row's full history[] array into Node memory and iterating three times.
+  // MongoDB does the grouping; we just fill 14-day zeros on the JS side.
+  const historyFacetP = UserInsightProgressModel.aggregate<{
+    byBox: { _id: number; count: number }[];
+    weekly: { _id: null; thisWeek: number; lastWeek: number }[];
+    daily: { _id: string; reviews: number; sumRating: number }[];
+  }>([
+    { $match: { userId: userObjId } },
+    {
+      $facet: {
+        // Box distribution across rows that have been reviewed at least once.
+        // `history.0` exists <=> history.length > 0 — equivalent to the old
+        // `if ((p.history?.length ?? 0) === 0) continue` filter.
+        byBox: [
+          { $match: { 'history.0': { $exists: true } } },
+          { $group: { _id: '$box', count: { $sum: 1 } } },
+        ],
+        // Weekly counts: pre-filter docs whose array contains any event in
+        // the last two weeks, unwind, re-filter the unwound events, then
+        // partition via conditional $sum. One pass for both weeks.
+        weekly: [
+          { $match: { 'history.ratedAt': { $gte: startOfLastWeek } } },
+          { $unwind: '$history' },
+          { $match: { 'history.ratedAt': { $gte: startOfLastWeek } } },
+          {
+            $group: {
+              _id: null,
+              thisWeek: {
+                $sum: { $cond: [{ $gte: ['$history.ratedAt', startOfWeek] }, 1, 0] },
+              },
+              lastWeek: {
+                $sum: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $gte: ['$history.ratedAt', startOfLastWeek] },
+                        { $lt: ['$history.ratedAt', startOfWeek] },
+                      ],
+                    },
+                    1,
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        ],
+        // 14-day histogram bucketed by UTC date. Matches the previous
+        // `ratedAt.toISOString().slice(0, 10)` grouping behavior.
+        daily: [
+          { $match: { 'history.ratedAt': { $gte: fourteenDaysAgo } } },
+          { $unwind: '$history' },
+          { $match: { 'history.ratedAt': { $gte: fourteenDaysAgo } } },
+          {
+            $group: {
+              _id: {
+                $dateToString: {
+                  format: '%Y-%m-%d',
+                  date: '$history.ratedAt',
+                  timezone: 'UTC',
+                },
+              },
+              reviews: { $sum: 1 },
+              sumRating: { $sum: '$history.rating' },
+            },
+          },
+        ],
       },
-    }),
+    },
+  ]);
+
+  const [
+    totalInsights,
+    totalReviewed,
+    totalMastered,
+    dueToday,
+    dueThisWeek,
+    historyFacet,
+  ] = await Promise.all([
+    allCourseIds.length === 0
+      ? Promise.resolve(0)
+      : InsightModel.countDocuments({ courseId: { $in: allCourseIds } }),
     UserInsightProgressModel.countDocuments({ userId: userObjId, reps: { $gte: 1 } }),
     UserInsightProgressModel.countDocuments({ userId: userObjId, masteredAt: { $ne: null } }),
     activeInsightIds.length === 0
@@ -388,45 +596,22 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
         nextDue: { $lte: endOfWeek },
         insightId: { $in: activeInsightIds },
       }),
-    UserInsightProgressModel.find({ userId: userObjId })
-      .select('box history')
-      .lean(),
+    historyFacetP,
   ]);
 
-  // Weekly review counts computed in-memory from the already-loaded history.
-  let reviewedThisWeek = 0;
-  let reviewedLastWeek = 0;
-  for (const p of allProgress) {
-    for (const ev of p.history ?? []) {
-      if (ev.ratedAt >= startOfWeek) reviewedThisWeek += 1;
-      else if (ev.ratedAt >= startOfLastWeek && ev.ratedAt < startOfWeek) reviewedLastWeek += 1;
-    }
-  }
+  const facet = historyFacet[0];
+  const reviewedThisWeek = facet?.weekly[0]?.thisWeek ?? 0;
+  const reviewedLastWeek = facet?.weekly[0]?.lastWeek ?? 0;
 
-  // Box distribution (only learned/in-progress — exclude brand new).
-  const boxBuckets = new Map<number, number>();
-  for (const p of allProgress) {
-    if ((p.history?.length ?? 0) === 0) continue;
-    boxBuckets.set(p.box, (boxBuckets.get(p.box) ?? 0) + 1);
-  }
-  const boxDistribution = [...boxBuckets.entries()]
-    .map(([box, count]) => ({ box, count }))
+  const boxDistribution = (facet?.byBox ?? [])
+    .map((b) => ({ box: b._id, count: b.count }))
     .sort((a, b) => a.box - b.box);
 
-  // Last 14 days of review history aggregated by UTC date string.
-  const fourteenDaysAgo = new Date(now);
-  fourteenDaysAgo.setUTCDate(fourteenDaysAgo.getUTCDate() - 13);
-
+  // Hydrate a dense 14-day series from the daily facet. Days with no
+  // reviews show up as zeros so the client can render a continuous bar.
   const byDate = new Map<string, { reviews: number; sumRating: number }>();
-  for (const p of allProgress) {
-    for (const ev of p.history ?? []) {
-      if (ev.ratedAt < fourteenDaysAgo) continue;
-      const dateKey = ev.ratedAt.toISOString().slice(0, 10);
-      const existing = byDate.get(dateKey) ?? { reviews: 0, sumRating: 0 };
-      existing.reviews += 1;
-      existing.sumRating += ev.rating;
-      byDate.set(dateKey, existing);
-    }
+  for (const d of facet?.daily ?? []) {
+    byDate.set(d._id, { reviews: d.reviews, sumRating: d.sumRating });
   }
 
   const recentHistory: InsightStats['recentHistory'] = [];

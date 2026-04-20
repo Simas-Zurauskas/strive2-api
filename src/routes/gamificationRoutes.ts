@@ -4,12 +4,14 @@ import {
   getStatsController,
   getQuizTrendsController,
 } from '@controlers/gamification';
-import { protect } from '@middleware/authMiddleware';
+import { protect, requireVerified } from '@middleware/authMiddleware';
 
 const router = Router();
 
-router.get('/profile', protect, getProfileController);
-router.get('/stats', protect, getStatsController);
-router.get('/quiz-trends', protect, getQuizTrendsController);
+router.use(protect, requireVerified);
+
+router.get('/profile', getProfileController);
+router.get('/stats', getStatsController);
+router.get('/quiz-trends', getQuizTrendsController);
 
 export { router as gamificationRoutes };

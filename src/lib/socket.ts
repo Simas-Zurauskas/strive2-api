@@ -2,6 +2,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import { Server as HttpServer } from 'http';
 import { decodeAuthToken } from '@lib/auth';
 import UserModel from '@models/UserModel';
+import { AuthProvider } from '@lib/constants';
 import { ENVIRONMENT, FRONTEND_URL } from '@conf/env';
 
 /**
@@ -50,10 +51,20 @@ export const initSocketIO = (httpServer: HttpServer): SocketIOServer => {
       return next(new Error('Unauthorized'));
     }
 
-    const user = await UserModel.findById(decoded.id).select('tokenVersion').lean();
+    const user = await UserModel.findById(decoded.id)
+      .select('tokenVersion emailVerified authProviders')
+      .lean();
 
     if (!user || decoded.tokenVersion !== user.tokenVersion) {
       return next(new Error('Unauthorized'));
+    }
+
+    // Mirror the HTTP `requireVerified` gate: unverified credential users
+    // stay out of rooms until they confirm their email. Prevents them from
+    // receiving job-complete events for work they shouldn't have triggered.
+    const hasCredentials = user.authProviders.some((p) => p.provider === AuthProvider.CREDENTIALS);
+    if (hasCredentials && !user.emailVerified) {
+      return next(new Error('EMAIL_NOT_VERIFIED'));
     }
 
     socket.data.userId = decoded.id;

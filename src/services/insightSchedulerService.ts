@@ -35,11 +35,15 @@ export interface SchedulerSnapshot {
  *  3 (Good):  standard success. Box + 1 (capped), state → review.
  *  4 (Easy):  big jump. Box + 2 (capped), state → review.
  */
-export const applyRating = (
-  snapshot: SchedulerSnapshot,
-  rating: InsightRating,
-  now: Date,
-): SchedulerSnapshot => {
+export const applyRating = ({
+  snapshot,
+  rating,
+  now,
+}: {
+  snapshot: SchedulerSnapshot;
+  rating: InsightRating;
+  now: Date;
+}): SchedulerSnapshot => {
   let { box, reps, lapses } = snapshot;
   let state: InsightState;
 
@@ -85,7 +89,7 @@ export const applyRating = (
  * Days between two dates, clamped to a minimum of 0 to avoid negative history
  * entries when `last` is null (first review) or in the future (clock drift).
  */
-const elapsedDays = (last: Date | null, now: Date): number => {
+const elapsedDays = ({ last, now }: { last: Date | null; now: Date }): number => {
   if (!last) return 0;
   return Math.max(0, Math.floor((now.getTime() - last.getTime()) / DAY_MS));
 };
@@ -142,8 +146,8 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
       nextDue: now,
     };
 
-  const elapsed = elapsedDays(currentSnapshot.lastReview, now);
-  const next = applyRating(currentSnapshot, params.rating, now);
+  const elapsed = elapsedDays({ last: currentSnapshot.lastReview, now });
+  const next = applyRating({ snapshot: currentSnapshot, rating: params.rating, now });
 
   const mode: InsightMode = existing?.mode ?? 'tap-reveal';
   const event: IInsightReviewEvent = {

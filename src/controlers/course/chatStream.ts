@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import asyncHandler from 'express-async-handler';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { chatStreamSchema } from './validation';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { courseDesignAgent } from '@src/lib/ai/agents/courseDesign';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { getUtilityModel } from '@lib/langchain';
@@ -122,7 +122,7 @@ export const chatStreamController = asyncHandler(async (req, res) => {
 
   const { messages: rawMessages } = parseResult.data;
 
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   if (!course.structure) {

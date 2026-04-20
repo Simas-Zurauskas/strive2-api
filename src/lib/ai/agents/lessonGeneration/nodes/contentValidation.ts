@@ -1,5 +1,5 @@
 import { RunnableConfig } from '@langchain/core/runnables';
-import { generateObject } from 'ai';
+import { generateObject, NoObjectGeneratedError } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { z } from 'zod';
 import { MODEL_IDS } from '@lib/langchain';
@@ -7,9 +7,55 @@ import { sanitizeLatex } from '@lib/latexSanitizer';
 import { LessonState } from '../state';
 import { lessonBlockSchema } from '../prompts';
 
+// Mirror of the helper in contentGeneration.ts. When generateObject rejects,
+// the terse "response did not match schema" message is all the Job record
+// keeps; the real reason lives on .cause (ZodError), and the raw output on
+// .text. Log both so repair-path failures are diagnosable from stdout.
+const logNoObjectDetails = (label: string, err: unknown): void => {
+  if (!NoObjectGeneratedError.isInstance(err)) return;
+  const cause = err.cause;
+  const causeMsg = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
+  console.error(`[${label}] NoObjectGeneratedError cause: ${causeMsg}`.red);
+  if (typeof err.text === 'string' && err.text.length > 0) {
+    console.error(`[${label}] raw response tail (last 600 chars): ${err.text.slice(-600)}`.red);
+  }
+  if (err.usage) {
+    console.error(`[${label}] usage: ${JSON.stringify(err.usage)}`.red);
+  }
+};
+
 // Block types whose `content` is markdown-ish and may contain LaTeX math.
 // `code` and `mermaid` carry domain-specific syntax and must never be sanitized.
 const MATH_BEARING_TYPES = new Set(['intro', 'section', 'callout', 'summary']);
+
+// ── Section title + first-paragraph helpers ──
+
+/**
+ * Pull the first markdown heading (# through ###) from a section block's
+ * content. Returns '' when the content doesn't open with a heading — which
+ * itself is a malformed-start signal handled separately below.
+ */
+function extractSectionTitle(content: string): string {
+  const match = content.trim().match(/^#{1,3}\s+(.+)/);
+  return match ? match[1].trim() : '';
+}
+
+/**
+ * True if a section's first non-whitespace character is a markdown heading
+ * marker or starts a proper sentence (uppercase / digit / opening quote).
+ * Catches regressions like Hiroshi's Lesson [1/2] section that opened with
+ * "what's happening is that…" — a mid-sentence fragment shipped to the
+ * learner because the upstream prose got sliced wrong.
+ */
+function hasValidSectionStart(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  // Proper markdown heading start is always OK.
+  if (/^#{1,3}\s+\S/.test(trimmed)) return true;
+  // Fallback: first char should be uppercase letter, digit, or a typical
+  // sentence opener (quote, backtick, bullet, or LaTeX delimiter).
+  return /^[A-Z0-9"'`*\-[$]/.test(trimmed);
+}
 
 // ── Heuristics for detecting non-code content in code blocks ──
 
@@ -93,11 +139,15 @@ function detectStructuralGaps(blocks: LessonState['contentBlocks']): StructuralG
   };
 }
 
-async function repairStructuralGaps(
-  blocks: LessonState['contentBlocks'],
-  gaps: StructuralGaps,
-  writer?: (event: Record<string, unknown>) => void,
-): Promise<LessonState['contentBlocks']> {
+async function repairStructuralGaps({
+  blocks,
+  gaps,
+  writer,
+}: {
+  blocks: LessonState['contentBlocks'];
+  gaps: StructuralGaps;
+  writer?: (event: Record<string, unknown>) => void;
+}): Promise<LessonState['contentBlocks']> {
   const missing: string[] = [];
   if (gaps.missingIntro) missing.push('1 "intro" block (2-4 sentence compelling opening)');
   if (gaps.missingSummary) missing.push('1 "summary" block (4-6 bullet points of key takeaways, no heading)');
@@ -160,6 +210,7 @@ async function repairStructuralGaps(
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     console.error(`[contentValidation] ✗ Repair failed: ${reason}`.red);
+    logNoObjectDetails('contentValidation.repair', error);
     return blocks; // Fall back to original blocks
   }
 }
@@ -221,12 +272,87 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     console.log(`[contentValidation] ✓ All checks passed (${blocks.length} blocks)`.green);
   }
 
-  // ── Structural repair: attempt to generate missing required blocks ──
-  const gaps = detectStructuralGaps(blocks);
-  if (gaps.missingIntro || gaps.missingSummary || gaps.needMoreSections > 0) {
-    blocks = await repairStructuralGaps(blocks, gaps, writer);
+  // ── Section-title dedup (case-insensitive) ──
+  // The LLM occasionally emits the same section twice (observed in Olivia's
+  // Lesson [0/2] "Pro Mode Actually Gives You" and Nina's Lesson [1/2]
+  // "Launching the Notebook"). We keep the first occurrence and drop
+  // subsequent copies. When this brings the section count below the
+  // structural floor, the repair loop below regenerates fresh sections.
+  const seenTitles = new Map<string, string>(); // normalized title → first-seen block id
+  const duplicatesRemoved: { id: string; title: string }[] = [];
+  blocks = blocks.filter((b) => {
+    if (b.type !== 'section') return true;
+    const title = extractSectionTitle(b.content);
+    if (!title) return true; // malformed-start path handles no-title case
+    const key = title.toLowerCase();
+    if (seenTitles.has(key)) {
+      duplicatesRemoved.push({ id: b.id, title });
+      return false;
+    }
+    seenTitles.set(key, b.id);
+    return true;
+  });
+  if (duplicatesRemoved.length > 0) {
+    for (const { id, title } of duplicatesRemoved) {
+      const firstId = seenTitles.get(title.toLowerCase());
+      console.warn(`[contentValidation] Removed duplicate section ${id} (title "${title}" already in ${firstId})`.yellow);
+      warnings.push(`Removed duplicate section ${id}: "${title}"`);
+    }
+  }
 
-    // Log post-repair validation
+  // ── Malformed-start detector (warn only) ──
+  // Flag sections whose content starts mid-sentence or otherwise doesn't
+  // open cleanly. We don't drop these — doing so would risk discarding
+  // substantive teaching material over a formatting glitch. The warning
+  // surfaces in the debug recorder for per-run inspection.
+  for (const b of blocks) {
+    if (b.type !== 'section') continue;
+    if (hasValidSectionStart(b.content)) continue;
+    const preview = b.content.trim().slice(0, 60);
+    console.warn(`[contentValidation] Section ${b.id} has malformed start: "${preview}..."`.yellow);
+    warnings.push(`Section ${b.id} starts malformed: "${preview}..."`);
+  }
+
+  // ── Structural repair: attempt to generate missing required blocks ──
+  // Runs up to MAX_REPAIR_ATTEMPTS rounds. A single repair call can itself
+  // come back thin (the LLM occasionally returns only 1 of 2 requested sections,
+  // or a summary that gets filtered out by the allowedTypes gate). Looping a
+  // second time gives structurally-broken lessons a real chance to be made valid
+  // before they reach the client.
+  // Raised from 2 → 3: the post-dedup path can turn a "had-5-sections-two-duplicates"
+  // lesson into a "needs 1 section regenerated" case, and that regeneration can
+  // itself come back thin. Three attempts reliably converges in practice without
+  // meaningfully lengthening the happy-path latency (no attempt fires when no gap exists).
+  const MAX_REPAIR_ATTEMPTS = 3;
+  let prevBlockCount = blocks.length;
+  for (let attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS; attempt++) {
+    const gaps = detectStructuralGaps(blocks);
+    const needsRepair = gaps.missingIntro || gaps.missingSummary || gaps.needMoreSections > 0;
+    if (!needsRepair) break;
+
+    if (attempt > 1) {
+      console.log(`[contentValidation] 🔄 Repair attempt ${attempt}/${MAX_REPAIR_ATTEMPTS}`.yellow);
+    }
+    blocks = await repairStructuralGaps({ blocks, gaps, writer });
+
+    // No-progress guard: repair's catch block returns the input blocks
+    // unchanged on LLM failure, and the model can also legitimately return
+    // zero usable blocks (all filtered out by the allowedTypes gate). In
+    // either case, a next iteration would fire with identical gaps and
+    // almost certainly produce the same outcome — so stop here.
+    if (blocks.length === prevBlockCount) {
+      console.warn(`[contentValidation] ⚠ Repair attempt ${attempt} made no progress, stopping`.yellow);
+      break;
+    }
+    prevBlockCount = blocks.length;
+  }
+
+  // Final post-repair log (only if we actually ran repair at all)
+  const needsInitialRepair = (() => {
+    const g = detectStructuralGaps(state.contentBlocks);
+    return g.missingIntro || g.missingSummary || g.needMoreSections > 0;
+  })();
+  if (needsInitialRepair) {
     const postIntro = blocks.filter((b) => b.type === 'intro').length;
     const postSummary = blocks.filter((b) => b.type === 'summary').length;
     const postSections = blocks.filter((b) => b.type === 'section').length;

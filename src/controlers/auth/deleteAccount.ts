@@ -2,12 +2,12 @@ import asyncHandler from 'express-async-handler';
 import UserModel, { AuthProvider } from '@models/UserModel';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
-import LessonContentModel from '@models/LessonContentModel';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
-import { deleteByPrefix } from '@services/s3Service';
+import UserInsightProgressModel from '@models/UserInsightProgressModel';
+import UserGamificationModel from '@models/UserGamificationModel';
+import { cleanupCourseContent } from '@services/courseCleanupService';
 import { deleteAccountSchema } from './validation';
 
 /**
@@ -72,27 +72,30 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
     }
   }
 
-  // Collect course IDs before deletion for S3 cleanup
   const courseIds = await CourseModel.find({ userId: user._id }).distinct('_id');
+
+  // Delegate per-course cleanup to the same primitive `deleteCourse` uses so
+  // the two deletion paths can't drift when new course-scoped models are added.
+  // Covers lesson content, quiz content, chat, progress, insights,
+  // insight-progress, and S3 assets under `lessons/{courseId}/`.
+  await Promise.all(courseIds.map((id) => cleanupCourseContent(id.toString())));
 
   await Promise.all([
     JobModel.deleteMany({ userId: user._id }),
-    LessonContentModel.deleteMany({ courseId: { $in: courseIds } }),
-    CourseDesignChatModel.deleteMany({ userId: user._id }),
     UserLessonProgressModel.deleteMany({ userId: user._id }),
     UserModuleQuizProgressModel.deleteMany({ userId: user._id }),
-    ModuleQuizContentModel.deleteMany({ courseId: { $in: courseIds } }),
+    UserInsightProgressModel.deleteMany({ userId: user._id }),
+    CourseDesignChatModel.deleteMany({ userId: user._id }),
+    UserGamificationModel.deleteMany({ userId: user._id }),
+    // Strip these courses from any OTHER user's favorites — `CourseModel.deleteMany`
+    // below doesn't trigger the $pull that single-course deletion does.
+    UserModel.updateMany(
+      { favoriteCourseIds: { $in: courseIds } },
+      { $pull: { favoriteCourseIds: { $in: courseIds } } },
+    ),
   ]);
   await CourseModel.deleteMany({ userId: user._id });
   await UserModel.findByIdAndDelete(userId);
-
-  // Clean up S3 files for all courses — fire and forget
-  Promise.all(courseIds.map((id) => deleteByPrefix(`lessons/${id}/`))).then((counts) => {
-    const total = counts.reduce((sum, c) => sum + c, 0);
-    if (total > 0) console.log(`[API] S3 cleanup: deleted ${total} objects for user ${userId}`.gray);
-  }).catch((e) => {
-    console.warn(`[API] S3 cleanup failed for user ${userId}:`, e instanceof Error ? e.message : e);
-  });
 
   console.log(`[API] Account deleted: ${userId}`.green);
 

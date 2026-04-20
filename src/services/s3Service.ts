@@ -19,7 +19,7 @@ const s3 = new S3Client({
 
 const SEVEN_DAYS = 7 * 24 * 60 * 60;
 
-export const uploadBuffer = async (key: string, body: Buffer, contentType: string): Promise<string> => {
+export const uploadBuffer = async ({ key, body, contentType }: { key: string; body: Buffer; contentType: string }): Promise<string> => {
   await s3.send(new PutObjectCommand({
     Bucket: AWS_S3_BUCKET,
     Key: key,
@@ -29,7 +29,7 @@ export const uploadBuffer = async (key: string, body: Buffer, contentType: strin
   return key;
 };
 
-export const getPresignedUrl = async (key: string, expiresIn = SEVEN_DAYS): Promise<string> => {
+export const getPresignedUrl = async ({ key, expiresIn = SEVEN_DAYS }: { key: string; expiresIn?: number }): Promise<string> => {
   return getSignedUrl(s3, new GetObjectCommand({
     Bucket: AWS_S3_BUCKET,
     Key: key,
@@ -45,7 +45,7 @@ export const getPresignedUrl = async (key: string, expiresIn = SEVEN_DAYS): Prom
 export const resolveImageUrl = async (value: string | null): Promise<string | null> => {
   if (!value) return null;
   if (value.startsWith('data:')) return value;
-  return getPresignedUrl(value);
+  return getPresignedUrl({ key: value });
 };
 
 /**

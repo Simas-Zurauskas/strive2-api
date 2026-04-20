@@ -111,3 +111,89 @@ export const sendVerificationEmailAsync = (params: { to: string; token: string }
     });
   });
 };
+
+/**
+ * Low-level Mailjet send for password-reset links. Mirrors `sendVerificationEmail`
+ * but kept separate (not parameterised) because the two flows are likely to diverge
+ * — different expiry copy, possibly different sender domain, eventually a security-
+ * event audit hook on resets. Prefer `sendPasswordResetEmailAsync` from the request
+ * path.
+ */
+export const sendPasswordResetEmail = async (params: { to: string; token: string }): Promise<void> => {
+  const { to, token } = params;
+  const resetUrl = `${FRONTEND_URL}/reset-password?token=${token}&email=${encodeURIComponent(to)}`;
+
+  await mailjet.post('send', { version: 'v3.1' }).request({
+    Messages: [
+      {
+        From: {
+          Email: SENDER_EMAIL_ACCOUNT,
+          Name: 'Strive',
+        },
+        To: [{ Email: to }],
+        Subject: 'Reset your Strive password',
+        HTMLPart: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+            <h1 style="font-size: 24px; font-weight: 700; color: #111827; margin-bottom: 16px;">
+              Reset your password
+            </h1>
+            <p style="font-size: 15px; color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
+              We received a request to reset your Strive password. Click the button below to choose a new one.
+            </p>
+            <a href="${resetUrl}"
+               style="display: inline-block; padding: 12px 24px; background: #4f46e5; color: #ffffff; text-decoration: none; border-radius: 8px; font-size: 15px; font-weight: 600;">
+              Reset password
+            </a>
+            <p style="font-size: 13px; color: #9ca3af; line-height: 1.6; margin-top: 32px;">
+              This link expires in 1 hour. If you didn't request this, you can safely ignore this email — your password won't change.
+            </p>
+          </div>
+        `,
+        TextPart: `Reset your Strive password\n\nWe received a request to reset your password. Visit the link below to choose a new one:\n\n${resetUrl}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email — your password won't change.`,
+      },
+    ],
+  });
+};
+
+/**
+ * Fire-and-forget version of `sendPasswordResetEmail`. Same retry harness as
+ * `sendVerificationEmailAsync` (1s/4s/16s with Sentry on final failure). Sentry
+ * tag is `email_delivery: 'password_reset'` so dashboards can distinguish the
+ * two flows.
+ */
+export const sendPasswordResetEmailAsync = (params: { to: string; token: string }): void => {
+  setImmediate(async () => {
+    const delays = [1_000, 4_000, 16_000]; // ms
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      try {
+        await sendPasswordResetEmail(params);
+        if (attempt > 0) {
+          console.log(
+            `[email] Password-reset email to ${params.to} succeeded on retry ${attempt}`.cyan,
+          );
+        }
+        return;
+      } catch (err) {
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[email] Password-reset email attempt ${attempt + 1} to ${params.to} failed: ${message}`.yellow,
+        );
+
+        if (attempt < delays.length) {
+          await new Promise((r) => setTimeout(r, delays[attempt]));
+        }
+      }
+    }
+
+    console.error(
+      `[email] Password-reset email to ${params.to} failed after ${delays.length + 1} attempts`.red,
+    );
+    Sentry.captureException(lastError, {
+      tags: { email_delivery: 'password_reset' },
+      extra: { to: params.to, attempts: delays.length + 1 },
+    });
+  });
+};

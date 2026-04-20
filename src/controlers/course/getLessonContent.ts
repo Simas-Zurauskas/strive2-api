@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourse } from '@services/courseDbService';
+import { getUserCourseLean } from '@services/courseDbService';
 import { resolveImageUrl } from '@services/s3Service';
 import LessonContentModel from '@models/LessonContentModel';
 import { parseIndexParam } from './validation';
@@ -44,9 +44,9 @@ import { parseIndexParam } from './validation';
  */
 export const getLessonContentController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const moduleIndex = parseIndexParam(req.params.moduleIndex, 'moduleIndex');
-  const lessonIndex = parseIndexParam(req.params.lessonIndex, 'lessonIndex');
-  const course = await getUserCourse({ userId, courseId: req.params.courseId as string });
+  const moduleIndex = parseIndexParam({ value: req.params.moduleIndex, name: 'moduleIndex' });
+  const lessonIndex = parseIndexParam({ value: req.params.lessonIndex, name: 'lessonIndex' });
+  const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
   const content = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });

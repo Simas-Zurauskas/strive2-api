@@ -25,14 +25,14 @@ const getISOWeek = (date: Date): string => {
   return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
 };
 
-const daysBetween = (a: string, b: string): number => {
+const daysBetween = ({ a, b }: { a: string; b: string }): number => {
   const dateA = new Date(a + 'T00:00:00Z');
   const dateB = new Date(b + 'T00:00:00Z');
   return Math.round((dateB.getTime() - dateA.getTime()) / 86400000);
 };
 
 /** Count missed weekdays (Mon–Fri) strictly between two YYYY-MM-DD dates (exclusive on both ends). */
-const missedWeekdays = (a: string, b: string): number => {
+const missedWeekdays = ({ a, b }: { a: string; b: string }): number => {
   const start = new Date(a + 'T00:00:00Z');
   const end = new Date(b + 'T00:00:00Z');
   let count = 0;
@@ -61,12 +61,12 @@ export const computeLiveStreak = (profile: { activeDates: string[] }): number =>
 
   // Streak is alive only if no missed weekdays between most recent activity and today.
   const mostRecent = sorted[0];
-  if (mostRecent !== today && missedWeekdays(mostRecent, today) > 0) return 0;
+  if (mostRecent !== today && missedWeekdays({ a: mostRecent, b: today }) > 0) return 0;
 
   // Walk backwards; any missed weekday between consecutive entries ends the streak.
   let streak = 1;
   for (let i = 1; i < sorted.length; i++) {
-    if (missedWeekdays(sorted[i], sorted[i - 1]) === 0) {
+    if (missedWeekdays({ a: sorted[i], b: sorted[i - 1] }) === 0) {
       streak++;
     } else {
       break;
@@ -77,7 +77,7 @@ export const computeLiveStreak = (profile: { activeDates: string[] }): number =>
 };
 
 /** If the live streak exceeds the stored value, persist it and check streak achievements. */
-export const syncLiveStreak = async (userId: string, liveStreak: number): Promise<void> => {
+export const syncLiveStreak = async ({ userId, liveStreak }: { userId: string; liveStreak: number }): Promise<void> => {
   const doc = await UserGamificationModel.findOne({ userId: new mongoose.Types.ObjectId(userId) });
   if (!doc || liveStreak <= doc.currentStreak) return;
 
@@ -85,7 +85,7 @@ export const syncLiveStreak = async (userId: string, liveStreak: number): Promis
   if (liveStreak > doc.longestStreak) doc.longestStreak = liveStreak;
   await doc.save();
 
-  await checkAchievements(userId, 'streak', { streak: liveStreak });
+  await checkAchievements({ userId, trigger: 'streak', context: { streak: liveStreak } });
 };
 
 // ── Get or Create Profile ──────────────────────────────────
@@ -109,7 +109,7 @@ export interface AwardXpResult {
   newAchievements: AchievementDefinition[];
 }
 
-export const awardXp = async (userId: string, amount: number, source: XpSource): Promise<AwardXpResult> => {
+export const awardXp = async ({ userId, amount, source }: { userId: string; amount: number; source: XpSource }): Promise<AwardXpResult> => {
   if (amount <= 0) return { xpAwarded: 0, totalXp: 0, level: 1, leveledUp: false, newAchievements: [] };
 
   const today = todayStr();
@@ -150,7 +150,7 @@ export const awardXp = async (userId: string, amount: number, source: XpSource):
   }
 
   // Check level-based achievements
-  const newAchievements = await checkAchievements(userId, 'level', { level: newLevel });
+  const newAchievements = await checkAchievements({ userId, trigger: 'level', context: { level: newLevel } });
 
   return {
     xpAwarded: amount,
@@ -171,58 +171,76 @@ export interface RecordActivityResult {
 
 export const recordActivity = async (userId: string): Promise<RecordActivityResult> => {
   const today = todayStr();
+  const userObjId = new mongoose.Types.ObjectId(userId);
 
-  const doc = await UserGamificationModel.findOne({ userId: new mongoose.Types.ObjectId(userId) });
-  if (!doc) {
+  // Read only the three fields the streak calculation needs. The previous
+  // implementation loaded the full gamification doc (activeDates, xpLog,
+  // earnedAchievements, ~everything) on every lesson/quiz/insight activity
+  // just to check if today's already recorded. For the common case
+  // (lastActiveDate === today → short-circuit), that was a wasted round-trip
+  // worth of deserialization.
+  const current = await UserGamificationModel.findOne({ userId: userObjId })
+    .select('lastActiveDate currentStreak longestStreak')
+    .lean();
+
+  if (!current) {
+    // First-ever activity — create the profile (upsert), then recurse once
+    // so the new row is picked up by the normal path. `getOrCreateProfile`
+    // uses `$setOnInsert` + upsert, so this is race-safe under concurrent
+    // first-time activities.
     await getOrCreateProfile(userId);
     return recordActivity(userId);
   }
 
-  if (doc.lastActiveDate === today) {
-    // Already active today — no streak change
+  if (current.lastActiveDate === today) {
+    // Already active today — no streak change, no write.
     return {
-      currentStreak: doc.currentStreak,
-      longestStreak: doc.longestStreak,
+      currentStreak: current.currentStreak,
+      longestStreak: current.longestStreak,
       newAchievements: [],
     };
   }
 
-  // Track this date as active (addToSet semantics — avoid duplicates if racing).
-  if (!doc.activeDates.includes(today)) {
-    doc.activeDates.push(today);
-  }
+  // Compute the next state in JS, then commit it with a single atomic update.
+  // `$addToSet` on activeDates replaces the old read-check-push pattern —
+  // handles the concurrent-first-activity-of-day race without conflict.
+  const nextStreak = current.lastActiveDate && missedWeekdays({ a: current.lastActiveDate, b: today }) === 0
+    ? current.currentStreak + 1
+    : 1;
+  const nextLongest = Math.max(current.longestStreak, nextStreak);
 
-  if (doc.lastActiveDate && missedWeekdays(doc.lastActiveDate, today) === 0) {
-    // Consecutive weekday (or only weekends between) — streak continues.
-    doc.currentStreak += 1;
-  } else {
-    // Either first-ever activity or at least one weekday was missed — streak resets.
-    doc.currentStreak = 1;
-  }
+  await UserGamificationModel.updateOne(
+    { userId: userObjId },
+    {
+      $addToSet: { activeDates: today },
+      $set: {
+        lastActiveDate: today,
+        currentStreak: nextStreak,
+        longestStreak: nextLongest,
+      },
+    },
+  );
 
-  doc.lastActiveDate = today;
-  if (doc.currentStreak > doc.longestStreak) {
-    doc.longestStreak = doc.currentStreak;
-  }
-
-  await doc.save();
-
-  const newAchievements = await checkAchievements(userId, 'streak', { streak: doc.currentStreak });
+  const newAchievements = await checkAchievements({ userId, trigger: 'streak', context: { streak: nextStreak } });
 
   return {
-    currentStreak: doc.currentStreak,
-    longestStreak: doc.longestStreak,
+    currentStreak: nextStreak,
+    longestStreak: nextLongest,
     newAchievements,
   };
 };
 
 // ── Check Achievements ─────────────────────────────────────
 
-const checkAchievements = async (
-  userId: string,
-  trigger: AchievementDefinition['trigger'],
-  context: Record<string, unknown>,
-): Promise<AchievementDefinition[]> => {
+const checkAchievements = async ({
+  userId,
+  trigger,
+  context,
+}: {
+  userId: string;
+  trigger: AchievementDefinition['trigger'];
+  context: Record<string, unknown>;
+}): Promise<AchievementDefinition[]> => {
   const doc = await UserGamificationModel.findOne({ userId: new mongoose.Types.ObjectId(userId) });
   if (!doc) return [];
 
@@ -290,7 +308,7 @@ const checkAchievements = async (
   }
 
   for (const achievement of candidates) {
-    const earned = await isAchievementEarned(achievement, userObjId, context);
+    const earned = await isAchievementEarned({ achievement, userObjId, context });
     if (earned) {
       doc.earnedAchievements.push({
         achievementId: achievement.id,
@@ -308,11 +326,15 @@ const checkAchievements = async (
   return newlyEarned;
 };
 
-const isAchievementEarned = async (
-  achievement: AchievementDefinition,
-  userObjId: mongoose.Types.ObjectId,
-  context: Record<string, unknown>,
-): Promise<boolean> => {
+const isAchievementEarned = async ({
+  achievement,
+  userObjId,
+  context,
+}: {
+  achievement: AchievementDefinition;
+  userObjId: mongoose.Types.ObjectId;
+  context: Record<string, unknown>;
+}): Promise<boolean> => {
   // Lesson-count and course-completion values were precomputed once by
   // `checkAchievements` and stashed on `context` under `__`-prefixed keys.
   // The handlers below just read them — no fall-back queries here, because
@@ -386,7 +408,11 @@ const isAchievementEarned = async (
       // "3+ distinct courses reviewed today (UTC)."
       const startOfDay = new Date(todayStr() + 'T00:00:00Z');
       const agg = await UserInsightProgressModel.aggregate([
-        { $match: { userId: userObjId } },
+        // Pre-filter progress rows to those with ANY event today. Eliminates
+        // docs whose whole history pre-dates today before the $unwind expands
+        // every event. Without this, a user with long histories pays for
+        // unwinding every event on every rating until this achievement is earned.
+        { $match: { userId: userObjId, 'history.ratedAt': { $gte: startOfDay } } },
         { $unwind: '$history' },
         { $match: { 'history.ratedAt': { $gte: startOfDay } } },
         // Collection name for Insight model is 'Insight' (3rd arg passed
@@ -427,15 +453,15 @@ export interface OnLessonCompleteResult {
   streak: RecordActivityResult;
 }
 
-export const onLessonComplete = async (userId: string, courseId: string): Promise<OnLessonCompleteResult> => {
+export const onLessonComplete = async ({ userId, courseId }: { userId: string; courseId: string }): Promise<OnLessonCompleteResult> => {
   // Award XP
-  const xp = await awardXp(userId, XP_VALUES.LESSON_COMPLETE, 'lesson_complete');
+  const xp = await awardXp({ userId, amount: XP_VALUES.LESSON_COMPLETE, source: 'lesson_complete' });
 
   // Update streak
   const streak = await recordActivity(userId);
 
   // Check lesson-count + time achievements
-  const lessonAchievements = await checkAchievements(userId, 'lesson', { courseId });
+  const lessonAchievements = await checkAchievements({ userId, trigger: 'lesson', context: { courseId } });
   xp.newAchievements.push(...lessonAchievements);
   streak.newAchievements.push(...lessonAchievements.filter((a) => !xp.newAchievements.includes(a)));
 
@@ -449,13 +475,19 @@ export interface OnQuizCompleteResult {
   newAchievements: AchievementDefinition[];
 }
 
-export const onQuizComplete = async (
-  userId: string,
-  courseId: string,
-  score: number,
-  previousBestScore: number,
-  isReview: boolean,
-): Promise<OnQuizCompleteResult> => {
+export const onQuizComplete = async ({
+  userId,
+  courseId,
+  score,
+  previousBestScore,
+  isReview,
+}: {
+  userId: string;
+  courseId: string;
+  score: number;
+  previousBestScore: number;
+  isReview: boolean;
+}): Promise<OnQuizCompleteResult> => {
   // Award XP for score improvement only
   const scoreDelta = Math.max(0, score - previousBestScore);
   const scoreXp = Math.round(scoreDelta * XP_VALUES.QUIZ_SCORE_MULTIPLIER);
@@ -465,10 +497,10 @@ export const onQuizComplete = async (
   let xp: AwardXpResult = { xpAwarded: 0, totalXp: 0, level: 1, leveledUp: false, newAchievements: [] };
 
   if (scoreXp > 0) {
-    xp = await awardXp(userId, scoreXp, 'quiz_score');
+    xp = await awardXp({ userId, amount: scoreXp, source: 'quiz_score' });
   }
   if (reviewXp > 0) {
-    const reviewResult = await awardXp(userId, reviewXp, 'review_complete');
+    const reviewResult = await awardXp({ userId, amount: reviewXp, source: 'review_complete' });
     xp.xpAwarded += reviewResult.xpAwarded;
     xp.totalXp = reviewResult.totalXp;
     xp.level = reviewResult.level;
@@ -480,7 +512,7 @@ export const onQuizComplete = async (
   await recordActivity(userId);
 
   // Check quiz achievements
-  const quizAchievements = await checkAchievements(userId, 'quiz', { score, courseId, isReview });
+  const quizAchievements = await checkAchievements({ userId, trigger: 'quiz', context: { score, courseId, isReview } });
   xp.newAchievements.push(...quizAchievements);
 
   return { xp, newAchievements: quizAchievements };
@@ -489,7 +521,7 @@ export const onQuizComplete = async (
 // ── On Exercise Pass ───────────────────────────────────────
 
 export const onExercisePass = async (userId: string): Promise<AwardXpResult> => {
-  return awardXp(userId, XP_VALUES.EXERCISE_PASS, 'exercise_pass');
+  return awardXp({ userId, amount: XP_VALUES.EXERCISE_PASS, source: 'exercise_pass' });
 };
 
 // ── On Insight Review (orchestrator) ───────────────────────
@@ -506,14 +538,18 @@ export interface OnInsightReviewResult {
  * Achievement check uses the `earnedIds` guard, so expensive queries
  * (cross-course) short-circuit once the user has earned the achievement.
  */
-export const onInsightReview = async (
-  userId: string,
-  insightId: string,
-  courseId: string,
-): Promise<OnInsightReviewResult> => {
-  const xp = await awardXp(userId, XP_VALUES.INSIGHT_REVIEW, 'insight_review');
+export const onInsightReview = async ({
+  userId,
+  insightId,
+  courseId,
+}: {
+  userId: string;
+  insightId: string;
+  courseId: string;
+}): Promise<OnInsightReviewResult> => {
+  const xp = await awardXp({ userId, amount: XP_VALUES.INSIGHT_REVIEW, source: 'insight_review' });
   const streak = await recordActivity(userId);
-  const ach = await checkAchievements(userId, 'insight', { insightId, courseId, mastered: false });
+  const ach = await checkAchievements({ userId, trigger: 'insight', context: { insightId, courseId, mastered: false } });
   xp.newAchievements.push(...ach);
   return { xp, streak, newAchievements: ach };
 };
@@ -531,14 +567,18 @@ export interface OnInsightMasteredResult {
  * Leitner box 4. Idempotency is guaranteed upstream in the scheduler
  * (`justMastered` is true exactly once per insight).
  */
-export const onInsightMastered = async (
-  userId: string,
-  insightId: string,
-  courseId: string,
-): Promise<OnInsightMasteredResult> => {
-  const xp = await awardXp(userId, XP_VALUES.INSIGHT_MASTERY, 'insight_mastery');
+export const onInsightMastered = async ({
+  userId,
+  insightId,
+  courseId,
+}: {
+  userId: string;
+  insightId: string;
+  courseId: string;
+}): Promise<OnInsightMasteredResult> => {
+  const xp = await awardXp({ userId, amount: XP_VALUES.INSIGHT_MASTERY, source: 'insight_mastery' });
   const streak = await recordActivity(userId);
-  const ach = await checkAchievements(userId, 'insight', { insightId, courseId, mastered: true });
+  const ach = await checkAchievements({ userId, trigger: 'insight', context: { insightId, courseId, mastered: true } });
   xp.newAchievements.push(...ach);
   return { xp, streak, newAchievements: ach };
 };
@@ -658,21 +698,48 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
   }
 
   // Time, lessons, quizzes, insights — parallel queries.
-  // Insight counts use an aggregation that unwinds the history[] array, since
-  // a single UserInsightProgress row can contain many reviews.
-  const countInsightReviews = (match: Record<string, unknown>) =>
-    UserInsightProgressModel.aggregate([
-      { $match: { userId: userObjId } },
-      { $unwind: '$history' },
-      { $match: match },
-      { $count: 'total' },
-    ]).then((r) => (r[0]?.total as number | undefined) ?? 0);
+  // Insight counts: one aggregation with conditional $sum for both weeks,
+  // pre-filtered to docs that have any event in the last ~14 days. Without
+  // the pre-match, MongoDB would unwind every history event the user has
+  // ever accumulated — on every Profile stats load.
+  const insightReviewCountsP = UserInsightProgressModel.aggregate<{
+    _id: null;
+    thisWeek: number;
+    lastWeek: number;
+  }>([
+    { $match: { userId: userObjId, 'history.ratedAt': { $gte: startOfLastWeek } } },
+    { $unwind: '$history' },
+    // Second filter bounds the unwound events. The $match above is doc-level:
+    // a doc whose array contains both an old and a recent event passes, so
+    // old events reach this stage and need trimming.
+    { $match: { 'history.ratedAt': { $gte: startOfLastWeek } } },
+    {
+      $group: {
+        _id: null,
+        thisWeek: { $sum: { $cond: [{ $gte: ['$history.ratedAt', startOfWeek] }, 1, 0] } },
+        lastWeek: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $gte: ['$history.ratedAt', startOfLastWeek] },
+                  { $lt: ['$history.ratedAt', startOfWeek] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
+      },
+    },
+  ]);
 
   const [
     thisWeekTime, lastWeekTime,
     lessonsThisWeek, lessonsLastWeek,
     quizzesThisWeek, quizzesLastWeek,
-    insightsThisWeek, insightsLastWeek,
+    insightReviewCounts,
   ] = await Promise.all([
     UserLessonProgressModel.aggregate([
       { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfWeek } } },
@@ -700,9 +767,11 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
       userId: userObjId,
       'attempts.completedAt': { $gte: startOfLastWeek, $lt: startOfWeek },
     }),
-    countInsightReviews({ 'history.ratedAt': { $gte: startOfWeek } }),
-    countInsightReviews({ 'history.ratedAt': { $gte: startOfLastWeek, $lt: startOfWeek } }),
+    insightReviewCountsP,
   ]);
+
+  const insightsThisWeek = insightReviewCounts[0]?.thisWeek ?? 0;
+  const insightsLastWeek = insightReviewCounts[0]?.lastWeek ?? 0;
 
   const weeklySummary = {
     thisWeek: {
