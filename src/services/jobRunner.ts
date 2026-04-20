@@ -6,10 +6,17 @@ import { JobType, CourseDepth } from '@lib/constants';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
-import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews } from './courseService';
+import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews, isThinFreeText } from './courseService';
 import { cleanupCourseContent } from './courseCleanupService';
+import { persistLessonInsights } from './insightContentService';
 import { jobEvents } from './jobEvents';
 import { bgError } from '@lib/bg';
+import {
+  bumpLessonGenerationOutcome,
+  bumpStructureThinFreeTextInput,
+  recordLessonGenerationDuration,
+  type LessonGenerationOutcome,
+} from '@lib/metrics';
 import { generateUniqueSlug } from '@lib/slugify';
 
 // ── Concurrency & timeout ───────────────────────────────
@@ -31,9 +38,18 @@ const formatCourseAnswers = (course: CourseDocument): { questionId: string; answ
   if (!course.answers || !course.clarifyData?.questions) return [];
   return Object.entries(course.answers as Record<string, unknown>).map(([id, answer]) => {
     const question = course.clarifyData!.questions.find((q) => q.id === id);
+    const answerStr = Array.isArray(answer) ? answer.join(', ') : String(answer);
+    // Tag thin text replies so the structure-generation prompt can branch
+    // toward conservative scope. Only applies to `type === 'text'` answers:
+    // a 2-token multiple-choice selection like "Beginner" is semantically
+    // OK (level gates are just as informative at 1 token as at 10), but a
+    // 2-token free-text reply like "stop overspending" is a weak signal
+    // the structure prompt should not over-read.
+    const isThinText = question?.type === 'text' && isThinFreeText(answerStr);
+    if (isThinText) bumpStructureThinFreeTextInput();
     return {
       questionId: question?.question ?? id,
-      answer: Array.isArray(answer) ? answer.join(', ') : String(answer),
+      answer: isThinText ? `${answerStr} [thin answer — weak signal]` : answerStr,
     };
   });
 };
@@ -168,6 +184,13 @@ const executeJob = async ({ courseId, type, metadata }: { courseId: string; type
 
       console.log(`[JobRunner] generate_lesson — courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
 
+      // Wrap the generation body in a timer + outcome classifier so
+      // /metrics exposes average lesson-gen latency and the distribution
+      // of success / persistence-gate-fail / error terminations. Timeouts
+      // are handled by the Promise.race one level up and don't land here.
+      const lessonGenStart = Date.now();
+      let lessonGenOutcome: LessonGenerationOutcome = 'success';
+      try {
       // Use the same LangGraph agent as the SSE streaming path (no-op writer for background jobs)
       const agentResult = await lessonGenerationAgent.invoke(
         {
@@ -187,7 +210,38 @@ const executeJob = async ({ courseId, type, metadata }: { courseId: string; type
         { configurable: { writer: () => {} } },
       );
 
-      // Upsert — handles both first generation and regeneration
+      if (!(await CourseModel.exists({ _id: courseId }))) {
+        console.log(`[JobRunner] Course ${courseId} deleted mid-generation; discarding lesson ${moduleIndex}/${lessonIndex} output`.yellow);
+        return;
+      }
+
+      // Persistence gate: refuse to write lesson content that fails a minimal
+      // structural contract (has intro+summary+≥2 sections, summary is 60–800
+      // chars). The `contentOutputSchema` on the agent already enforces summary
+      // length, but the block-structure check catches cases where repair loops
+      // exit early with a broken structure. Throwing here lets the existing
+      // job-failure path surface the issue rather than silently shipping a
+      // garbage lesson to the learner.
+      const persistableReasons: string[] = [];
+      const summaryText = (agentResult.contentSummary ?? '').trim();
+      if (summaryText.length < 60) persistableReasons.push(`summary too short (${summaryText.length} chars)`);
+      if (summaryText.length > 800) persistableReasons.push(`summary too long (${summaryText.length} chars)`);
+      const introCount = agentResult.contentBlocks.filter((b) => b.type === 'intro').length;
+      const summaryBlockCount = agentResult.contentBlocks.filter((b) => b.type === 'summary').length;
+      const sectionCount = agentResult.contentBlocks.filter((b) => b.type === 'section').length;
+      if (introCount === 0) persistableReasons.push('missing intro block');
+      if (summaryBlockCount === 0) persistableReasons.push('missing summary block');
+      if (sectionCount < 2) persistableReasons.push(`only ${sectionCount} section block(s), need ≥2`);
+      if (persistableReasons.length > 0) {
+        throw new Error(
+          `[JobRunner] Lesson ${courseId}/${moduleIndex}/${lessonIndex} failed persistence validation: ${persistableReasons.join('; ')}`,
+        );
+      }
+
+      // Upsert — handles both first generation and regeneration.
+      // `completed: true` matches what the SSE streaming path sets in
+      // streamLessonContent.ts so the startup reaper in conf/mongo.ts
+      // doesn't sweep these lessons on the next API restart.
       const existing = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
       await LessonContentModel.findOneAndUpdate(
         { courseId, moduleIndex, lessonIndex },
@@ -198,11 +252,37 @@ const executeJob = async ({ courseId, type, metadata }: { courseId: string; type
           blocks: agentResult.contentBlocks,
           summary: agentResult.contentSummary,
           heroImageUrl: agentResult.heroImageUrl,
+          completed: true,
           version: existing ? existing.version + 1 : 1,
         },
         { upsert: true, returnDocument: 'after' },
       );
+
+      // Persist the insights the agent extracted. The SSE streaming path
+      // does this at streamLessonContent.ts; the job path previously dropped
+      // the `agentResult.insights` field on the floor, which left every
+      // orchestrator-generated lesson with zero spaced-repetition cards and
+      // an empty insight queue at Step 13. Best-effort: insights are
+      // additive enrichment — failure here must not fail the job.
+      if (agentResult.insights && agentResult.insights.length > 0) {
+        await persistLessonInsights({
+          courseId,
+          moduleIndex,
+          lessonIndex,
+          insights: agentResult.insights,
+        }).catch(bgError('jobRunner.persistLessonInsights'));
+      }
       return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        lessonGenOutcome = msg.includes('failed persistence validation')
+          ? 'persistence_gate_fail'
+          : 'error';
+        throw e;
+      } finally {
+        recordLessonGenerationDuration(Date.now() - lessonGenStart);
+        bumpLessonGenerationOutcome(lessonGenOutcome);
+      }
     }
     case 'generate_depth_previews': {
       // Clear downstream data — depth selection and structure are now stale
@@ -243,6 +323,11 @@ const executeJob = async ({ courseId, type, metadata }: { courseId: string; type
         },
         moduleIndex,
       });
+
+      if (!(await CourseModel.exists({ _id: courseId }))) {
+        console.log(`[JobRunner] Course ${courseId} deleted mid-generation; discarding quiz output for module ${moduleIndex}`.yellow);
+        return;
+      }
 
       const existing = await ModuleQuizContentModel.findOne({ courseId, moduleIndex });
       await ModuleQuizContentModel.findOneAndUpdate(

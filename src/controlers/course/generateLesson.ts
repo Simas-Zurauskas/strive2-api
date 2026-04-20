@@ -32,6 +32,12 @@ import { generateLessonSchema, assertPreviousLessonGenerated } from './validatio
  *               lessonIndex:
  *                 type: integer
  *                 minimum: 0
+ *               includeImage:
+ *                 type: boolean
+ *                 default: true
+ *               includeLinks:
+ *                 type: boolean
+ *                 default: true
  *     responses:
  *       202:
  *         content:
@@ -49,7 +55,7 @@ import { generateLessonSchema, assertPreviousLessonGenerated } from './validatio
  */
 export const generateLessonController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const { moduleIndex, lessonIndex } = generateLessonSchema.parse(req.body);
+  const { moduleIndex, lessonIndex, includeImage, includeLinks } = generateLessonSchema.parse(req.body);
   const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
@@ -84,7 +90,7 @@ export const generateLessonController = asyncHandler(async (req, res) => {
     userId,
     courseId,
     type: 'generate_lesson',
-    metadata: { moduleIndex, lessonIndex },
+    metadata: { moduleIndex, lessonIndex, includeImage, includeLinks },
   });
   console.log(`[API] Generate lesson job submitted: ${jobId}`.green);
 

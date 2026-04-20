@@ -10,6 +10,10 @@ import {
   resendVerificationAuthenticatedController,
   deleteAccountController,
   logoutController,
+  forgotPasswordController,
+  resetPasswordController,
+  setPasswordController,
+  changePasswordController,
 } from '@controlers/auth';
 import { protect } from '@middleware/authMiddleware';
 
@@ -29,6 +33,10 @@ router.post('/signup', authLimiter, signUpController);
 router.post('/google', authLimiter, googleAuthController);
 router.post('/verify-email', authLimiter, verifyEmailController);
 router.post('/resend-verification', authLimiter, resendVerificationController);
+router.post('/forgot-password', authLimiter, forgotPasswordController);
+router.post('/reset-password', authLimiter, resetPasswordController);
+router.post('/set-password', authLimiter, protect, setPasswordController);
+router.post('/change-password', authLimiter, protect, changePasswordController);
 router.get('/me', protect, getMeController);
 router.post('/logout', protect, logoutController);
 router.post('/resend-verification-authenticated', authLimiter, protect, resendVerificationAuthenticatedController);

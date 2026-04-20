@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
+import { jsonish } from '@lib/zodHelpers';
+import { COURSE_DOMAINS, CourseDomain } from '@lib/constants';
 
 // ── Schemas ────────────────────────────────────────────
 
@@ -37,13 +39,77 @@ const interactiveBlockSchema = z.object({
 });
 
 export const contentOutputSchema = z.object({
-  blocks: z.array(lessonBlockSchema),
-  summary: z.string(),
+  blocks: jsonish(z.array(lessonBlockSchema)),
+  // Min 60 chars catches regressions where the LLM returns a placeholder
+  // ("test", "summary here", etc.) and ships it through to the learner.
+  // 800 caps runaway prose; real lesson summaries fit comfortably under this.
+  summary: z.string().min(60).max(800),
 });
 
 export const interactiveOutputSchema = z.object({
-  blocks: z.array(interactiveBlockSchema),
+  blocks: jsonish(z.array(interactiveBlockSchema)),
 });
+
+// ── Per-domain guidance (lesson content) ──────────────
+// `LESSON_DOMAIN_LABELS` controls the bullet-label text (parenthetical
+// examples live here); `LESSON_DOMAIN_BRANCHES` holds the guidance body.
+// Both are typed `Record<CourseDomain, string>`, so adding a value to
+// COURSE_DOMAINS causes a compile-time error in both maps — no silent
+// drift. The section text auto-assembles by iterating COURSE_DOMAINS,
+// so new domains appear in the rendered prompt without further edits.
+
+// Shared body for domains where the guidance is identical (humanities,
+// language, creative, other — all prose-only with zero code blocks).
+const PROSE_ONLY_LESSON_BRANCH = 'ZERO code blocks. Prose-driven sections with real-world examples; callouts for definitions and misconceptions; mermaid for processes or decision trees.';
+
+const LESSON_DOMAIN_LABELS: Record<CourseDomain, string> = {
+  programming: '**programming**',
+  stem: '**stem** (mathematics, physics, chemistry, statistics, engineering, economics, quantitative finance, any equation-driven subject)',
+  humanities: '**humanities**',
+  language: '**language**',
+  creative: '**creative**',
+  business: '**business** (management, marketing, product, sales, strategy, PM, personal finance)',
+  practical: '**practical** (trades, crafts, cooking, gardening, home repair, applied fitness)',
+  'life-skills': '**life-skills** (communication, public speaking, productivity, career, soft skills)',
+  other: '**other**',
+};
+
+const LESSON_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
+  programming: 'code blocks central (existing rules). LaTeX math is rarely needed; use only if the lesson involves algorithmic complexity or numerical methods.',
+  stem: `
+  - Code blocks are WELCOME when the lesson asks the learner to compute, simulate, or implement something — numerical methods, simulations, data analysis (Python/numpy/pandas, R, Julia), solving systems symbolically, etc. Don't force code into purely theoretical lessons, but don't avoid it when it earns its place.
+  - Use display math (\`$$…$$\`) generously for canonical equations, definitions, and derivations the learner must see cleanly laid out.
+  - Anchor abstract concepts to worked numerical examples with explicit units.
+  - Mermaid diagrams are great for concept hierarchies, proof structure, reaction pathways, and cause-effect networks.
+  - Callouts of variant "important" suit key definitions and theorems; "warning" suits common sign or unit errors.`,
+  humanities: PROSE_ONLY_LESSON_BRANCH,
+  language: PROSE_ONLY_LESSON_BRANCH,
+  creative: PROSE_ONLY_LESSON_BRANCH,
+  business: `ZERO code blocks. Prose-driven with frameworks (OKRs, Porter, RACI, 4Ps, AARRR) shown inline when relevant. Use markdown pipe-tables for trade-off comparisons and option analysis. Mermaid for decision trees, stakeholder influence maps, and org/process diagrams. LaTeX only for specific quant concepts (ROI, NPV, break-even, unit economics) — default to prose + numbers. Callouts: "warning" for common management anti-patterns, "important" for non-negotiable operating principles.`,
+  practical: `ZERO code blocks, ZERO LaTeX. Prose-driven with EXPLICIT procedural step lists (numbered markdown), a tools/materials enumeration in a callout BEFORE the procedure, and "warning" callouts flagging safety-critical or timing-critical steps. Mermaid for decision flows ("if the dough is sticky → …"), never for decoration. Use "important" callouts for no-skip steps; units (°F, cups, mm, grit) in prose.`,
+  'life-skills': `ZERO code blocks, ZERO LaTeX. Prose-driven with scripted example dialogs (before/after pairs showing an anti-pattern then the improved version), self-assessment rubrics as markdown tables, and reflective prompts woven into sections. Mermaid for decision flows in interpersonal scenarios ("if they push back on X → …"). Callouts: "tip" for phrasings that work, "warning" for phrasings that backfire.`,
+  other: PROSE_ONLY_LESSON_BRANCH,
+};
+
+const LESSON_NULL_DOMAIN_BRANCH = 'follow the general rules above, letting the lesson name and description guide you.';
+
+const LESSON_DOMAIN_BULLETS = COURSE_DOMAINS
+  .map((d) => {
+    const body = LESSON_DOMAIN_BRANCHES[d];
+    // Multi-line branches (stem) open with a newline + indent, so the
+    // post-colon separator is empty. Single-line branches get a space.
+    const sep = body.startsWith('\n') ? '' : ' ';
+    return `- ${LESSON_DOMAIN_LABELS[d]}:${sep}${body}`;
+  })
+  .join('\n\n');
+
+const LESSON_DOMAIN_SECTION = `## Adapting to the course domain
+
+The \`## Course context\` in the user message includes a \`Course domain\` field. Adapt block selection to it:
+
+${LESSON_DOMAIN_BULLETS}
+
+- **null / unknown domain**: ${LESSON_NULL_DOMAIN_BRANCH}`;
 
 // ── System prompts ─────────────────────────────────────
 
@@ -139,22 +205,7 @@ Write EVERY mathematical expression in LaTeX — never approximate with ASCII.
 - LaTeX inside JSON must escape backslashes correctly: write \`$\\\\alpha$\` in your JSON output, which deserializes to the LaTeX source \`$\\alpha$\`.
 - The client renders LaTeX with KaTeX. Unsupported macros (e.g. \`\\require{...}\`, \`\\begin{tikzpicture}\`) will fall back to plaintext — stick to standard math-mode commands.
 
-## Adapting to the course domain
-
-The \`## Course context\` in the user message includes a \`Course domain\` field. Adapt block selection to it:
-
-- **stem** (mathematics, physics, chemistry, statistics, engineering, economics, quantitative finance, any equation-driven subject):
-  - Code blocks are WELCOME when the lesson asks the learner to compute, simulate, or implement something — numerical methods, simulations, data analysis (Python/numpy/pandas, R, Julia), solving systems symbolically, etc. Don't force code into purely theoretical lessons, but don't avoid it when it earns its place.
-  - Use display math (\`$$…$$\`) generously for canonical equations, definitions, and derivations the learner must see cleanly laid out.
-  - Anchor abstract concepts to worked numerical examples with explicit units.
-  - Mermaid diagrams are great for concept hierarchies, proof structure, reaction pathways, and cause-effect networks.
-  - Callouts of variant "important" suit key definitions and theorems; "warning" suits common sign or unit errors.
-
-- **programming**: code blocks central (existing rules). LaTeX math is rarely needed; use only if the lesson involves algorithmic complexity or numerical methods.
-
-- **humanities**, **creative**, **language**, **other**: ZERO code blocks. Prose-driven sections with real-world examples; callouts for definitions and misconceptions; mermaid for processes or decision trees.
-
-- **null / unknown domain**: follow the general rules above, letting the lesson name and description guide you.
+${LESSON_DOMAIN_SECTION}
 
 ## Quality principles
 
@@ -162,6 +213,63 @@ The \`## Course context\` in the user message includes a \`Course domain\` field
 - CONCRETE > ABSTRACT: Every concept gets a concrete example.
 - PROGRESSIVE COMPLEXITY: Start simple, build up. Don't front-load jargon.
 - POSITION IN COURSE: Reference where this lesson fits — what previous lessons covered (don't repeat), what upcoming lessons will build on.`;
+
+// ── Per-domain guidance (interactive exercises) ───────
+// Same typed-Record pattern as the lesson-content domain section. Adding a
+// value to COURSE_DOMAINS fails compile-time at both maps, and the section
+// text auto-assembles from the enum so new domains appear in the prompt
+// without further edits.
+
+// Shared body for domains where the guidance is identical (humanities,
+// creative, language, other — all default to a thought exercise with no
+// code metadata).
+const THOUGHT_EXERCISE_INTERACTIVE_BRANCH = 'THOUGHT exercise (`metadata: null`) — analysis, application, or reflection, as already specified below.';
+
+const INTERACTIVE_DOMAIN_LABELS: Record<CourseDomain, string> = {
+  programming: '**programming**',
+  stem: '**stem** (mathematics, physics, chemistry, statistics, engineering, economics, quantitative finance)',
+  humanities: '**humanities**',
+  language: '**language**',
+  creative: '**creative**',
+  business: '**business** (management, marketing, product, sales, strategy, PM, personal finance)',
+  practical: '**practical** (trades, crafts, cooking, gardening, home repair, applied fitness)',
+  'life-skills': '**life-skills** (communication, public speaking, productivity, career, soft skills)',
+  other: '**other**',
+};
+
+const INTERACTIVE_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
+  programming: 'use a CODE exercise. Existing code-exercise rules apply.',
+  stem: `
+  - DEFAULT to a THOUGHT exercise (\`metadata: null\`): a math/science problem the learner solves with paper and pencil. Examples: "compute this derivative", "find the limit", "evaluate the integral", "apply this theorem", "show this identity", "for which $x$ does the equation hold?", "compute the force given these values", "balance this reaction", "find the variance of $X$".
+  - Use LaTeX liberally in the exercise \`content\` — canonical equations, explicit variables, numerical setup.
+  - ONLY produce a code exercise when the lesson itself is explicitly about numerical IMPLEMENTATION (e.g., a lesson titled "Implementing Newton's method in Python", "Simulating the n-body problem in NumPy", "Monte Carlo integration in R"). A calculus lesson that includes a code snippet to illustrate secant-slope convergence is NOT a code lesson — it's a math lesson that happens to have code.
+  - When in doubt: thought exercise. Never invent a code exercise just because the lesson body contains code.`,
+  humanities: THOUGHT_EXERCISE_INTERACTIVE_BRANCH,
+  language: THOUGHT_EXERCISE_INTERACTIVE_BRANCH,
+  creative: THOUGHT_EXERCISE_INTERACTIVE_BRANCH,
+  business: "THOUGHT exercise (`metadata: null`). Give a realistic case vignette: a named role (VP of Product, team lead, CFO) at a sized company, a specific decision with constraints (budget, timeline, stakeholder pushback). Ask the learner to APPLY a framework from the lesson, WRITE a brief recommendation or decision memo, or ANALYZE the trade-offs between 2–3 concrete options. Avoid multiple-choice format here; the module quiz handles that.",
+  practical: "THOUGHT exercise (`metadata: null`). Either a PLANNING task (design a cut list for a 60-inch dining table given only a circular saw and router; plan a shopping list for 4 pounds of sourdough) OR a DIAGNOSTIC task (given a described failure — 'the dough is sticky and won't hold shape', 'the cabinet door binds on the top corner' — identify which step likely went wrong and how to recover). Scenarios reference the tools and materials the learner said they have.",
+  'life-skills': "THOUGHT exercise (`metadata: null`). Pick ONE: a ROLEPLAY prompt (write a 4–8 line script for a specific scenario: 'respond to a direct report who just told you they're leaving'), a REWRITE-AND-CRITIQUE (here is a draft email / Slack message — critique it against the lesson's framework and rewrite it), OR a self-assessment against a rubric from the lesson with a follow-up reflection prompt.",
+  other: THOUGHT_EXERCISE_INTERACTIVE_BRANCH,
+};
+
+const INTERACTIVE_NULL_DOMAIN_BRANCH = "judge from the lesson's main subject. If it teaches how to write code, use a code exercise. If it teaches concepts, ideas, or quantitative reasoning, use a thought exercise.";
+
+const INTERACTIVE_DOMAIN_BULLETS = COURSE_DOMAINS
+  .map((d) => {
+    const body = INTERACTIVE_DOMAIN_BRANCHES[d];
+    const sep = body.startsWith('\n') ? '' : ' ';
+    return `- ${INTERACTIVE_DOMAIN_LABELS[d]}:${sep}${body}`;
+  })
+  .join('\n\n');
+
+const INTERACTIVE_DOMAIN_SECTION = `## Adapting the exercise to the course domain
+
+The \`Course domain\` in the lesson info tells you how the exercise should be shaped. It OVERRIDES any signal from code appearing in the lesson body (code in a stem lesson is illustration, not prescription).
+
+${INTERACTIVE_DOMAIN_BULLETS}
+
+- **null or unknown domain**: ${INTERACTIVE_NULL_DOMAIN_BRANCH}`;
 
 export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer for educational content. Given lesson content that a learner will read, generate inline quiz questions and a practical exercise.
 
@@ -195,21 +303,7 @@ Write EVERY mathematical expression in LaTeX — in quiz \`question\` and \`expl
 
 Quiz OPTIONS are rendered as plain text — do NOT put LaTeX inside options. If a choice needs a symbol, use Unicode (π, ², ³, √, ∞, ≤, ≠, ≈, ±, ·, ×, ∫, Σ, Δ) instead.
 
-## Adapting the exercise to the course domain
-
-The \`Course domain\` in the lesson info tells you how the exercise should be shaped. It OVERRIDES any signal from code appearing in the lesson body (code in a stem lesson is illustration, not prescription).
-
-- **stem** (mathematics, physics, chemistry, statistics, engineering, economics, quantitative finance):
-  - DEFAULT to a THOUGHT exercise (\`metadata: null\`): a math/science problem the learner solves with paper and pencil. Examples: "compute this derivative", "find the limit", "evaluate the integral", "apply this theorem", "show this identity", "for which $x$ does the equation hold?", "compute the force given these values", "balance this reaction", "find the variance of $X$".
-  - Use LaTeX liberally in the exercise \`content\` — canonical equations, explicit variables, numerical setup.
-  - ONLY produce a code exercise when the lesson itself is explicitly about numerical IMPLEMENTATION (e.g., a lesson titled "Implementing Newton's method in Python", "Simulating the n-body problem in NumPy", "Monte Carlo integration in R"). A calculus lesson that includes a code snippet to illustrate secant-slope convergence is NOT a code lesson — it's a math lesson that happens to have code.
-  - When in doubt: thought exercise. Never invent a code exercise just because the lesson body contains code.
-
-- **programming**: use a CODE exercise. Existing code-exercise rules apply.
-
-- **humanities**, **creative**, **language**, **other**: THOUGHT exercise (\`metadata: null\`) — analysis, application, or reflection, as already specified below.
-
-- **null or unknown domain**: judge from the lesson's main subject. If it teaches how to write code, use a code exercise. If it teaches concepts, ideas, or quantitative reasoning, use a thought exercise.
+${INTERACTIVE_DOMAIN_SECTION}
 
 ## Depth calibration
 

@@ -24,6 +24,7 @@ export interface IUser extends UserInput {
   emailVerificationToken?: string;
   emailVerificationExpiry?: Date;
   passwordResetToken?: string;
+  passwordResetExpiry?: Date;
   tokenVersion: number;
   favoriteCourseIds: mongoose.Types.ObjectId[];
   createdAt: Date;
@@ -54,21 +55,29 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
     emailVerificationToken: { type: String, select: false },
     emailVerificationExpiry: { type: Date, select: false },
     passwordResetToken: { type: String, select: false },
+    passwordResetExpiry: { type: Date, select: false },
     tokenVersion: { type: Number, default: 0 },
     favoriteCourseIds: {
       type: [{ type: Schema.Types.ObjectId, ref: 'Course' }],
       default: [],
     },
     authProviders: {
+      // `_id: false` prevents Mongoose from auto-generating a per-entry _id.
+      // Without this, every push creates a "fresh" subdoc to Mongo's deep
+      // equality check, so $addToSet never matches an existing entry and
+      // duplicates accumulate on every Google sign-in.
       type: [
-        {
-          provider: {
-            type: String,
-            enum: [...AUTH_PROVIDERS],
-            required: true,
+        new Schema(
+          {
+            provider: {
+              type: String,
+              enum: [...AUTH_PROVIDERS],
+              required: true,
+            },
+            providerId: { type: String },
           },
-          providerId: { type: String },
-        },
+          { _id: false },
+        ),
       ],
       required: true,
       default: [],
@@ -82,6 +91,7 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
         delete ret.emailVerificationToken;
         delete ret.emailVerificationExpiry;
         delete ret.passwordResetToken;
+        delete ret.passwordResetExpiry;
         // tokenVersion is a server-side session-invalidation counter;
         // clients don't need it and leaking it exposes revocation state.
         delete ret.tokenVersion;

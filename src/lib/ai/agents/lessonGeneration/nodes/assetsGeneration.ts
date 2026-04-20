@@ -1,17 +1,11 @@
-import { z } from 'zod';
 import { RunnableConfig } from '@langchain/core/runnables';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { TavilySearch } from '@langchain/tavily';
-import { BFL_API_KEY, TAVILY_API_KEY } from '@conf/env';
-import { getUtilityModel } from '@lib/langchain';
+import { BFL_API_KEY } from '@conf/env';
 import { uploadBuffer, getPresignedUrl } from '@services/s3Service';
+import { bgError } from '@lib/bg';
+import { bumpLinksGenerationOutcome } from '@lib/metrics';
 import { ILessonBlock } from '@models/LessonContentModel';
 import { LessonState } from '../state';
-
-const tavilySearch = new TavilySearch({
-  maxResults: 8,
-  tavilyApiKey: TAVILY_API_KEY,
-});
+import { curateLinks, toEmptyStateBlock } from '../links';
 
 // ── Flux Kontext Pro (BFL API) ────────────────────────
 
@@ -183,114 +177,6 @@ const generateHeroImage = async ({
   }
 };
 
-// ── Curated links ──────────────────────────────────────
-
-// ── Curated links (two-step: search → LLM curation) ───
-
-interface CuratedLink {
-  title: string;
-  url: string;
-  description: string;
-}
-
-const curatedLinksSchema = z.object({
-  links: z.array(z.object({
-    url: z.string(),
-    title: z.string(),
-    description: z.string(),
-  })),
-});
-
-const LINKS_CURATION_PROMPT = `You are a learning resource curator. Given a lesson's content and a set of web search results, select ONLY the genuinely valuable resources a learner should read AFTER completing this lesson.
-
-Rules:
-- Select 3-5 resources maximum. Quality over quantity — fewer excellent links beat many mediocre ones.
-- Each resource must add value BEYOND what the lesson already taught. Ask: "Why would a learner click this?"
-- Prefer: official documentation, canonical tutorials, seminal articles/papers, authoritative references, well-maintained open-source repos
-- Reject: SEO blog spam, low-effort listicles, paywalled content, outdated material, generic overviews that repeat what the lesson covered
-- Write a thoughtful 1-sentence description for each — not a generic summary but WHY this specific resource is worth the learner's time after this lesson
-- If none of the search results are genuinely valuable, return an empty links array. Do not pad with mediocre content.`;
-
-const generateCuratedLinks = async ({
-  lessonName,
-  lessonSummary,
-  contentBlocks,
-}: {
-  lessonName: string;
-  lessonSummary: string;
-  contentBlocks: ILessonBlock[];
-}): Promise<ILessonBlock | null> => {
-  try {
-    // Step 1: Extract key concepts from lesson content for targeted search
-    const sectionContent = contentBlocks
-      .filter((b) => b.type === 'section')
-      .map((b) => b.content.slice(0, 200))
-      .join(' ');
-    const keyTerms = `${lessonName} ${sectionContent}`.slice(0, 300);
-
-    console.log(`[linksGeneration] Searching with lesson context...`.cyan);
-    const results = await tavilySearch.invoke({ query: `${keyTerms} learn guide resource tutorial` });
-
-    // Parse Tavily results
-    const raw = results as Record<string, unknown>;
-    let items: Array<{ title?: string; url?: string; content?: string }> = [];
-    if (raw && Array.isArray(raw.results)) {
-      items = raw.results;
-    } else if (Array.isArray(results)) {
-      items = results;
-    }
-
-    const searchResults = items
-      .filter((r) => r.url && r.title)
-      .slice(0, 10) // Give the LLM more candidates to choose from
-      .map((r) => ({
-        title: r.title ?? '',
-        url: r.url ?? '',
-        snippet: (r.content ?? '').slice(0, 300),
-      }));
-
-    if (searchResults.length === 0) return null;
-
-    // Step 2: LLM curation — Haiku selects and describes the best resources
-    console.log(`[linksGeneration] Curating ${searchResults.length} candidates with LLM...`.cyan);
-
-    const model = getUtilityModel().withStructuredOutput(curatedLinksSchema);
-    const curationResult = await model.invoke([
-      new SystemMessage(LINKS_CURATION_PROMPT),
-      new HumanMessage(`## Lesson: ${lessonName}
-
-## Lesson summary
-${lessonSummary}
-
-## Search results to evaluate
-
-${searchResults.map((r, i) => `${i + 1}. **${r.title}**\n   URL: ${r.url}\n   Snippet: ${r.snippet}`).join('\n\n')}
-
-Select the genuinely valuable resources from the list above.`),
-    ]);
-
-    const links: CuratedLink[] = curationResult.links;
-    console.log(`[linksGeneration] ✓ Curated ${links.length} links from ${searchResults.length} candidates`.green);
-
-    if (links.length === 0) return null;
-
-    const content = links
-      .map((l) => `- [${l.title}](${l.url}) — ${l.description}`)
-      .join('\n');
-
-    return {
-      id: 'links-1',
-      type: 'links',
-      content,
-      metadata: { links },
-      order: 9999,
-    };
-  } catch (e) {
-    console.warn(`[linksGeneration] ✗ Curated links failed: ${e instanceof Error ? e.message : e}`.yellow);
-    return null;
-  }
-};
-
 // ── Node: hero image (runs early, parallel with content) ──
 
 export const imageGeneration = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
@@ -319,6 +205,16 @@ export const imageGeneration = async (state: LessonState, config?: RunnableConfi
 };
 
 // ── Node: curated links (runs at the end) ─────────────
+// Delegates to the 6-stage pipeline in ../links: query-plan → parallel
+// search → dedupe → parallel fetch → LLM judge → diversity select.
+
+// Backstop for the whole links pipeline. Individual stages each have their
+// own catch and bounded timeouts (LLM clientOptions 60s, Jina 10s/URL,
+// Tavily 15s/query via withTavilyTimeout), so happy-path runs land well
+// under this cap. This hard timeout exists so a novel failure mode — an
+// unbounded hang we didn't predict — can never burn the lesson's 5-min
+// stream budget; the lesson ships with an empty-state links block instead.
+const LINKS_NODE_TIMEOUT_MS = 90_000;
 
 export const linksGeneration = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
   if (!state.includeLinks) {
@@ -328,15 +224,21 @@ export const linksGeneration = async (state: LessonState, config?: RunnableConfi
 
   const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
 
-  const linksBlock = await generateCuratedLinks({
-    lessonName: state.lessonName,
-    lessonSummary: state.contentSummary,
-    contentBlocks: state.contentBlocks,
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<ILessonBlock>((resolve) => {
+    timer = setTimeout(() => {
+      bgError('linksGeneration.nodeTimeout')(
+        new Error(`Links generation exceeded ${LINKS_NODE_TIMEOUT_MS}ms — shipping empty-state block`),
+      );
+      bumpLinksGenerationOutcome('error');
+      resolve(toEmptyStateBlock());
+    }, LINKS_NODE_TIMEOUT_MS);
   });
 
-  if (linksBlock) {
-    writer?.({ type: 'block', block: linksBlock });
-  }
+  const linksBlock = await Promise.race([curateLinks(state), timeoutPromise]);
+  if (timer) clearTimeout(timer);
+
+  writer?.({ type: 'block', block: linksBlock });
 
   return { linksBlock };
 };

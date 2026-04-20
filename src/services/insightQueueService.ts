@@ -11,6 +11,10 @@ import {
   INSIGHT_QUEUE_FRESH_THRESHOLD,
   InsightMode,
 } from '@lib/insightConstants';
+import {
+  bumpInsightQueueFreshReason,
+  recordInsightQueueFreshCounts,
+} from '@lib/metrics';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -126,7 +130,10 @@ const toQueueItem = (
     answer: insight.answer,
     conceptTags: insight.conceptTags,
     sourceBlockId: insight.sourceBlockId,
-    isNew: !progress,
+    // "New" = never rated. A progress row alone isn't enough: skipInsight
+    // and setInsightMode both upsert a row with reps: 0 before any rating,
+    // which used to flip the badge off after a mode-toggle or skip.
+    isNew: !progress || progress.reps === 0,
     mode: progress?.mode ?? 'tap-reveal',
     box: progress?.box ?? 0,
     dueAt: progress?.nextDue ? progress.nextDue.toISOString() : null,
@@ -192,6 +199,34 @@ const interleaveByCourse = <T extends { courseId: string }>(items: T[]): T[] => 
   return result;
 };
 
+/**
+ * When a `currentCourseId` is known (user is mid-lesson in a specific course),
+ * place that course's items first in their input order, then round-robin
+ * interleave the remaining courses behind them. Without a `currentCourseId`
+ * this degrades to plain `interleaveByCourse` so global/tab views are
+ * unaffected.
+ *
+ * Preserves input relative ordering within the active-course slice — the
+ * caller has already sorted by due-ness (for the due pool) or by
+ * createdAt-desc (for the fresh pool).
+ */
+const partitionByCourse = ({
+  items,
+  currentCourseId,
+}: {
+  items: QueueInsightItem[];
+  currentCourseId: string | undefined;
+}): QueueInsightItem[] => {
+  if (!currentCourseId) return interleaveByCourse(items);
+  const active: QueueInsightItem[] = [];
+  const rest: QueueInsightItem[] = [];
+  for (const item of items) {
+    if (item.courseId === currentCourseId) active.push(item);
+    else rest.push(item);
+  }
+  return [...active, ...interleaveByCourse(rest)];
+};
+
 // ── Main: build the daily queue ───────────────────────────
 
 /**
@@ -204,9 +239,17 @@ const interleaveByCourse = <T extends { courseId: string }>(items: T[]): T[] => 
  */
 export const getInsightQueue = async (params: {
   userId: string;
+  currentCourseId?: string;
 }): Promise<GetInsightQueueResult> => {
   const userObjId = new mongoose.Types.ObjectId(params.userId);
+  const { currentCourseId } = params;
   const now = new Date();
+
+  // Counters observed across the fresh-pool decision path. Recorded on all
+  // exit branches below so `/metrics` shows the distribution — essential
+  // for diagnosing "0 fresh despite Learned: 28" in production.
+  let completedLessonCount = 0;
+  let candidateCount = 0;
 
   // `totalLearnedCount` is independent of everything else — kick it off
   // immediately so it can complete in parallel with the two queries that
@@ -254,38 +297,94 @@ export const getInsightQueue = async (params: {
   // ── Step 2: fresh items (active courses + completed lessons only) ──
   const shouldLoadFresh = totalDueCount < INSIGHT_QUEUE_FRESH_THRESHOLD;
   let freshInsights: LeanInsight[] = [];
+  // Fresh-pool decision path — set on every branch. `bumpInsightQueueFreshReason`
+  // is invoked once at the bottom so the distribution surfaces in /metrics.
+  let freshReason: Parameters<typeof bumpInsightQueueFreshReason>[0];
 
-  if (shouldLoadFresh && activeInsightIds.length > 0) {
+  if (!shouldLoadFresh) {
+    // Plenty of due items already — don't even probe the fresh pool.
+    freshReason = 'due_gated_fresh_skipped';
+  } else if (activeInsightIds.length === 0) {
+    freshReason = 'no_active_insights';
+  } else {
     const [completedLessonKeys, seenInsightIds] = await Promise.all([
       loadCompletedLessonKeys(userObjId),
       UserInsightProgressModel.find({ userId: userObjId }).select('insightId').lean(),
     ]);
+    completedLessonCount = completedLessonKeys.size;
 
-    if (completedLessonKeys.size > 0) {
-      const seenSet = new Set(seenInsightIds.map((r) => r.insightId.toString()));
+    if (completedLessonKeys.size === 0) {
+      freshReason = 'no_completed_lessons';
+    } else {
+      const seenIdList = Array.from(
+        new Set(seenInsightIds.map((r) => r.insightId.toString())),
+      ).map((id) => new Types.ObjectId(id));
 
       // Over-fetch fresh candidates by a margin, then filter by completed
       // lessons in memory. Can't express the (courseId, moduleIndex,
       // lessonIndex) tuple filter cleanly in a single Mongo query.
-      const freshCandidates = await InsightModel.find({
-        _id: { $in: activeInsightIds, $nin: Array.from(seenSet).map((id) => new Types.ObjectId(id)) },
-      })
-        // Favor newer insights — most-recently generated lessons first.
-        .sort({ createdAt: -1 })
-        .limit(INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT * 6)
-        .lean();
-
-      // Apply completed-lesson gate + dedup to one card per lesson.
-      const perLesson = new Map<string, LeanInsight>();
-      for (const i of freshCandidates) {
-        const lessonKey = `${i.courseId.toString()}:${i.moduleIndex}:${i.lessonIndex}`;
-        if (!completedLessonKeys.has(lessonKey)) continue;
-        if (!perLesson.has(i.lessonId.toString())) perLesson.set(i.lessonId.toString(), i);
-        if (perLesson.size >= INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT) break;
+      //
+      // When `currentCourseId` is present we run the same find twice —
+      // once constrained to the active course, once for everything else —
+      // so the active course's candidates consistently win the `perLesson`
+      // dedup race even when the global createdAt-desc ordering would have
+      // placed another course first. Keeps the gate + cap logic unchanged.
+      const overFetch = INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT * 6;
+      let freshCandidates: LeanInsight[];
+      if (currentCourseId) {
+        const activeCourseObjId = new Types.ObjectId(currentCourseId);
+        const [activeCandidates, otherCandidates] = await Promise.all([
+          InsightModel.find({
+            _id: { $in: activeInsightIds, $nin: seenIdList },
+            courseId: activeCourseObjId,
+          })
+            .sort({ createdAt: -1 })
+            .limit(overFetch)
+            .lean(),
+          InsightModel.find({
+            _id: { $in: activeInsightIds, $nin: seenIdList },
+            courseId: { $ne: activeCourseObjId },
+          })
+            .sort({ createdAt: -1 })
+            .limit(overFetch)
+            .lean(),
+        ]);
+        freshCandidates = [...activeCandidates, ...otherCandidates];
+      } else {
+        freshCandidates = await InsightModel.find({
+          _id: { $in: activeInsightIds, $nin: seenIdList },
+        })
+          // Favor newer insights — most-recently generated lessons first.
+          .sort({ createdAt: -1 })
+          .limit(overFetch)
+          .lean();
       }
-      freshInsights = [...perLesson.values()];
+      candidateCount = freshCandidates.length;
+
+      if (freshCandidates.length === 0) {
+        freshReason = 'candidates_zero';
+      } else {
+        // Apply completed-lesson gate + dedup to one card per lesson.
+        const perLesson = new Map<string, LeanInsight>();
+        for (const i of freshCandidates) {
+          const lessonKey = `${i.courseId.toString()}:${i.moduleIndex}:${i.lessonIndex}`;
+          if (!completedLessonKeys.has(lessonKey)) continue;
+          if (!perLesson.has(i.lessonId.toString())) perLesson.set(i.lessonId.toString(), i);
+          if (perLesson.size >= INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT) break;
+        }
+        freshInsights = [...perLesson.values()];
+        freshReason = freshInsights.length === 0 ? 'all_gated_by_lesson' : 'ok';
+      }
     }
   }
+
+  bumpInsightQueueFreshReason(freshReason);
+  recordInsightQueueFreshCounts({
+    activeInsightCount: activeInsightIds.length,
+    completedLessonCount,
+    candidateCount,
+    freshOutCount: freshInsights.length,
+  });
 
   // ── Step 3: hydrate with course/lesson names ──────
   const allCourseIds = new Set<string>();
@@ -314,13 +413,15 @@ export const getInsightQueue = async (params: {
     if (item) freshItems.push(item);
   }
 
-  // Interleave both slices across courses.
-  const interleavedDue = interleaveByCourse(dueItems);
-  const interleavedFresh = interleaveByCourse(freshItems);
+  // Partition-then-interleave: when a `currentCourseId` is known, the active
+  // course's items are placed first; otherwise fall back to pure
+  // round-robin interleave across courses.
+  const orderedDue = partitionByCourse({ items: dueItems, currentCourseId });
+  const orderedFresh = partitionByCourse({ items: freshItems, currentCourseId });
 
   return {
-    due: interleavedDue,
-    fresh: interleavedFresh,
+    due: orderedDue,
+    fresh: orderedFresh,
     counts: {
       dueTotal: totalDueCount,
       freshAvailable: freshItems.length,

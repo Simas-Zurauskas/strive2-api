@@ -21,6 +21,13 @@ export const MAILJET_API_KEY = getEnv('MAILJET_API_KEY');
 export const MAILJET_API_SECRET = getEnv('MAILJET_API_SECRET');
 export const TAVILY_API_KEY = getEnv('TAVILY_API_KEY');
 
+// Optional. Free tier (~20 req/min/IP) was exhausted by the curated-links
+// pipeline during orchestrator runs, producing a burst of HTTP 429s that
+// showed up in metrics as `links_fetch_failure_total{reason="http_error"}`.
+// Set a paid key (200 req/min) to clear the rate-limit wall; the pipeline
+// still works unkeyed, just at reduced reliability.
+export const JINA_API_KEY = getEnv('JINA_API_KEY');
+
 export const JUDGE0_API_KEY = getEnv('JUDGE0_API_KEY');
 export const JUDGE0_API_URL = getEnv('JUDGE0_API_URL');
 

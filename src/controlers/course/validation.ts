@@ -11,6 +11,17 @@ export const updateCourseSchema = z.object({
   answers: z.record(z.string(), z.unknown()).optional(),
   depth: z.enum(COURSE_DEPTHS).optional(),
   status: z.enum(COURSE_STATUSES).optional(),
+  /**
+   * Client-side acknowledgement that the learner saw the "your answers
+   * suggest a lighter-effort course" warning and still wants the deeper
+   * tier. Enforced in updateCourseController — when a soft learner (per
+   * detectSoftnessHint) tries to upgrade depth beyond the recommendation,
+   * the request is rejected with 409 DEPTH_OVERRIDE_REQUIRES_ACK unless
+   * this field is true. Optional + default-undefined means all existing
+   * clients that pick the recommended depth, or who upgrade on a non-soft
+   * course, are unaffected.
+   */
+  depthOverrideAcknowledged: z.boolean().optional(),
 });
 
 export const chatStreamSchema = z.object({

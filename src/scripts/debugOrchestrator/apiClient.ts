@@ -1,4 +1,14 @@
-import type { CourseData, ILessonContent } from './types';
+import type {
+  CourseData,
+  ILessonContent,
+  LessonContentStats,
+  ModuleQuizForLearner,
+  QuizAttemptResult,
+} from './types';
+import type { GetInsightQueueResult, InsightStats } from '@services/insightQueueService';
+import type { GradeResult } from '@services/insightGradingService';
+import type { InsightMode, InsightRating } from '@lib/insightConstants';
+import type { IUserInsightProgress } from '@models/UserInsightProgressModel';
 
 interface ApiResponse<T = unknown> {
   data: T;
@@ -32,7 +42,28 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
 
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`${method} ${path} → ${res.status}: ${text}`);
+      // Try to parse structured JSON error bodies so callers can branch on
+      // `code` (e.g. DEPTH_OVERRIDE_REQUIRES_ACK). Fall back to the string
+      // body for plain-text errors.
+      let parsedBody: unknown = text;
+      try {
+        parsedBody = JSON.parse(text);
+      } catch {
+        /* non-JSON body — keep text as-is */
+      }
+      const err = new Error(`${method} ${path} → ${res.status}: ${text}`) as Error & {
+        status: number;
+        data: unknown;
+      };
+      err.status = res.status;
+      err.data = parsedBody;
+      throw err;
+    }
+
+    // DELETE endpoints (e.g. /api/auth/delete-account) return JSON, but future
+    // 204-style responses would have empty bodies. Guard by content-length.
+    if (res.status === 204 || res.headers.get('content-length') === '0') {
+      return { data: undefined as unknown as T };
     }
 
     return res.json() as Promise<ApiResponse<T>>;
@@ -126,11 +157,23 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
       return data;
     },
 
-    async generateLesson({ courseId, moduleIndex, lessonIndex }: { courseId: string; moduleIndex: number; lessonIndex: number }): Promise<string> {
+    async generateLesson({
+      courseId,
+      moduleIndex,
+      lessonIndex,
+      includeImage,
+      includeLinks,
+    }: {
+      courseId: string;
+      moduleIndex: number;
+      lessonIndex: number;
+      includeImage?: boolean;
+      includeLinks?: boolean;
+    }): Promise<string> {
       const { data } = await request<{ jobId: string }>({
         method: 'POST',
         path: `/api/course/${courseId}/generate-lesson`,
-        body: { moduleIndex, lessonIndex },
+        body: { moduleIndex, lessonIndex, includeImage, includeLinks },
       });
       return data.jobId;
     },
@@ -143,11 +186,128 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
       return data;
     },
 
+    async getLessonContentStats({
+      courseId,
+      moduleIndex,
+      lessonIndex,
+    }: {
+      courseId: string;
+      moduleIndex: number;
+      lessonIndex: number;
+    }): Promise<LessonContentStats> {
+      const { data } = await request<LessonContentStats>({
+        method: 'GET',
+        path: `/api/course/${courseId}/lesson-content/${moduleIndex}/${lessonIndex}/stats`,
+      });
+      return data;
+    },
+
     async completeLessonProgress({ courseId, moduleIndex, lessonIndex }: { courseId: string; moduleIndex: number; lessonIndex: number }): Promise<void> {
       await request({
         method: 'POST',
         path: `/api/course/${courseId}/progress/${moduleIndex}/${lessonIndex}`,
         body: { status: 'completed' },
+      });
+    },
+
+    // ── Module quiz ─────────────────────────────────────
+    async generateModuleQuiz({ courseId, moduleIndex }: { courseId: string; moduleIndex: number }): Promise<string> {
+      const { data } = await request<{ jobId: string }>({
+        method: 'POST',
+        path: `/api/course/${courseId}/module-quiz/${moduleIndex}/generate`,
+        body: {},
+      });
+      return data.jobId;
+    },
+
+    async getModuleQuiz({ courseId, moduleIndex }: { courseId: string; moduleIndex: number }): Promise<ModuleQuizForLearner> {
+      const { data } = await request<ModuleQuizForLearner>({
+        method: 'GET',
+        path: `/api/course/${courseId}/module-quiz/${moduleIndex}`,
+      });
+      return data;
+    },
+
+    async submitModuleQuiz({
+      courseId,
+      moduleIndex,
+      responses,
+    }: {
+      courseId: string;
+      moduleIndex: number;
+      responses: { questionId: string; selectedOption: number }[];
+    }): Promise<QuizAttemptResult> {
+      const { data } = await request<QuizAttemptResult>({
+        method: 'POST',
+        path: `/api/course/${courseId}/module-quiz/${moduleIndex}/submit`,
+        body: { responses },
+      });
+      return data;
+    },
+
+    // ── Insights ────────────────────────────────────────
+    async getInsightQueue(): Promise<GetInsightQueueResult> {
+      const { data } = await request<GetInsightQueueResult>({ method: 'GET', path: '/api/insight/queue' });
+      return data;
+    },
+
+    async getInsightStats(): Promise<InsightStats> {
+      const { data } = await request<InsightStats>({ method: 'GET', path: '/api/insight/stats' });
+      return data;
+    },
+
+    async setInsightMode({ insightId, mode }: { insightId: string; mode: InsightMode }): Promise<{ mode: InsightMode }> {
+      const { data } = await request<{ mode: InsightMode }>({
+        method: 'POST',
+        path: `/api/insight/${insightId}/mode`,
+        body: { mode },
+      });
+      return data;
+    },
+
+    async gradeInsight({ insightId, userAnswer }: { insightId: string; userAnswer: string }): Promise<GradeResult> {
+      const { data } = await request<GradeResult>({
+        method: 'POST',
+        path: `/api/insight/${insightId}/grade`,
+        body: { userAnswer },
+      });
+      return data;
+    },
+
+    async rateInsight({
+      insightId,
+      rating,
+      typedMatch,
+    }: {
+      insightId: string;
+      rating: InsightRating;
+      typedMatch?: number | null;
+    }): Promise<Pick<IUserInsightProgress, 'box' | 'state' | 'reps' | 'lapses' | 'nextDue' | 'lastReview'>> {
+      const body: { rating: InsightRating; typedMatch?: number | null } = { rating };
+      if (typedMatch !== undefined) body.typedMatch = typedMatch;
+      const { data } = await request<Pick<IUserInsightProgress, 'box' | 'state' | 'reps' | 'lapses' | 'nextDue' | 'lastReview'>>({
+        method: 'POST',
+        path: `/api/insight/${insightId}/rate`,
+        body,
+      });
+      return data;
+    },
+
+    async skipInsight({ insightId }: { insightId: string }): Promise<{ nextDue: Date }> {
+      const { data } = await request<{ nextDue: Date }>({
+        method: 'POST',
+        path: `/api/insight/${insightId}/skip`,
+        body: {},
+      });
+      return data;
+    },
+
+    // ── Auth (account teardown) ─────────────────────────
+    async deleteAccount({ password }: { password: string }): Promise<void> {
+      await request({
+        method: 'DELETE',
+        path: '/api/auth/delete-account',
+        body: { password },
       });
     },
   };
@@ -169,6 +329,30 @@ export async function authenticate({ baseUrl, email, password }: { baseUrl: stri
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Authentication failed (${res.status}): ${text}`);
+  }
+
+  const body = (await res.json()) as { data: string };
+  return body.data;
+}
+
+/**
+ * POST /api/auth/signup. Returns the JWT directly (the signup controller
+ * issues a token before email verification — see the `⚠` comment in
+ * `signUp.ts`). For the debug orchestrator this is convenient: we use the
+ * signup-response token throughout the persona flow without a signin
+ * round-trip, and flip `emailVerified=true` directly in Mongo so the
+ * `requireVerified` middleware lets feature routes through.
+ */
+export async function signup({ baseUrl, email, password }: { baseUrl: string; email: string; password: string }): Promise<string> {
+  const res = await fetch(`${baseUrl}/api/auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Signup failed (${res.status}): ${text}`);
   }
 
   const body = (await res.json()) as { data: string };

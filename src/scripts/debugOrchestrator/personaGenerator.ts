@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import type { Persona } from './types';
 
-const PERSONA_SYSTEM_PROMPT = `You are generating realistic test personas for an AI-powered course creation platform. These personas will walk through a wizard that: asks clarifying questions → shows depth options (overview/comprehensive/deep_dive) → generates a course structure → lets user refine via chat → accept.
+const PERSONA_SYSTEM_PROMPT = `You are generating realistic test personas for an AI-powered course creation platform. These personas will walk through the wizard (clarifying questions → depth choice → structure → optional chat refinement → accept), then through the learning experience (lessons → module quizzes → spaced-repetition insight reviews).
 
 Your job is to create personas that behave like real humans interacting with this wizard. Not idealized students. Not AI-generated caricatures. Real people with real habits.
 
@@ -60,10 +60,24 @@ Return a JSON object with a "personas" array. Each persona has:
 - **goal**: What they literally type. In their voice. With their level of effort and specificity.
 - **personality**: How they interact with forms and tools. Specific behavioral tendencies (reads carefully vs skims, trusts recommendations vs does own thing, gives detailed text answers vs one-word answers). NOT adjective lists.
 - **priorities**: What they actually care about, stated honestly. It's OK to include contradictions ("wants depth but also wants it fast").
-- **wizardBehavior**: An object with three fields predicting their SPECIFIC behavior in this wizard:
+- **quizStyleFlags**: A top-level object with four booleans (not inside wizardBehavior). See the per-field descriptions below.
+- **insightStyleFlags**: A top-level object with four booleans (not inside wizardBehavior). See the per-field descriptions below.
+- **wizardBehavior**: An object with five fields predicting their SPECIFIC behavior across the wizard AND the post-lesson learning experience:
   - **surveyStyle**: How they'll answer the clarifying questions. E.g., "Reads all options carefully, picks conservatively on multi-select (1-2 choices). Text answers are 1-2 thoughtful sentences. Gets slightly more hasty on questions 4+."
   - **depthChoice**: What they'll pick and WHY. E.g., "Picks recommended without reading the other options. Just trusts the system." or "Picks deep_dive despite being a beginner because 'I want the real thing, not a watered-down version.'"
   - **structureReview**: What they'll do when shown the structure. E.g., "Accepts immediately without reading. Types 'looks good' in 2 seconds." or "Reads module names, notices there's no section on testing, asks to add it. Feedback is direct and specific."
+  - **quizAttemptStyle**: How they'll approach a multiple-choice module quiz after finishing the lessons. Mention: whether they re-read questions, whether they eliminate wrong options, whether they second-guess, whether position bias dominates, whether they guess when unsure. E.g., "Reads each question twice, eliminates obviously-wrong options, picks the remaining best answer. Doesn't second-guess." / "Rushes; picks the first option that sounds right. Skims the question on every item after the third." / "Overthinks on the last question of every quiz and flips to a wrong-but-plausible option."
+  - **quizStyleFlags**: Structured flags derived from quizAttemptStyle. Four booleans — set ONLY the ones that genuinely describe this persona (most personas will have 1-2 flags set, rarely 3). Precedence when multiple fire simultaneously: rushes > guessesWhenUnsure > secondGuesses > eliminates.
+    - \`rushes\`: picks first plausible option, no re-reading. True for "Minimum-Effort" and most "Curious Browser" personas.
+    - \`secondGuesses\`: overthinks; changes correct answers at the last moment. True for "Anxious Learner" personas; explicitly false when quizAttemptStyle says "doesn't second-guess".
+    - \`eliminates\`: eliminates obviously-wrong distractors before picking. True for "Motivated Professional" and "Skeptic" personas.
+    - \`guessesWhenUnsure\`: random pick on low-confidence items. True for "Overambitious Beginner" (fakes confidence) and some "Minimum-Effort" personas.
+  - **insightReviewStyle**: How they'll review retrieval-practice cards (Q&A / cloze) afterwards. Cards show in two modes — 'tap-reveal' (see prompt, reveal answer, self-rate Again/Hard/Good/Easy) and 'typed-recall' (type the answer, get graded 0..1, then rate). Mention: which mode they prefer, whether they type carefully or guess briefly, whether they self-rate honestly/generously/harshly, whether they skip hard cards. E.g., "Prefers typed-recall; types partial but honest attempts; rates generously when close. Never skips." / "Sticks with tap-reveal; self-rates Easy even when hazy; skips the first card that feels hard." / "Types carefully in typed-recall mode; rates honestly; occasionally skips when tired."
+  - **insightStyleFlags**: Structured flags derived from insightReviewStyle. Four booleans — \`struggles\` and \`articulate\` are mutually exclusive (set exactly one); \`generous\` and \`harsh\` are mutually exclusive (set at most one).
+    - \`struggles\`: types short, imperfect answers with gaps — a "partial" grader score is common.
+    - \`articulate\`: types near-canonical quality; typically the baseline.
+    - \`generous\`: self-rates tap-reveal high (Good/Easy) even when hazy.
+    - \`harsh\`: self-rates tap-reveal low (Again/Hard) even when mostly correct.
 
 ## Crucial Constraints
 
@@ -98,13 +112,77 @@ export async function generatePersonas(count: number = 5): Promise<Persona[]> {
     throw new Error(`Expected ${count} personas, got ${parsed.personas?.length ?? 0}`);
   }
 
-  // Validate wizardBehavior exists on all personas
+  // Validate wizardBehavior + style flags exist on all personas.
+  // Flags may arrive malformed from the LLM (missing booleans, true/false
+  // encoded as strings, etc.). Normalize once at ingestion so the rest of
+  // the orchestrator can trust the shape.
   for (const p of parsed.personas) {
-    if (!p.wizardBehavior || !p.wizardBehavior.surveyStyle || !p.wizardBehavior.depthChoice || !p.wizardBehavior.structureReview) {
+    const wb = p.wizardBehavior;
+    if (
+      !wb ||
+      !wb.surveyStyle ||
+      !wb.depthChoice ||
+      !wb.structureReview ||
+      !wb.quizAttemptStyle ||
+      !wb.insightReviewStyle
+    ) {
       throw new Error(`Persona "${p.name}" is missing wizardBehavior fields`);
     }
-    console.log(`${'[PersonaGen]'.magenta}   → ${p.name}`);
+    p.quizStyleFlags = normalizeQuizFlags(p.quizStyleFlags);
+    p.insightStyleFlags = normalizeInsightFlags(p.insightStyleFlags);
+    console.log(`${'[PersonaGen]'.magenta}   → ${p.name} [quiz: ${describeQuizFlags(p.quizStyleFlags)}, insight: ${describeInsightFlags(p.insightStyleFlags)}]`);
   }
 
   return parsed.personas;
 }
+
+// ── Flag normalization ─────────────────────────────────────
+// The LLM may omit flag fields or mis-type them. Coerce to strict booleans
+// and enforce the mutual-exclusion contract documented in the prompt:
+//   - struggles XOR articulate (at least one must be true; default to
+//     articulate if both unset or both set)
+//   - generous / harsh are mutually exclusive (if both true, prefer harsh
+//     since it's the rarer calibration and deserves emphasis when signaled)
+
+const toBool = (v: unknown): boolean => v === true || v === 'true';
+
+const normalizeQuizFlags = (raw: unknown): Persona['quizStyleFlags'] => {
+  const r = (raw ?? {}) as Partial<Record<keyof Persona['quizStyleFlags'], unknown>>;
+  return {
+    rushes: toBool(r.rushes),
+    secondGuesses: toBool(r.secondGuesses),
+    eliminates: toBool(r.eliminates),
+    guessesWhenUnsure: toBool(r.guessesWhenUnsure),
+  };
+};
+
+const normalizeInsightFlags = (raw: unknown): Persona['insightStyleFlags'] => {
+  const r = (raw ?? {}) as Partial<Record<keyof Persona['insightStyleFlags'], unknown>>;
+  let struggles = toBool(r.struggles);
+  let articulate = toBool(r.articulate);
+  if (struggles && articulate) {
+    // Contradiction — prefer struggles since it's the rarer, more consequential flag.
+    articulate = false;
+  } else if (!struggles && !articulate) {
+    // Neither set — default to articulate (the baseline) so downstream doesn't
+    // hit an undefined-style-code path.
+    articulate = true;
+  }
+  let generous = toBool(r.generous);
+  let harsh = toBool(r.harsh);
+  if (generous && harsh) {
+    // Prefer harsh — see contract comment above.
+    generous = false;
+  }
+  return { struggles, articulate, generous, harsh };
+};
+
+const describeQuizFlags = (f: Persona['quizStyleFlags']): string => {
+  const set = (['rushes', 'secondGuesses', 'eliminates', 'guessesWhenUnsure'] as const).filter((k) => f[k]);
+  return set.length ? set.join('+') : 'none';
+};
+
+const describeInsightFlags = (f: Persona['insightStyleFlags']): string => {
+  const set = (['struggles', 'articulate', 'generous', 'harsh'] as const).filter((k) => f[k]);
+  return set.length ? set.join('+') : 'none';
+};

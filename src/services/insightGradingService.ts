@@ -21,7 +21,7 @@ export interface GradeResult {
 const gradeSchema = z.object({
   score: z.number().min(0).max(1).describe('0..1 — semantic correctness and completeness of the learner\'s answer'),
   verdict: z.enum(['correct', 'partial', 'incorrect']),
-  feedback: z.string().max(160).describe('One short sentence (≤ 20 words) teaching what was right or missing'),
+  feedback: z.string().describe('One short sentence (≤ 20 words, target ≤ 160 chars) teaching what was right or missing'),
 });
 
 const SYSTEM_PROMPT = `You grade a learner's free-recall attempt against a canonical answer.

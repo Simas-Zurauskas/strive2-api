@@ -62,6 +62,48 @@ export const googleAuthController = asyncHandler(async (req, res) => {
 
   const { email, sub, picture, name } = payload;
 
+  // Account-linking hijack guard. Scenario: an attacker signs up with
+  // `victim@x.com` via credentials, never verifies (so the credentials
+  // login is blocked). The victim later signs in with Google using the
+  // same address — Google proves they own the inbox. We merge onto the
+  // existing row (don't orphan their history), but we must neutralize the
+  // attacker's foothold:
+  //   1. strip the password and the CREDENTIALS auth provider so the
+  //      attacker's password no longer unlocks the account;
+  //   2. bump `tokenVersion` to kill the pre-verification JWT that signup
+  //      issued — otherwise it'd start passing the `requireVerified` gate
+  //      the moment we set `emailVerified: true`.
+  // A legit owner who signed up with credentials but forgot to verify is
+  // affected the same way; they can reset their password later (or keep
+  // using Google). Acceptable trade-off vs. silent takeover.
+  //
+  // The pre-step ALSO serves as a dedupe: we $pull every GOOGLE entry,
+  // then $push exactly one canonical one in the upsert below. Without this
+  // every Google sign-in would append another GOOGLE subdoc — Mongoose
+  // auto-generates a per-entry _id, so $addToSet's deep-equality check
+  // never matches an existing entry. Pulling-then-pushing keeps the array
+  // idempotent and lazily cleans up legacy duplicate rows.
+  const existing = await UserModel.findOne({ email }).select('emailVerified authProviders').lean();
+  if (existing) {
+    const isUnverifiedCredentials = !existing.emailVerified &&
+      existing.authProviders.some((p) => p.provider === AuthProvider.CREDENTIALS);
+
+    const providersToPull = isUnverifiedCredentials
+      ? [AuthProvider.CREDENTIALS, AuthProvider.GOOGLE]
+      : [AuthProvider.GOOGLE];
+
+    await UserModel.updateOne(
+      { email },
+      {
+        ...(isUnverifiedCredentials && {
+          $unset: { password: '' },
+          $inc: { tokenVersion: 1 },
+        }),
+        $pull: { authProviders: { provider: { $in: providersToPull } } },
+      },
+    );
+  }
+
   const user = await UserModel.findOneAndUpdate(
     { email },
     {
@@ -70,7 +112,7 @@ export const googleAuthController = asyncHandler(async (req, res) => {
         ...(name && { name }),
         ...(picture && { image: picture }),
       },
-      $addToSet: {
+      $push: {
         authProviders: { provider: AuthProvider.GOOGLE, providerId: sub },
       },
       $setOnInsert: { email },

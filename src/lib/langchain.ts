@@ -46,10 +46,13 @@ const lessonModel = new ChatAnthropic({
   invocationKwargs: { cache_control: { type: 'ephemeral' } },
 });
 
-// Quiz & exercise generation — needs strong reasoning for understanding-based questions
+// Quiz & exercise generation — needs strong reasoning for understanding-based questions.
+// Temp 0.6 gives retries enough divergence to escape repeated structured-output parse
+// failures (e.g. Anthropic stringifying nested arrays when it hits the same prompt at
+// low temp); lower values caused every retry to produce the same broken output.
 const interactiveModel = new ChatAnthropic({
   model: MODEL_IDS.SONNET,
-  temperature: 0.2,
+  temperature: 0.6,
   anthropicApiKey: ANTHROPIC_API_KEY,
   maxTokens: 4096,
   clientOptions: { timeout: 120000 }, // 2 minutes (Sonnet is slower than Haiku)

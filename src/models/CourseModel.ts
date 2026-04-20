@@ -127,7 +127,15 @@ const schema = new Schema<ICourse>(
 );
 
 schema.index({ userId: 1, updatedAt: -1 });
-schema.index({ userId: 1, slug: 1 }, { unique: true, sparse: true });
+// Partial filter (not `sparse`) because new courses persist `slug: null` until
+// the course-design agent fills it in (see `generateUniqueSlug`). A sparse
+// index would still index those null values and collide on the second insert
+// for a given user; `$type: 'string'` only enforces uniqueness once a real
+// slug exists.
+schema.index(
+  { userId: 1, slug: 1 },
+  { unique: true, partialFilterExpression: { slug: { $type: 'string' } } },
+);
 
 // ── Model ──────────────────────────────────────────────────
 

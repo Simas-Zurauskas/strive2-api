@@ -1,6 +1,20 @@
 import { writeFile, mkdir } from 'fs/promises';
 import path from 'path';
-import type { Persona, StepResult, CourseData, ClarifyQuestion, DepthPreviews, CourseStructure, ILessonContent, ILessonBlock } from './types';
+import type {
+  Persona,
+  StepResult,
+  CourseData,
+  ClarifyQuestion,
+  DepthPreviews,
+  CourseStructure,
+  ILessonContent,
+  ILessonBlock,
+  LessonContentStats,
+  ModuleQuizForLearner,
+  ModuleQuizAttemptRecord,
+  InsightReviewResult,
+} from './types';
+import type { GetInsightQueueResult, InsightStats } from '@services/insightQueueService';
 
 export class MarkdownRecorder {
   private sections: string[] = [];
@@ -29,10 +43,12 @@ Generated: ${new Date().toISOString()}
 - **Personality:** ${p.personality}
 - **Priorities:** ${p.priorities}
 
-### Predicted Wizard Behavior
+### Predicted Behavior
 - **Survey style:** ${p.wizardBehavior.surveyStyle}
 - **Depth choice:** ${p.wizardBehavior.depthChoice}
 - **Structure review:** ${p.wizardBehavior.structureReview}
+- **Quiz attempt style:** ${p.wizardBehavior.quizAttemptStyle}
+- **Insight review style:** ${p.wizardBehavior.insightReviewStyle}
 `);
   }
 
@@ -181,6 +197,7 @@ ${modulesList}
       lessonName: string;
       content: ILessonContent;
       generationMs: number;
+      stats: LessonContentStats | null;
     }[],
   ): void {
     if (lessons.length === 0) return;
@@ -188,14 +205,15 @@ ${modulesList}
     let md = `---\n\n## Steps 9-10: Lesson Generation (${lessons.length} lessons)\n\n`;
 
     for (const lesson of lessons) {
-      const { moduleIndex, lessonIndex, moduleName, lessonName, content, generationMs } = lesson;
+      const { moduleIndex, lessonIndex, moduleName, lessonName, content, generationMs, stats } = lesson;
       const blocks = content.blocks;
 
-      // Block count by type
-      const typeCounts: Record<string, number> = {};
-      for (const b of blocks) {
-        typeCounts[b.type] = (typeCounts[b.type] || 0) + 1;
-      }
+      // Prefer server-side counts when available (they include blocks that were
+      // dropped before persistence); fall back to client-visible blocks.
+      const typeCounts = stats?.blockCountsByType ?? blocks.reduce<Record<string, number>>((acc, b) => {
+        acc[b.type] = (acc[b.type] || 0) + 1;
+        return acc;
+      }, {});
       const typeCountStr = Object.entries(typeCounts)
         .map(([t, c]) => `${t}: ${c}`)
         .join(', ');
@@ -203,7 +221,10 @@ ${modulesList}
       md += `### Lesson [${moduleIndex}/${lessonIndex}]: ${moduleName} → ${lessonName}\n`;
       md += `- **Generation time:** ${fmtDuration(generationMs)}\n`;
       md += `- **Blocks:** ${blocks.length} (${typeCountStr})\n`;
-      md += `- **Hero image:** ${content.heroImageUrl ? 'Yes' : 'No'}\n`;
+      if (stats) {
+        md += `- **Insights extracted:** ${stats.insightCount}\n`;
+        md += `- **Curated links:** ${stats.linkCount}\n`;
+      }
       md += `- **Summary:** ${content.summary ? truncate({ str: content.summary, maxLen: 200 }) : '_none_'}\n\n`;
 
       md += `<details>\n<summary>Block details (${blocks.length} blocks)</summary>\n\n`;
@@ -216,25 +237,203 @@ ${modulesList}
     this.sections.push(md);
   }
 
-  addSummary({ totalDurationMs, course, status, error, lessonsGenerated }: { totalDurationMs: number; course: CourseData; status: 'completed' | 'failed'; error?: string; lessonsGenerated?: number }): void {
-    const totalLessons = course.structure?.modules.reduce((sum, m) => sum + m.lessons.length, 0) ?? 0;
+  addStep11_ModuleQuizGeneration({
+    quizzes,
+  }: {
+    quizzes: { moduleIndex: number; moduleName: string; quiz: ModuleQuizForLearner; generationMs: number }[];
+  }): void {
+    if (quizzes.length === 0) return;
+
+    let md = `---\n\n## Step 11: Generate Module Quizzes (${quizzes.length} quiz${quizzes.length === 1 ? '' : 'zes'})\n\n`;
+
+    for (const { moduleIndex, moduleName, quiz, generationMs } of quizzes) {
+      md += `### [${moduleIndex}] ${moduleName}\n`;
+      md += `- **Generation time:** ${fmtDuration(generationMs)}\n`;
+      md += `- **Questions:** ${quiz.questions.length} (version ${quiz.version})\n\n`;
+      md += `<details>\n<summary>Questions (prompt + options)</summary>\n\n`;
+      // The learner-facing endpoint strips correctIndex + explanation by
+      // design, so we render them inline in Step 12 (post-submission) rather
+      // than here. Options are safe to show pre-attempt.
+      for (let i = 0; i < quiz.questions.length; i++) {
+        const q = quiz.questions[i];
+        md += `${i + 1}. **${q.question}**\n`;
+        for (const opt of q.options) {
+          md += `   - ${opt}\n`;
+        }
+        md += `   - _sourceLessons:_ [${q.sourceLessons.join(', ')}]${q.isInterleaved ? ` _(interleaved from module ${q.interleavedModuleIndex ?? '?'})_` : ''}\n\n`;
+      }
+      md += `</details>\n\n`;
+    }
+
+    this.sections.push(md);
+  }
+
+  addStep12_QuizAttempts({ attempts }: { attempts: ModuleQuizAttemptRecord[] }): void {
+    if (attempts.length === 0) return;
+
+    let md = `---\n\n## Step 12: Submit Quiz Attempts (${attempts.length})\n\n`;
+
+    for (const a of attempts) {
+      md += `### [${a.moduleIndex}] ${a.moduleName}\n`;
+      md += `- **Score:** ${a.score}/100 → **${a.masteryTier}**\n`;
+      md += `- **Attempt #:** ${a.attemptNumber}\n`;
+      md += `- **Next review:** ${a.nextReviewAt} (interval ${a.reviewIntervalDays}d)\n`;
+      md += `- **Submission time (simulated):** ${fmtDuration(a.submissionMs)}\n`;
+      md += `- **LLM latency:** ${fmtDuration(a.llmLatencyMs)}\n`;
+      md += `- **AI Reasoning:** ${a.aiReasoning}\n\n`;
+
+      md += `<details>\n<summary>Question-by-question breakdown</summary>\n\n`;
+      md += '| # | Question | Selected | Correct | Match | Conf | Injections |\n|---|----------|----------|---------|-------|------|------------|\n';
+      for (let i = 0; i < a.questions.length; i++) {
+        const q = a.questions[i];
+        const sel = q.selectedOption !== null ? `${q.selectedOption}: ${q.options[q.selectedOption] ?? '?'}` : '_none_';
+        const cor = `${q.correctIndex}: ${q.options[q.correctIndex] ?? '?'}`;
+        const mark = q.correct ? 'YES' : 'NO';
+        // noiseTrace entries are emitted in the same order as the quiz questions,
+        // so index-by-index alignment is safe. Render empty cells when noise
+        // injection is disabled or when the trace is missing (backwards-compat).
+        const trace = a.noiseTrace?.[i];
+        const confCell = trace ? trace.confidence.toFixed(2) : '_?_';
+        const injCell = trace && trace.injections.length > 0
+          ? trace.injections.join(', ') + (trace.originalOption !== trace.finalOption ? ` (${trace.originalOption}→${trace.finalOption})` : '')
+          : '—';
+        md += `| ${i + 1} | ${escapeCell(q.question)} | ${escapeCell(sel)} | ${escapeCell(cor)} | ${mark} | ${confCell} | ${escapeCell(injCell)} |\n`;
+      }
+      md += '\n';
+      for (let i = 0; i < a.questions.length; i++) {
+        const q = a.questions[i];
+        md += `**Q${i + 1}:** ${q.question}\n`;
+        md += `> ${q.explanation}\n\n`;
+      }
+      md += `</details>\n\n`;
+    }
+
+    this.sections.push(md);
+  }
+
+  addStep13_InsightQueue({ queue }: { queue: GetInsightQueueResult }): void {
+    let md = `---\n\n## Step 13: Fetch Insight Queue\n\n`;
+    md += `- **Due total:** ${queue.counts.dueTotal}\n`;
+    md += `- **Fresh available:** ${queue.counts.freshAvailable}\n`;
+    md += `- **Learned:** ${queue.counts.learned}\n`;
+    md += `- **Returned:** ${queue.due.length} due, ${queue.fresh.length} fresh\n\n`;
+
+    // Render every queue item the server returned — the orchestrator is a
+    // debug tool and a silent 10-item cap made `--insights > 10` runs look
+    // like half the queue was missing.
+    const preview = [...queue.due, ...queue.fresh];
+    if (preview.length > 0) {
+      md += '| # | Kind | Course | Lesson | Box | Mode | New? | Prompt |\n';
+      md += '|---|------|--------|--------|-----|------|------|--------|\n';
+      for (let i = 0; i < preview.length; i++) {
+        const it = preview[i];
+        md += `| ${i + 1} | ${it.kind} | ${escapeCell(it.courseName)} | ${escapeCell(it.lessonName)} | ${it.box} | ${it.mode} | ${it.isNew ? 'yes' : 'no'} | ${escapeCell(truncate({ str: it.prompt, maxLen: 80 }))} |\n`;
+      }
+      md += '\n';
+    }
+    this.sections.push(md);
+  }
+
+  addStep14_InsightReviews({
+    reviews,
+    statsAfter,
+  }: {
+    reviews: InsightReviewResult[];
+    statsAfter: InsightStats | null;
+  }): void {
+    if (reviews.length === 0) return;
+
+    const rated = reviews.filter((r) => r.action === 'rated').length;
+    const skipped = reviews.filter((r) => r.action === 'skipped').length;
+
+    let md = `---\n\n## Step 14: Review Insights (${rated} rated, ${skipped} skipped)\n\n`;
+
+    for (let i = 0; i < reviews.length; i++) {
+      const r = reviews[i];
+      md += `### ${i + 1}. ${r.kind.toUpperCase()} — ${r.courseName} → ${r.lessonName}\n`;
+      md += `- **Mode:** ${r.mode}${r.action === 'skipped' ? ' (skipped)' : ''}\n`;
+      md += `- **Prompt:** ${r.prompt}\n`;
+      md += `- **Canonical answer:** ${r.canonicalAnswer}\n`;
+      if (r.userAnswer !== undefined) md += `- **User answer:** ${r.userAnswer}\n`;
+      if (r.grade) {
+        md += `- **Grade:** ${r.grade.verdict} (${r.grade.score.toFixed(2)}) — ${r.grade.feedback}\n`;
+      }
+      if (r.action === 'rated') {
+        md += `- **Rating:** ${r.rating} → new box ${r.newBox}, next due ${r.nextDue ?? '_none_'}\n`;
+      }
+      md += `- **AI Reasoning:** ${r.aiReasoning}\n\n`;
+    }
+
+    if (statsAfter) {
+      md += `<details>\n<summary>Insight stats after this run</summary>\n\n`;
+      md += `- **Total insights:** ${statsAfter.totalInsights}\n`;
+      md += `- **Total reviewed:** ${statsAfter.totalReviewed}\n`;
+      md += `- **Total mastered:** ${statsAfter.totalMastered}\n`;
+      md += `- **Due today:** ${statsAfter.dueToday}\n`;
+      md += `- **Due this week:** ${statsAfter.dueThisWeek}\n`;
+      md += `- **Reviewed this week:** ${statsAfter.reviewedThisWeek}\n`;
+      if (statsAfter.boxDistribution.length > 0) {
+        md += `- **Box distribution:** ${statsAfter.boxDistribution.map((b) => `box${b.box}=${b.count}`).join(', ')}\n`;
+      }
+      md += `</details>\n\n`;
+    }
+
+    this.sections.push(md);
+  }
+
+  addSummary({
+    totalDurationMs,
+    course,
+    status,
+    error,
+    failedStep,
+    lessonsGenerated,
+    quizzesAttempted,
+    insightsReviewed,
+  }: {
+    totalDurationMs: number;
+    course: CourseData | null;
+    status: 'completed' | 'failed';
+    error?: string;
+    failedStep?: { step: number; name: string };
+    lessonsGenerated?: number;
+    quizzesAttempted?: number;
+    insightsReviewed?: number;
+  }): void {
+    const totalLessons = course?.structure?.modules.reduce((sum, m) => sum + m.lessons.length, 0) ?? 0;
 
     // Insert summary right after header
     const summary = `## Run Summary
 | Metric | Value |
 |--------|-------|
-| Course ID | \`${this.courseId}\` |
+| Course ID | \`${this.courseId || 'N/A'}\` |
 | Total Duration | ${fmtDuration(totalDurationMs)} |
 | Status | ${status} |
-| Course Name | ${course.name} |
-| Depth Selected | ${course.depth ?? 'N/A'} |
-| Modules | ${course.structure?.modules.length ?? 'N/A'} |
+| Course Name | ${course?.name ?? 'N/A'} |
+| Domain | ${course?.domain ?? 'N/A'} |
+| Depth Selected | ${course?.depth ?? 'N/A'} |
+| Modules | ${course?.structure?.modules.length ?? 'N/A'} |
 | Total Lessons | ${totalLessons || 'N/A'} |
-${lessonsGenerated !== undefined ? `| Lessons Generated | ${lessonsGenerated} |\n` : ''}${error ? `| Error | ${error} |` : ''}
+${failedStep ? `| Failed Step | ${failedStep.step} — ${failedStep.name} |\n` : ''}${lessonsGenerated !== undefined ? `| Lessons Generated | ${lessonsGenerated} |\n` : ''}${quizzesAttempted !== undefined ? `| Quizzes Attempted | ${quizzesAttempted} |\n` : ''}${insightsReviewed !== undefined ? `| Insights Reviewed | ${insightsReviewed} |\n` : ''}${error ? `| Error | ${escapeCell(truncate({ str: error, maxLen: 500 }))} |` : ''}
 `;
 
     // Insert after the header (index 0)
     this.sections.splice(1, 0, summary);
+  }
+
+  addFailure({ failedStep, error }: { failedStep: { step: number; name: string } | null; error: string }): void {
+    const header = failedStep
+      ? `## Failure — Step ${failedStep.step}: ${failedStep.name}`
+      : `## Failure — before any step started`;
+
+    this.sections.push(`---
+
+${header}
+
+\`\`\`
+${error}
+\`\`\`
+`);
   }
 
   async writeToFile(outputDir: string): Promise<string> {
@@ -263,6 +462,11 @@ function fmtDuration(ms: number): string {
 function truncate({ str, maxLen }: { str: string; maxLen: number }): string {
   if (str.length <= maxLen) return str;
   return str.slice(0, maxLen) + '...';
+}
+
+function escapeCell(str: string): string {
+  // Replace markdown-table-breaking chars with safe equivalents.
+  return str.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
 function formatBlock(block: ILessonBlock): string {

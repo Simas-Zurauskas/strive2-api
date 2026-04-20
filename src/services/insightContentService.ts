@@ -127,7 +127,6 @@ const normalizeInsight = (raw: GeneratedInsight): GeneratedInsight | null => {
   const prompt = raw.prompt?.trim();
   const answer = raw.answer?.trim();
   if (!prompt || !answer) return null;
-  if (prompt.length > 400 || answer.length > 200) return null;
 
   if (raw.kind === 'cloze' && !/\{\{\s*blank\s*\}\}/i.test(prompt)) {
     // Cloze prompts must contain a {{blank}} marker.
