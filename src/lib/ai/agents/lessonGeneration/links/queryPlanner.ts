@@ -102,12 +102,15 @@ export const planQueries = async ({
 
   try {
     const model = getUtilityModel().withStructuredOutput(topicPlanSchema);
-    const plan = await model.invoke([
-      new SystemMessage(PLANNER_SYSTEM_PROMPT),
-      new HumanMessage(
-        `## Lesson\n**Title:** ${safeName}\n\n**Description:** ${safeDescription}\n\n## Lesson summary\n${safeSummary || '(not yet generated)'}\n\n## Course domain\n${domain ?? 'unclassified'} — ${domainHint}\n\nProduce the 2–5 bonus-reading topic plan.`,
-      ),
-    ]);
+    const plan = await model.invoke(
+      [
+        new SystemMessage(PLANNER_SYSTEM_PROMPT),
+        new HumanMessage(
+          `## Lesson\n**Title:** ${safeName}\n\n**Description:** ${safeDescription}\n\n## Lesson summary\n${safeSummary || '(not yet generated)'}\n\n## Course domain\n${domain ?? 'unclassified'} — ${domainHint}\n\nProduce the 2–5 bonus-reading topic plan.`,
+        ),
+      ],
+      { metadata: { llmLabel: 'lesson:links.plan' } },
+    );
     if (!plan.topics.length) return fallbackPlan(lessonName);
     console.log(`[links.queryPlanner] ✓ Planned ${plan.topics.length} topic(s):`.cyan);
     for (const t of plan.topics) {

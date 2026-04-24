@@ -15,9 +15,12 @@ import mt from 'moment-timezone';
 import swaggerSpec from '@middleware/swagger';
 import swaggerUi from 'swagger-ui-express';
 import { authRoutes } from '@routes/authRoutes';
+import { billingRoutes } from '@routes/billingRoutes';
 import { courseRoutes } from '@routes/courseRoutes';
 import { gamificationRoutes } from '@routes/gamificationRoutes';
 import { insightRoutes } from '@routes/insightRoutes';
+import { usageRoutes } from '@routes/usageRoutes';
+import { stripeWebhookController } from '@controlers/billing';
 import mongoose from 'mongoose';
 import { getIO, initSocketIO } from '@lib/socket';
 import { initJobSocketBridge } from '@lib/jobSocketBridge';
@@ -51,6 +54,18 @@ app.use(
     credentials: true,
   }),
 );
+
+// Stripe webhook is the ONLY route that requires the raw request body — the
+// signature check runs against the exact bytes Stripe sent, and
+// `express.json()` would consume + re-serialize them first, breaking
+// verification. Mount the route here with its own `express.raw()` parser
+// BEFORE the global JSON parser below.
+app.post(
+  '/api/stripe/webhook',
+  express.raw({ type: 'application/json' }),
+  stripeWebhookController,
+);
+
 app.use(express.json({ limit: '1mb' }));
 
 // Assign every request a correlation id. Mount before the rate limiter so
@@ -92,9 +107,7 @@ if (ENVIRONMENT !== 'development') {
         // uses `u:<userId>` and anon uses `i:<ip>`.
         bumpRateLimitHit();
         const key = (req as unknown as { rateLimit?: { key?: string } }).rateLimit?.key ?? 'unknown';
-        console.warn(
-          `[rate_limit_hit] key=${key} path=${req.method} ${req.originalUrl}`.yellow,
-        );
+        console.warn(`[rate_limit_hit] key=${key} path=${req.method} ${req.originalUrl}`.yellow);
         res.status(options.statusCode).json(options.message);
       },
     }),
@@ -181,9 +194,11 @@ app.get('/metrics', (_req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/billing', billingRoutes);
 app.use('/api/course', courseRoutes);
 app.use('/api/gamification', gamificationRoutes);
 app.use('/api/insight', insightRoutes);
+app.use('/api/usage', usageRoutes);
 
 app.get('/swagger.json', (req, res) => {
   res.status(200).json(swaggerSpec);
@@ -225,11 +240,37 @@ connectDB().then(() => {
 
 // ── Graceful shutdown ───────────────────────────────────
 
+let shuttingDown = false;
+
 const gracefulShutdown = async (signal: string) => {
+  if (shuttingDown) {
+    console.log(`\n[Shutdown] ${signal} received again, forcing exit`.red);
+    process.exit(1);
+  }
+  shuttingDown = true;
+
   console.log(`\n[Shutdown] ${signal} received, shutting down gracefully...`.yellow);
 
+  // Hard safety net: if anything below hangs (a driver op, a socket, a
+  // background flush), kill the process anyway. `unref()` so the timer
+  // itself does not keep the loop alive.
+  const hardKill = setTimeout(() => {
+    console.log('[Shutdown] Hard timeout exceeded, killing process'.red);
+    process.exit(1);
+  }, 130_000);
+  hardKill.unref();
+
+  // Stop accepting new connections AND drop idle keep-alives. Without the
+  // second call, `server.close` waits on every idle keep-alive socket and
+  // never resolves.
   server.close();
-  getIO().close();
+  server.closeAllConnections();
+
+  // Disconnect socket.io clients before closing — `io.close()` alone waits
+  // indefinitely for lingering websocket clients to hang up.
+  const io = getIO();
+  io.disconnectSockets(true);
+  await new Promise<void>((resolve) => io.close(() => resolve()));
 
   const drainTimeout = 120_000; // Lesson generation takes 60-120s
   const start = Date.now();
@@ -245,6 +286,7 @@ const gracefulShutdown = async (signal: string) => {
   await mongoose.connection.close();
   console.log('[Shutdown] MongoDB connection closed'.cyan);
 
+  clearTimeout(hardKill);
   process.exit(0);
 };
 

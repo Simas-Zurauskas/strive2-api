@@ -1,7 +1,14 @@
-import OpenAI from 'openai';
+import { ChatAnthropic } from '@langchain/anthropic';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { z } from 'zod';
 import type { ApiClient } from './apiClient';
-import { LESSON_POLL_TIMEOUT_MS } from './apiClient';
+import { LESSON_POLL_TIMEOUT_MS, WITH_RETRY_POLL_TIMEOUT_MS } from './apiClient';
 import { MarkdownRecorder } from './markdownRecorder';
+import { withRetry } from '@lib/retry';
+import { MODEL_IDS } from '@lib/langchain';
+import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
+import { ANTHROPIC_API_KEY } from '@conf/env';
+import { COURSE_DEPTHS, type CourseDepth } from '@lib/constants';
 import type {
   Persona,
   PersonaRun,
@@ -24,10 +31,23 @@ import type { InsightMode, InsightRating } from '@lib/insightConstants';
 import { createPrng } from './prng';
 import { applyQuizNoise, computeSimulatedThinkTimeMs } from './quizNoise';
 
-let _openai: OpenAI | null = null;
-function getOpenAI(): OpenAI {
-  if (!_openai) _openai = new OpenAI();
-  return _openai;
+// Dedicated Sonnet instance at temp 0.7 for persona-simulation reasoning.
+// Not the shared `utilityModel` (Haiku, temp 0) because the orchestrator
+// simulates realistic users — cheap/cold Haiku flattens the behavioral
+// variance the prompts are calibrated to elicit.
+let _model: ChatAnthropic | null = null;
+function getOrchestratorModel(): ChatAnthropic {
+  if (!_model) {
+    _model = new ChatAnthropic({
+      model: MODEL_IDS.SONNET,
+      temperature: 0.7,
+      anthropicApiKey: ANTHROPIC_API_KEY,
+      maxTokens: 8192,
+      clientOptions: { timeout: 120000 },
+      callbacks: [makeLlmCacheCallback({ defaultLabel: 'orchestrator:flow', model: MODEL_IDS.SONNET })],
+    });
+  }
+  return _model;
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -49,19 +69,29 @@ function timedStep({ step, name }: { step: number; name: string }) {
   };
 }
 
-async function aiJsonCall<T>({ systemPrompt, userPrompt }: { systemPrompt: string; userPrompt: string }): Promise<{ result: T; raw: string }> {
-  const response = await getOpenAI().chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.7,
-  });
-
-  const raw = response.choices[0]?.message?.content ?? '';
-  return { result: JSON.parse(raw) as T, raw };
+/**
+ * Structured-output wrapper around the orchestrator's Sonnet client.
+ * LangChain's `withStructuredOutput` uses Anthropic tool-use under the hood
+ * to enforce the schema, so a mismatch raises a typed error that
+ * `withRetry` sees — no hand-rolled JSON-mode + zod parse step needed.
+ */
+async function aiJsonCall<T>({
+  systemPrompt,
+  userPrompt,
+  schema,
+  label,
+}: {
+  systemPrompt: string;
+  userPrompt: string;
+  schema: z.ZodType<T>;
+  label: string;
+}): Promise<{ result: T }> {
+  const model = getOrchestratorModel().withStructuredOutput(schema);
+  const result = await model.invoke(
+    [new SystemMessage(systemPrompt), new HumanMessage(userPrompt)],
+    { metadata: { llmLabel: label } },
+  );
+  return { result: result as T };
 }
 
 // ── AI-as-Persona functions ─────────────────────────────
@@ -78,6 +108,11 @@ ${persona.personality}
 WHAT YOU CARE ABOUT:
 ${persona.priorities}`;
 }
+
+const answerQuestionsOutputSchema = z.object({
+  answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])),
+  reasoning: z.string(),
+});
 
 async function answerQuestionsAsPersona({
   persona,
@@ -108,13 +143,20 @@ Return JSON:
 - "answers": { "q1": <answer>, "q2": <answer>, ... }
 - "reasoning": 1-2 sentences describing your actual behavior (e.g. "Rushed through the last two questions, picked too many options on q3 because everything sounded relevant")`;
 
-  const { result } = await aiJsonCall<{ answers: Record<string, unknown>; reasoning: string }>({
+  const { result } = await aiJsonCall({
     systemPrompt,
     userPrompt: JSON.stringify(questions, null, 2),
+    schema: answerQuestionsOutputSchema,
+    label: 'orchestrator:answer-questions',
   });
 
   return result;
 }
+
+const selectDepthOutputSchema = z.object({
+  depth: z.enum(COURSE_DEPTHS),
+  reasoning: z.string(),
+});
 
 async function selectDepthAsPersona({
   persona,
@@ -122,7 +164,7 @@ async function selectDepthAsPersona({
 }: {
   persona: Persona;
   depthPreviews: DepthPreviews;
-}): Promise<{ depth: 'overview' | 'comprehensive' | 'deep_dive'; reasoning: string }> {
+}): Promise<{ depth: CourseDepth; reasoning: string }> {
   const systemPrompt = `${personaContext(persona)}
 
 YOUR SPECIFIC DEPTH-SELECTION BEHAVIOR:
@@ -133,16 +175,39 @@ You see three depth options (Overview, Comprehensive, Deep Dive) with descriptio
 The "Recommended" badge is a POWERFUL UI element. In usability studies, 70-80% of users pick whatever is recommended. Only deviate if your behavioral description specifically says you would.
 
 Return JSON:
-- "depth": one of "overview", "comprehensive", or "deep_dive"
+- "depth": EXACTLY one of these lowercase strings: "overview", "comprehensive", or "deep_dive". No other values, no capitalization, no synonyms — the API rejects anything else.
 - "reasoning": 1 sentence — the REAL reason, not a rationalization. (e.g. "Just picked recommended, didn't really read the others" or "Went with deep_dive because I always want the most complete version of everything")`;
 
-  const { result } = await aiJsonCall<{ depth: 'overview' | 'comprehensive' | 'deep_dive'; reasoning: string }>({
-    systemPrompt,
-    userPrompt: JSON.stringify(depthPreviews, null, 2),
-  });
+  const userPrompt = JSON.stringify(depthPreviews, null, 2);
 
-  return result;
+  // withRetry (3 retries, exponential backoff) catches schema-mismatch
+  // failures from `aiJsonCall` — same pattern the prod LangChain calls use.
+  // When all retries exhaust, fall back to depthPreviews.recommended so the
+  // orchestrator run still produces a report. The fallback marker is in
+  // the reasoning string so it shows up in the persona's step notes and
+  // is greppable across run outputs.
+  try {
+    const { result } = await withRetry(() =>
+      aiJsonCall({ systemPrompt, userPrompt, schema: selectDepthOutputSchema, label: 'orchestrator:select-depth' }),
+    );
+    return result;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const recommended = depthPreviews.recommended as CourseDepth;
+    console.warn(
+      `[selectDepthAsPersona] All retries exhausted, falling back to recommended depth (${recommended}). Cause: ${reason}`.yellow,
+    );
+    return {
+      depth: recommended,
+      reasoning: `[fallback] LLM produced invalid output across all retries; defaulted to recommended (${recommended}). Cause: ${reason}`,
+    };
+  }
 }
+
+const reviewStructureOutputSchema = z.object({
+  satisfied: z.boolean(),
+  feedback: z.string(),
+});
 
 async function reviewStructureAsPersona({
   persona,
@@ -176,9 +241,11 @@ Return JSON:
 - "satisfied": boolean
 - "feedback": your chat message if not satisfied, empty string if satisfied`;
 
-  const { result } = await aiJsonCall<{ satisfied: boolean; feedback: string }>({
+  const { result } = await aiJsonCall({
     systemPrompt,
     userPrompt: JSON.stringify(structure, null, 2),
+    schema: reviewStructureOutputSchema,
+    label: 'orchestrator:review-structure',
   });
 
   return result;
@@ -195,6 +262,35 @@ interface LlmQuizResponse {
   selectedOption: number;
   confidence: number;
 }
+
+/**
+ * Shape-only validation. Bounds (selectedOption ∈ [0, 3], confidence ∈
+ * [0, 1]) are NOT enforced here because the consumer downstream already
+ * defends per-item via `responseById.get(...)?.selectedOption ?? 0` and
+ * a typeof-check on confidence. Schema is just enough to catch a
+ * categorically broken payload (responses missing, reasoning missing,
+ * not an array) so withRetry has something to react to.
+ */
+const quizAnswerOutputSchema = z.object({
+  responses: z.array(
+    z.object({
+      questionId: z.string(),
+      selectedOption: z.number(),
+      confidence: z.number(),
+    }).passthrough(),
+  ),
+  reasoning: z.string(),
+});
+
+const insightTapRevealOutputSchema = z.object({
+  rating: z.number(),
+  reasoning: z.string(),
+});
+
+const insightTypedRecallOutputSchema = z.object({
+  userAnswer: z.string(),
+  reasoning: z.string(),
+});
 
 async function answerQuizAsPersona({
   persona,
@@ -235,13 +331,14 @@ Return JSON:
 - "reasoning": 1–2 sentences describing your actual behavior (e.g. "Rushed the last two; picked option A on q3 because I wasn't sure")`;
 
   const llmStart = Date.now();
-  const { result } = await aiJsonCall<{
-    responses: LlmQuizResponse[];
-    reasoning: string;
-  }>({
-    systemPrompt,
-    userPrompt: JSON.stringify(questions, null, 2),
-  });
+  const { result } = await withRetry(() =>
+    aiJsonCall({
+      systemPrompt,
+      userPrompt: JSON.stringify(questions, null, 2),
+      schema: quizAnswerOutputSchema,
+      label: 'orchestrator:answer-quiz',
+    }),
+  );
   const llmLatencyMs = Date.now() - llmStart;
 
   // Build a lookup so malformed LLM output (missing/duplicate questionIds)
@@ -329,10 +426,9 @@ Return JSON:
 
   const userPrompt = `PROMPT (${insight.kind}):\n${insight.prompt}\n\nCANONICAL ANSWER:\n${insight.answer}`;
 
-  const { result } = await aiJsonCall<{ rating: number; reasoning: string }>({
-    systemPrompt,
-    userPrompt,
-  });
+  const { result } = await withRetry(() =>
+    aiJsonCall({ systemPrompt, userPrompt, schema: insightTapRevealOutputSchema, label: 'orchestrator:insight-tap-reveal' }),
+  );
 
   let rating = clampRating(result.rating);
   // Apply tap-reveal rating bias driven by the persona's insight style
@@ -380,10 +476,9 @@ Return JSON:
 
   const userPrompt = `PROMPT (${insight.kind}):\n${insight.prompt}`;
 
-  const { result } = await aiJsonCall<{ userAnswer: string; reasoning: string }>({
-    systemPrompt,
-    userPrompt,
-  });
+  const { result } = await withRetry(() =>
+    aiJsonCall({ systemPrompt, userPrompt, schema: insightTypedRecallOutputSchema, label: 'orchestrator:insight-typed-recall' }),
+  );
 
   // If the persona's insight style flags indicate they struggle to articulate,
   // degrade the LLM's polished canonical-quality answer into something closer
@@ -631,7 +726,11 @@ export async function runPersonaFlow({
     const s6 = beginStep({ step: 6, name: 'Generate Structure' });
     const pollStart6 = Date.now();
     const structJobId = await client.submitJob({ courseId, path: 'generate-structure' });
-    await client.pollJob({ jobId: structJobId });
+    // Structure generation runs `withRetry` once for the base attempt and
+    // then, under Phase 4's cap validation, may run a full second
+    // generation to trim an over-cap result. Worst case ≈ 2×120s per call
+    // within each retry cycle. 300s default is tight; 10 min gives headroom.
+    await client.pollJob({ jobId: structJobId, timeoutMs: WITH_RETRY_POLL_TIMEOUT_MS });
     const pollDuration6 = Date.now() - pollStart6;
     course = await client.getCourse(courseId);
     const structure = course.structure!;
@@ -802,7 +901,12 @@ export async function runPersonaFlow({
           const genStart = Date.now();
 
           const jobId = await client.generateModuleQuiz({ courseId, moduleIndex: mi });
-          await client.pollJob({ jobId });
+          // Quiz generation wraps a Sonnet call in withRetry (3 retries,
+          // 120s per-attempt timeout); worst case ≈ 8 min. 300s default
+          // causes the orchestrator to time out before the server's
+          // retry chain can finish — the real failure never surfaces in
+          // the report. 10 min lets the job complete cleanly.
+          await client.pollJob({ jobId, timeoutMs: WITH_RETRY_POLL_TIMEOUT_MS });
           const quiz = await client.getModuleQuiz({ courseId, moduleIndex: mi });
           const generationMs = Date.now() - genStart;
 

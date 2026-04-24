@@ -10,7 +10,6 @@ export { generateDepthPreviewsController } from './generateDepthPreviews';
 export { getJobStatusController } from './getJobStatus';
 export { generateLessonController } from './generateLesson';
 export { executeCodeController } from './executeCode';
-export { streamLessonContentController } from './streamLessonContent';
 export { getLessonContentController } from './getLessonContent';
 export { getLessonContentStatsController } from './getLessonContentStats';
 export { chatStreamController } from './chatStream';

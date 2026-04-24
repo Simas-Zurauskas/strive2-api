@@ -12,6 +12,8 @@ export const ERROR_CODES = [
   'PASSWORD_RESET_EXPIRED',
   'PASSWORD_ALREADY_SET',
   'PASSWORD_NOT_SET',
+  'INSUFFICIENT_CREDITS',
+  'SUBSCRIPTION_ALREADY_EXISTS',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -22,6 +24,13 @@ export interface IError {
   statusCode?: number;
   stack?: string;
   errorCode?: ErrorCode;
+  /**
+   * Arbitrary structured data echoed to the client alongside the error body.
+   * Used by credit errors to carry `need` / `have` / `limit` / `windowDescription`
+   * so the client can render contextual "out of credits" or "rate-limited"
+   * modals without string-parsing the message.
+   */
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -81,6 +90,7 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
   res.status(statusCode).json({
     message,
     ...(errorCode && { errorCode }),
+    ...(err.meta && { meta: err.meta }),
     // Echo the correlation id in the error body too — clients can quote it
     // verbatim in bug reports and we can grep logs for the same value.
     requestId: requestIdVal,

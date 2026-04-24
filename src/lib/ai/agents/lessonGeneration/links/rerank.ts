@@ -22,7 +22,9 @@ const shuffle = <T,>(items: T[]): T[] => {
   return out;
 };
 
-const JUDGE_SYSTEM_PROMPT = `You are a strict curator for a lesson's "Further Reading" section. Each candidate below was surfaced by a web search, its full main-content has been fetched, and it's now your job to score how valuable it would be for a learner who just finished this lesson.
+const buildJudgeSystemPrompt = (todayIso: string): string => `You are a strict curator for a lesson's "Further Reading" section. Each candidate below was surfaced by a web search, its full main-content has been fetched, and it's now your job to score how valuable it would be for a learner who just finished this lesson.
+
+You are scoring on ${todayIso} (today's UTC date). Use this to evaluate publication freshness and to flag implausible future-dated paths.
 
 Score each candidate from 0 to 10 using this filler-detection checklist. Every "no" should pull the score down; every strong "yes" should pull it up.
 
@@ -36,6 +38,8 @@ Score each candidate from 0 to 10 using this filler-detection checklist. Every "
 8. Is the content length meaningful (not a 100-word blog stub, not a Wikipedia stub, not a table-of-contents page)?
 9. Does it complement, extend, or productively CONTRADICT the lesson? Productive opposition (e.g. a recognised critique) is valuable.
 10. Would you be comfortable recommending this link to a senior expert in the subject? If embarrassing, score ≤ 4.
+11. **Future-date implausibility.** If the URL path contains a year that is STRICTLY GREATER than the current year (e.g. a "/2027/..." slug scored in 2026), penalize by -3. A legitimate tutorial is not dated in the future; such paths are almost always retrieval artifacts or fabrications. Year-shaped tokens that aren't dates (version numbers like "v2024.03", API paths) should be judged contextually — look at the fetched content to decide.
+12. **Vendor-topic mismatch.** If the publishing domain's primary business is unrelated to the lesson topic — an observability vendor's blog hosting a SQL tutorial, a product-marketing microsite on general engineering concepts, a camera-seller blog posing as a canonical photography reference — penalize by -2. Prefer primary sources: official docs, reference implementations, recognised practitioner blogs, academic publishers.
 
 Scoring band guidance:
 - 9–10: must-read for any serious learner of this topic; they'd feel the lesson was incomplete without it.
@@ -44,7 +48,7 @@ Scoring band guidance:
 - 3–5: keyword-matches the topic but doesn't add real value.
 - 0–2: off-topic, filler, or actively misleading.
 
-Do NOT invent or modify URLs. You are scoring a fixed candidate set. Every entry in your output must correspond to exactly one candidate id from the input.
+Do NOT invent or modify URLs. You are scoring a fixed candidate set. Every entry in your output must correspond to exactly one candidate id from the input. Score every candidate whose id appears in the input list — do not skip entries and do not emit entries with null fields. If for any reason you cannot score a candidate, OMIT it entirely rather than including a placeholder row.
 
 The suggestedTitle should be a reader-friendly title (cleaner than the raw scraped title when it contains site chrome); suggestedDescription should be ONE short sentence explaining WHY this is worth the learner's time — not a summary of the page.
 
@@ -111,21 +115,26 @@ Score every candidate.`;
 
   try {
     const model = getUtilityModel().withStructuredOutput(judgeOutputSchema);
-    const result = await model.invoke([
-      new SystemMessage(JUDGE_SYSTEM_PROMPT),
-      new HumanMessage(humanBody),
-    ]);
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const result = await model.invoke(
+      [new SystemMessage(buildJudgeSystemPrompt(todayIso)), new HumanMessage(humanBody)],
+      { metadata: { llmLabel: 'lesson:links.rerank' } },
+    );
 
     const candidatesById = new Map(candidates.map((c) => [c.id, c]));
     const out: JudgedCandidate[] = [];
     for (const verdict of result.verdicts) {
       const base = candidatesById.get(verdict.id);
       if (!base) continue; // defense against hallucinated ids
+      // Skip-sentinel guard: judge occasionally emits an entry with nulls
+      // instead of omitting it (see judgedCandidateSchema note). Drop those
+      // rather than shipping a link with score 0 / empty description.
+      if (verdict.score === null || verdict.suggestedDescription == null) continue;
       out.push({
         ...base,
         judgedScore: verdict.score,
         judgedReason: verdict.reason,
-        suggestedTitle: verdict.suggestedTitle.trim() || base.title,
+        suggestedTitle: verdict.suggestedTitle?.trim() || base.title,
         suggestedDescription: verdict.suggestedDescription.trim(),
       });
     }

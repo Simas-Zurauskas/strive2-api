@@ -20,7 +20,8 @@
       "@middleware/*": ["src/middleware/*"],
       "@conf/*": ["src/conf/*"],
       "@models/*": ["src/models/*"],
-      "@src/*": ["src/*"]
+      "@src/*": ["src/*"],
+      "stripe": ["node_modules/stripe/esm/stripe.esm.node"]
     }
   },
   "include": ["src/**/*"],

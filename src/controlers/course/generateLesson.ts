@@ -1,4 +1,5 @@
 import asyncHandler from 'express-async-handler';
+import CourseModel from '@models/CourseModel';
 import { submitJob } from '@services/jobRunner';
 import { getUserCourseLean } from '@services/courseDbService';
 import { generateLessonSchema, assertPreviousLessonGenerated } from './validation';
@@ -85,6 +86,8 @@ export const generateLessonController = asyncHandler(async (req, res) => {
     structure: course.structure as { modules: { lessons: unknown[] }[] },
   });
 
+  // Image/links flags pass through to the agent unchanged. All plans get
+  // full feature access — credits cost reflects what was used.
   console.log(`[API] Submitting generate_lesson job, courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
   const jobId = await submitJob({
     userId,
@@ -92,6 +95,13 @@ export const generateLessonController = asyncHandler(async (req, res) => {
     type: 'generate_lesson',
     metadata: { moduleIndex, lessonIndex, includeImage, includeLinks },
   });
+
+  // Stamp the course so a reloaded client knows — synchronously, off a
+  // single GET /course — that THIS lesson is being generated, without
+  // round-tripping through /course/job/:jobId to read the metadata.
+  // Cleared alongside activeJobId in jobRunner.processJob's finally.
+  await CourseModel.findByIdAndUpdate(courseId, { activeLesson: { moduleIndex, lessonIndex } });
+
   console.log(`[API] Generate lesson job submitted: ${jobId}`.green);
 
   res.status(202).json({ data: { jobId } });

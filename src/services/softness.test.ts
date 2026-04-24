@@ -11,7 +11,13 @@
  */
 
 import assert from 'node:assert/strict';
-import { detectSoftnessHint, getLessonCountHint, LESSON_COUNT_HINTS } from './softness';
+import {
+  detectSoftnessHint,
+  detectFinishPressure,
+  getLessonCountHint,
+  getEstimatedHoursRange,
+  LESSON_COUNT_HINTS,
+} from './softness';
 
 let passed = 0;
 const test = (name: string, fn: () => void) => {
@@ -200,6 +206,86 @@ test('chloe regression: "easily overwhelmed" triggers softness', () => {
 test('david regression: "moderately important" triggers softness', () => {
   const r = detectSoftnessHint({ answers: ans('Mastering keigo is moderately important in my semi-formal workplace') });
   assert.equal(r.isSoft, true);
+});
+
+// ── Fix #1 (2026-04-21 assessment): finish-pressure detector ──
+
+test('finish-pressure: empty answers → no pressure', () => {
+  assert.equal(detectFinishPressure({ answers: [] }).isFinishPressure, false);
+});
+
+test('finish-pressure: Mike case "upcoming project at work"', () => {
+  const r = detectFinishPressure({
+    answers: ans('learn rust for upcoming project at work, already know c++'),
+  });
+  assert.equal(r.isFinishPressure, true);
+  assert.ok(r.cues.length >= 1);
+});
+
+test('finish-pressure: "deadline" triggers', () => {
+  const r = detectFinishPressure({ answers: ans('I have a deadline next week') });
+  assert.equal(r.isFinishPressure, true);
+});
+
+test('finish-pressure: "tight timeline" triggers', () => {
+  const r = detectFinishPressure({ answers: ans('Working on a tight timeline here') });
+  assert.equal(r.isFinishPressure, true);
+});
+
+test('finish-pressure: neutral topic description does NOT trigger', () => {
+  const r = detectFinishPressure({
+    answers: ans('I want to learn Kubernetes for my DevOps role'),
+  });
+  assert.equal(r.isFinishPressure, false);
+});
+
+test('finish-pressure: "deadline-driven culture" DOES trigger (literal substring, accepted FP)', () => {
+  // "deadline" alone is in the list; "deadline-driven culture" contains it.
+  // This is an accepted false-positive trade-off — gate ack is cheap and the
+  // broader false-positive rate guard is monitored in prod via metrics.
+  const r = detectFinishPressure({ answers: ans('we have a deadline-driven culture here') });
+  assert.equal(r.isFinishPressure, true);
+});
+
+test('finish-pressure: is separate signal from softness', () => {
+  // Mike case — finish-pressure present but no softness cues.
+  const a = ans('learn rust for upcoming project at work');
+  assert.equal(detectSoftnessHint({ answers: a }).isSoft, false);
+  assert.equal(detectFinishPressure({ answers: a }).isFinishPressure, true);
+});
+
+// ── Fix #1: estimated-hours range ─────────────────────────────
+
+test('getEstimatedHoursRange: overview normal is ~4-6h', () => {
+  const [lo, hi] = getEstimatedHoursRange({ depth: 'overview', isSoft: false });
+  // [8, 14] lessons × 25 min = 200-350 min = ceil(3.33)-ceil(5.83) = 4-6 hours
+  assert.equal(lo, 4);
+  assert.equal(hi, 6);
+});
+
+test('getEstimatedHoursRange: comprehensive normal is ~8-12h', () => {
+  const [lo, hi] = getEstimatedHoursRange({ depth: 'comprehensive', isSoft: false });
+  // [18, 28] lessons × 25 min = 450-700 min = ceil(7.5)-ceil(11.67) = 8-12 hours
+  assert.equal(lo, 8);
+  assert.equal(hi, 12);
+});
+
+test('getEstimatedHoursRange: deep_dive normal is ~15-24h (Alex magnitude)', () => {
+  const [lo, hi] = getEstimatedHoursRange({ depth: 'deep_dive', isSoft: false });
+  // [36, 56] × 25 / 60 = 15-24 hours
+  assert.equal(lo, 15);
+  assert.equal(hi, 24);
+});
+
+test('getEstimatedHoursRange: soft band shrinks the range', () => {
+  const soft = getEstimatedHoursRange({ depth: 'comprehensive', isSoft: true });
+  const normal = getEstimatedHoursRange({ depth: 'comprehensive', isSoft: false });
+  assert.ok(soft[1] < normal[1], 'soft max-hours must be smaller than normal max-hours');
+});
+
+test('getEstimatedHoursRange: min floor is at least 1h', () => {
+  const [lo] = getEstimatedHoursRange({ depth: 'overview', isSoft: true });
+  assert.ok(lo >= 1);
 });
 
 console.log(`\n\u2713 softness: ${passed} test(s) passed`);

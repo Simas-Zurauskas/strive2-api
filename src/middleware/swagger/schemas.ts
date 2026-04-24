@@ -4,6 +4,7 @@ import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, JOB_TYP
 import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 import { INSIGHT_KINDS, INSIGHT_MODES, INSIGHT_RATINGS, INSIGHT_STATES } from '@lib/insightConstants';
+import { USAGE_SERVICES } from '@lib/usageConstants';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
 
@@ -76,6 +77,11 @@ export const schemas: SchemaMap = {
     enum: ['time', 'progression'],
   },
 
+  UsageService: {
+    type: 'string',
+    enum: [...USAGE_SERVICES],
+  },
+
   // ── Object schemas ───────────────────────────────────────
 
   ApiError: {
@@ -84,6 +90,14 @@ export const schemas: SchemaMap = {
     properties: {
       message: { type: 'string' },
       errorCode: { $ref: '#/components/schemas/ErrorCode' },
+      // Optional structured error metadata. For 402 INSUFFICIENT_CREDITS the
+      // shape is `{ need: number, have: number }`. Kept as a free-form object
+      // so new error codes can add fields without a schema churn every time.
+      meta: {
+        type: 'object',
+        additionalProperties: true,
+      },
+      requestId: { type: 'string' },
     },
   },
 
@@ -96,9 +110,53 @@ export const schemas: SchemaMap = {
     },
   },
 
+  PlanKey: {
+    type: 'string',
+    enum: ['free', 'starter', 'pro', 'studio'],
+  },
+
+  SubscriptionStatus: {
+    type: 'string',
+    enum: ['active', 'past_due', 'canceling', 'canceled'],
+  },
+
+  UserSubscription: {
+    type: 'object',
+    required: ['plan', 'status', 'cancelAtPeriodEnd'],
+    properties: {
+      plan: { $ref: '#/components/schemas/PlanKey' },
+      status: { $ref: '#/components/schemas/SubscriptionStatus' },
+      cancelAtPeriodEnd: { type: 'boolean' },
+      pendingPlan: { $ref: '#/components/schemas/PlanKey' },
+      currentPeriodStart: { type: 'string', format: 'date-time' },
+      currentPeriodEnd: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  UserCredits: {
+    type: 'object',
+    required: ['allowanceBalance', 'allowanceGranted', 'bonusBalance', 'periodStart', 'periodEnd'],
+    properties: {
+      allowanceBalance: { type: 'integer', minimum: 0 },
+      allowanceGranted: { type: 'integer', minimum: 0 },
+      bonusBalance: { type: 'integer', minimum: 0 },
+      periodStart: { type: 'string', format: 'date-time' },
+      periodEnd: { type: 'string', format: 'date-time' },
+    },
+  },
+
   AuthorisedUser: {
     type: 'object',
-    required: ['_id', 'email', 'emailVerified', 'authProviders', 'createdAt', 'updatedAt'],
+    required: [
+      '_id',
+      'email',
+      'emailVerified',
+      'authProviders',
+      'subscription',
+      'credits',
+      'createdAt',
+      'updatedAt',
+    ],
     properties: {
       _id: { type: 'string' },
       email: { type: 'string' },
@@ -109,8 +167,138 @@ export const schemas: SchemaMap = {
         type: 'array',
         items: { $ref: '#/components/schemas/AuthProvider' },
       },
+      subscription: { $ref: '#/components/schemas/UserSubscription' },
+      credits: { $ref: '#/components/schemas/UserCredits' },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  BillingPlan: {
+    type: 'object',
+    required: [
+      'key',
+      'displayName',
+      'monthlyUsd',
+      'annualMonthlyUsd',
+      'annualUsd',
+      'monthlyAllowance',
+      'maxConcurrentJobs',
+      'allowImage',
+      'allowLinks',
+    ],
+    properties: {
+      key: { $ref: '#/components/schemas/PlanKey' },
+      displayName: { type: 'string' },
+      monthlyUsd: { type: 'number' },
+      annualMonthlyUsd: { type: 'number' },
+      annualUsd: { type: 'number' },
+      monthlyAllowance: { type: 'integer' },
+      maxConcurrentJobs: { type: 'integer' },
+      allowImage: { type: 'boolean' },
+      allowLinks: { type: 'boolean' },
+    },
+  },
+
+  BillingTopupRate: {
+    type: 'object',
+    required: ['creditsPerUsd', 'minUsd', 'maxUsd'],
+    properties: {
+      // How many credits one USD buys. Integer so any whole-dollar amount
+      // yields an integer credit grant.
+      creditsPerUsd: { type: 'integer' },
+      // Inclusive bounds enforced both client-side (input clamping) and
+      // server-side (Zod schema on the /topup endpoint).
+      minUsd: { type: 'integer' },
+      maxUsd: { type: 'integer' },
+    },
+  },
+
+  BillingCatalog: {
+    type: 'object',
+    required: ['plans', 'topupRate'],
+    properties: {
+      plans: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/BillingPlan' },
+      },
+      topupRate: { $ref: '#/components/schemas/BillingTopupRate' },
+    },
+  },
+
+  BillingSummary: {
+    type: 'object',
+    required: ['plan', 'displayName', 'status', 'cancelAtPeriodEnd', 'credits'],
+    properties: {
+      plan: { $ref: '#/components/schemas/PlanKey' },
+      displayName: { type: 'string' },
+      status: { $ref: '#/components/schemas/SubscriptionStatus' },
+      cancelAtPeriodEnd: { type: 'boolean' },
+      pendingPlan: {
+        // nullable-via-oneOf would be stricter but openapi-types v12 rejects
+        // `{ type: 'null' }`. Using a nullable $ref wrapper instead.
+        allOf: [{ $ref: '#/components/schemas/PlanKey' }],
+        nullable: true,
+      },
+      credits: {
+        type: 'object',
+        required: ['allowance', 'bonus', 'total', 'allowanceGranted', 'periodStart', 'periodEnd'],
+        properties: {
+          allowance: { type: 'integer' },
+          bonus: { type: 'integer' },
+          total: { type: 'integer' },
+          allowanceGranted: { type: 'integer' },
+          periodStart: { type: 'string', format: 'date-time' },
+          periodEnd: { type: 'string', format: 'date-time' },
+        },
+      },
+    },
+  },
+
+  CreditLedgerEntry: {
+    type: 'object',
+    required: [
+      '_id',
+      'userId',
+      'timestamp',
+      'delta',
+      'allowanceDelta',
+      'bonusDelta',
+      'balanceBefore',
+      'balanceAfter',
+      'bonusBefore',
+      'bonusAfter',
+      'reason',
+    ],
+    properties: {
+      _id: { type: 'string' },
+      userId: { type: 'string' },
+      timestamp: { type: 'string', format: 'date-time' },
+      delta: { type: 'integer' },
+      allowanceDelta: { type: 'integer' },
+      bonusDelta: { type: 'integer' },
+      balanceBefore: { type: 'integer' },
+      balanceAfter: { type: 'integer' },
+      bonusBefore: { type: 'integer' },
+      bonusAfter: { type: 'integer' },
+      reason: {
+        type: 'string',
+        enum: [
+          'signup_grant',
+          'period_reset',
+          'plan_upgrade_bonus',
+          'topup_purchase',
+          'debit_action',
+          'refund_job_failed',
+          'refund_job_canceled',
+          'refund_cross_period',
+          'admin_grant',
+          'admin_clawback',
+        ],
+      },
+      actionType: { type: 'string' },
+      jobId: { type: 'string' },
+      notes: { type: 'string' },
     },
   },
 
@@ -571,6 +759,15 @@ export const schemas: SchemaMap = {
       pendingFeedback: { type: 'string' },
       currentStep: { type: 'number' },
       activeJobId: { type: 'string' },
+      activeLesson: {
+        type: 'object',
+        nullable: true,
+        required: ['moduleIndex', 'lessonIndex'],
+        properties: {
+          moduleIndex: { type: 'number' },
+          lessonIndex: { type: 'number' },
+        },
+      },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
     },
@@ -724,6 +921,67 @@ export const schemas: SchemaMap = {
             avgRating: { type: 'number' },
           },
         },
+      },
+    },
+  },
+
+  // ── Usage ledger ─────────────────────────────────────────
+
+  UsageEvent: {
+    type: 'object',
+    required: ['id', 'timestamp', 'service', 'action', 'costMicroCents', 'metadata'],
+    properties: {
+      id: { type: 'string' },
+      timestamp: { type: 'string', format: 'date-time' },
+      service: { $ref: '#/components/schemas/UsageService' },
+      action: { type: 'string' },
+      costMicroCents: { type: 'integer' },
+      metadata: { type: 'object', additionalProperties: true },
+    },
+  },
+
+  UsageHistory: {
+    type: 'object',
+    required: ['events', 'total', 'limit', 'offset', 'hasMore'],
+    properties: {
+      events: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/UsageEvent' },
+      },
+      total: { type: 'integer' },
+      limit: { type: 'integer' },
+      offset: { type: 'integer' },
+      hasMore: { type: 'boolean' },
+    },
+  },
+
+  UsageCostBucket: {
+    type: 'object',
+    required: ['costMicroCents'],
+    properties: {
+      costMicroCents: { type: 'integer' },
+    },
+  },
+
+  UsageServiceTotal: {
+    type: 'object',
+    required: ['service', 'costMicroCents'],
+    properties: {
+      service: { $ref: '#/components/schemas/UsageService' },
+      costMicroCents: { type: 'integer' },
+    },
+  },
+
+  UsageSummary: {
+    type: 'object',
+    required: ['today', 'thisMonth', 'allTime', 'byService'],
+    properties: {
+      today: { $ref: '#/components/schemas/UsageCostBucket' },
+      thisMonth: { $ref: '#/components/schemas/UsageCostBucket' },
+      allTime: { $ref: '#/components/schemas/UsageCostBucket' },
+      byService: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/UsageServiceTotal' },
       },
     },
   },

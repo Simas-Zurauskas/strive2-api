@@ -2,7 +2,11 @@ import { TavilySearch } from '@langchain/tavily';
 import { TAVILY_API_KEY } from '@conf/env';
 import { withRetry } from '@lib/retry';
 import { bgError } from '@lib/bg';
+import { priceFlatUnit } from '@lib/pricing';
+import { bumpTavilySearchDedupHit } from '@lib/metrics';
+import { recordUsage } from '@services/usageService';
 import { TopicPlan, SearchCandidate } from './schemas';
+import { getCachedSearch, setCachedSearch } from './searchCache';
 
 // Aim for ~20 raw candidates across the topic plan, divided evenly per topic
 // and capped per topic so a single Tavily query never floods the pool.
@@ -103,7 +107,10 @@ const toCandidate = (
  * A failed query contributes zero candidates but never fails the pipeline —
  * we'd rather ship with N-1 topics' worth than zero.
  */
-export const searchCandidates = async ({ topics }: TopicPlan): Promise<SearchCandidate[]> => {
+export const searchCandidates = async ({
+  topics,
+  courseId,
+}: TopicPlan & { courseId: string }): Promise<SearchCandidate[]> => {
   const maxResults = perTopicMax(topics.length);
   const tavily = new TavilySearch({
     tavilyApiKey: TAVILY_API_KEY,
@@ -114,15 +121,34 @@ export const searchCandidates = async ({ topics }: TopicPlan): Promise<SearchCan
   const perQuery = await Promise.all(
     topics.map(async ({ topic, query }, topicIndex) => {
       const idPrefix = topicSlug(topic, topicIndex);
+
+      // Cross-lesson cache. A sibling lesson in the same course with the
+      // same normalized query reuses candidates here — zero Tavily spend
+      // for the hit. `setCachedSearch` below lands the miss path's results
+      // for the next lesson.
+      const cached = getCachedSearch({ courseId, query });
+      if (cached) {
+        bumpTavilySearchDedupHit();
+        console.log(`[links.searchCandidates]   ↺ cached hit for "${query}" (${cached.length} candidate(s))`.gray);
+        return cached;
+      }
+
       try {
         const raw = await withRetry(
           () => withTavilyTimeout(tavily.invoke({ query }), query),
           { maxRetries: 1, baseDelayMs: 500 },
         );
+        recordUsage({
+          service: 'tavily',
+          action: 'search:advanced',
+          costMicroCents: priceFlatUnit({ sku: 'tavily_search_advanced' }),
+          metadata: { query, topic, maxResults },
+        });
         const results = extractResults(raw);
         const candidates = results
           .map((r, i) => toCandidate(r, topic, idPrefix, i))
           .filter((c): c is SearchCandidate => c !== null);
+        setCachedSearch({ courseId, query, candidates });
         console.log(`[links.searchCandidates]   ${candidates.length} hit(s) for "${query}"`.gray);
         return candidates;
       } catch (e) {

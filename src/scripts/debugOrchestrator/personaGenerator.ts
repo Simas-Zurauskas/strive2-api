@@ -1,4 +1,10 @@
-import OpenAI from 'openai';
+import { ChatAnthropic } from '@langchain/anthropic';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { z } from 'zod';
+import { withRetry } from '@lib/retry';
+import { MODEL_IDS } from '@lib/langchain';
+import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
+import { ANTHROPIC_API_KEY } from '@conf/env';
 import type { Persona } from './types';
 
 const PERSONA_SYSTEM_PROMPT = `You are generating realistic test personas for an AI-powered course creation platform. These personas will walk through the wizard (clarifying questions → depth choice → structure → optional chat refinement → accept), then through the learning experience (lessons → module quizzes → spaced-repetition insight reviews).
@@ -89,25 +95,73 @@ Return a JSON object with a "personas" array. Each persona has:
 
 4. When generating 5 personas: ensure at least 2 are "normal" motivated learners, at least 1 has a vague/short goal, at least 1 has a very specific goal, and at least 1 will give structure feedback. Topics must all be different.`;
 
+const personaOutputSchema = z.object({
+  personas: z.array(
+    z.object({
+      name: z.string(),
+      background: z.string(),
+      goal: z.string(),
+      personality: z.string(),
+      priorities: z.string(),
+      wizardBehavior: z.object({
+        surveyStyle: z.string(),
+        depthChoice: z.string(),
+        structureReview: z.string(),
+        quizAttemptStyle: z.string(),
+        insightReviewStyle: z.string(),
+      }),
+      quizStyleFlags: z.object({
+        rushes: z.boolean(),
+        secondGuesses: z.boolean(),
+        eliminates: z.boolean(),
+        guessesWhenUnsure: z.boolean(),
+      }),
+      insightStyleFlags: z.object({
+        struggles: z.boolean(),
+        articulate: z.boolean(),
+        generous: z.boolean(),
+        harsh: z.boolean(),
+      }),
+    }),
+  ),
+});
+
+// Temp 0.9 for creative persona diversity — PERSONA_SYSTEM_PROMPT is
+// calibrated to high-variance output.
+let _model: ChatAnthropic | null = null;
+function getModel(): ChatAnthropic {
+  if (!_model) {
+    _model = new ChatAnthropic({
+      model: MODEL_IDS.SONNET,
+      temperature: 0.9,
+      anthropicApiKey: ANTHROPIC_API_KEY,
+      maxTokens: 8192,
+      clientOptions: { timeout: 120000 },
+      callbacks: [makeLlmCacheCallback({ defaultLabel: 'orchestrator:persona-gen', model: MODEL_IDS.SONNET })],
+    });
+  }
+  return _model;
+}
+
 export async function generatePersonas(count: number = 5): Promise<Persona[]> {
-  const client = new OpenAI();
+  console.log(`${'[PersonaGen]'.magenta} Generating ${count} personas via Sonnet...`);
 
-  console.log(`${'[PersonaGen]'.magenta} Generating ${count} personas via GPT-4o...`);
+  // withStructuredOutput enforces the schema via Anthropic tool-use, so a
+  // shape miss throws and `withRetry` re-invokes (3 retries, exponential
+  // backoff). Without the retry, a single flaky structured-output call
+  // tanks the whole orchestrator run.
+  const parsed = await withRetry(() =>
+    getModel()
+      .withStructuredOutput(personaOutputSchema)
+      .invoke(
+        [
+          new SystemMessage(PERSONA_SYSTEM_PROMPT),
+          new HumanMessage(`Generate exactly ${count} personas.`),
+        ],
+        { metadata: { llmLabel: 'orchestrator:persona-gen' } },
+      ),
+  );
 
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: PERSONA_SYSTEM_PROMPT },
-      { role: 'user', content: `Generate exactly ${count} personas.` },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0.9,
-  });
-
-  const content = response.choices[0]?.message?.content;
-  if (!content) throw new Error('Empty response from persona generation');
-
-  const parsed = JSON.parse(content) as { personas: Persona[] };
   if (!Array.isArray(parsed.personas) || parsed.personas.length !== count) {
     throw new Error(`Expected ${count} personas, got ${parsed.personas?.length ?? 0}`);
   }

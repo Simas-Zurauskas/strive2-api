@@ -22,7 +22,11 @@ import asyncHandler from 'express-async-handler';
  *                   $ref: '#/components/schemas/AuthorisedUser'
  */
 export const getMeController = asyncHandler(async (req, res) => {
-  const user = await UserModel.findById(req.userId).lean();
+  // Hydrated doc (no `.lean()`) so the schema's toJSON transform runs and
+  // strips sensitive fields: password, tokens, tokenVersion, and Stripe
+  // customer/subscription ids. With `.lean()` those leak through verbatim.
+  // Perf hit vs. lean is negligible on a single-doc find.
+  const user = await UserModel.findById(req.userId);
 
   if (!user) {
     res.status(401);

@@ -25,6 +25,16 @@ interface JobStatus {
 const POLL_INTERVAL_MS = 2_000;
 const POLL_TIMEOUT_MS = 300_000; // 5 minutes
 export const LESSON_POLL_TIMEOUT_MS = 600_000; // 10 minutes — lesson generation is slow
+/**
+ * 10 minutes. Quiz + structure generation both invoke `withRetry` (3 retries,
+ * exponential backoff) around a Sonnet call with a 120s per-attempt timeout,
+ * so worst-case server time is ~4×120s + backoff ≈ 8 min. Bump to 10 min so
+ * the client doesn't time out mid-retry — a real failure now surfaces as
+ * `Job failed:` with the actual error, not `timed out after 300s`.
+ * Structure generation additionally does a second full generation pass via
+ * Phase 4's cap-retry, so the headroom is genuinely needed.
+ */
+export const WITH_RETRY_POLL_TIMEOUT_MS = 600_000;
 
 export function createApiClient({ baseUrl, token }: { baseUrl: string; token: string }) {
   const headers = {

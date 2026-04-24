@@ -1,6 +1,20 @@
 import { compare } from 'bcryptjs';
 import mongoose, { HydratedDocument, Model, Schema } from 'mongoose';
 import { AUTH_PROVIDERS, AuthProvider } from '@lib/constants';
+import {
+  FREE_PERIOD_DAYS,
+  PLAN_KEYS,
+  PLANS,
+  PlanKey,
+  SUBSCRIPTION_STATUSES,
+  SubscriptionStatus,
+} from '@lib/creditPricing';
+
+const buildFreshFreePeriod = (): { periodStart: Date; periodEnd: Date } => {
+  const periodStart = new Date();
+  const periodEnd = new Date(periodStart.getTime() + FREE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+  return { periodStart, periodEnd };
+};
 
 export { AuthProvider } from '@lib/constants';
 
@@ -18,6 +32,30 @@ export interface UserInput {
   }[];
 }
 
+export interface IUserSubscription {
+  plan: PlanKey;
+  status: SubscriptionStatus;
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  currentPeriodStart?: Date;
+  currentPeriodEnd?: Date;
+  cancelAtPeriodEnd: boolean;
+  /** Set when a downgrade is scheduled to apply at next invoice.paid. */
+  pendingPlan?: PlanKey;
+}
+
+export interface IUserCredits {
+  /** Credits from this period's plan allowance. Forfeits at period reset. */
+  allowanceBalance: number;
+  /** How much was granted at period start (for UI display of "X of Y used"). */
+  allowanceGranted: number;
+  periodStart: Date;
+  periodEnd: Date;
+  /** Credits from top-up purchases or admin grants. Never expire. */
+  bonusBalance: number;
+}
+
 /** Persisted user fields (includes system-managed state). */
 export interface IUser extends UserInput {
   emailVerified: boolean;
@@ -27,6 +65,8 @@ export interface IUser extends UserInput {
   passwordResetExpiry?: Date;
   tokenVersion: number;
   favoriteCourseIds: mongoose.Types.ObjectId[];
+  subscription: IUserSubscription;
+  credits: IUserCredits;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -82,6 +122,50 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
       required: true,
       default: [],
     },
+    subscription: {
+      type: new Schema<IUserSubscription>(
+        {
+          plan: { type: String, enum: [...PLAN_KEYS], required: true, default: 'free' },
+          status: { type: String, enum: [...SUBSCRIPTION_STATUSES], required: true, default: 'active' },
+          stripeCustomerId: { type: String },
+          stripeSubscriptionId: { type: String },
+          stripePriceId: { type: String },
+          currentPeriodStart: { type: Date },
+          currentPeriodEnd: { type: Date },
+          cancelAtPeriodEnd: { type: Boolean, required: true, default: false },
+          pendingPlan: { type: String, enum: [...PLAN_KEYS] },
+        },
+        { _id: false },
+      ),
+      required: true,
+      default: () => ({ plan: 'free', status: 'active', cancelAtPeriodEnd: false }),
+    },
+    credits: {
+      type: new Schema<IUserCredits>(
+        {
+          allowanceBalance: { type: Number, required: true, default: 0, min: 0 },
+          allowanceGranted: { type: Number, required: true, default: 0, min: 0 },
+          periodStart: { type: Date, required: true, default: () => new Date() },
+          periodEnd: { type: Date, required: true, default: () => new Date() },
+          bonusBalance: { type: Number, required: true, default: 0, min: 0 },
+        },
+        { _id: false },
+      ),
+      required: true,
+      // New users get a full Free-plan allowance with a fresh 30-day window.
+      // Migration script does the same for legacy users. Real spend is
+      // debited from this subdoc by `debitActualSpend` on job completion.
+      default: () => {
+        const { periodStart, periodEnd } = buildFreshFreePeriod();
+        return {
+          allowanceBalance: PLANS.free.monthlyAllowance,
+          allowanceGranted: PLANS.free.monthlyAllowance,
+          periodStart,
+          periodEnd,
+          bonusBalance: 0,
+        };
+      },
+    },
   },
   {
     timestamps: true,
@@ -95,12 +179,25 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
         // tokenVersion is a server-side session-invalidation counter;
         // clients don't need it and leaking it exposes revocation state.
         delete ret.tokenVersion;
+        // Stripe IDs stay server-side. The UI gets its subscription view
+        // either from a billing summary endpoint or Stripe Customer Portal.
+        const sub = ret.subscription as Record<string, unknown> | undefined;
+        if (sub) {
+          delete sub.stripeCustomerId;
+          delete sub.stripeSubscriptionId;
+          delete sub.stripePriceId;
+        }
         delete ret.__v;
         return ret;
       },
     },
   },
 );
+
+// Phase 3 webhook handlers look up users by Stripe IDs; sparse unique index
+// rejects accidental duplicates (one Stripe customer = one Strive user).
+schema.index({ 'subscription.stripeCustomerId': 1 }, { unique: true, sparse: true });
+schema.index({ 'subscription.stripeSubscriptionId': 1 }, { unique: true, sparse: true });
 
 // ── Methods ────────────────────────────────────────────────
 

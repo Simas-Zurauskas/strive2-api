@@ -1,6 +1,8 @@
 import pLimit from 'p-limit';
 import { JINA_API_KEY } from '@conf/env';
 import { bumpLinksFetchFailure } from '@lib/metrics';
+import { priceLlmUsage } from '@lib/pricing';
+import { recordUsage } from '@services/usageService';
 import { FetchedCandidate, SearchCandidate } from './schemas';
 
 const JINA_READER_BASE = 'https://r.jina.ai/';
@@ -73,6 +75,38 @@ const fetchOne = async (candidate: SearchCandidate): Promise<FetchedCandidate | 
     if (!trimmed) {
       bumpLinksFetchFailure('empty_body');
       return null;
+    }
+
+    // Only the paid tier is billed; the free tier (JINA_API_KEY unset) stays
+    // free and does not produce a ledger row. Jina Reader bills per token
+    // returned at $0.02/MTok: prefer the `x-total-tokens` response header
+    // (authoritative count from the provider) and fall back to chars/4 — the
+    // standard tokens≈chars/4 approximation — when the header is absent so
+    // we never silently record cost=0 for a real billed call.
+    if (JINA_API_KEY) {
+      const headerTokens = Number(res.headers.get('x-total-tokens'));
+      const tokens = Number.isFinite(headerTokens) && headerTokens > 0
+        ? Math.round(headerTokens)
+        : Math.ceil(trimmed.length / 4);
+      recordUsage({
+        service: 'jina',
+        action: 'reader:fetch',
+        costMicroCents: priceLlmUsage({
+          model: 'jina_reader_paid',
+          uncached: tokens,
+          cacheRead: 0,
+          cacheCreation5m: 0,
+          cacheCreation1h: 0,
+          output: 0,
+        }),
+        metadata: {
+          url: candidate.url,
+          hostname: candidate.hostname,
+          bytes: trimmed.length,
+          tokens,
+          tokenSource: Number.isFinite(headerTokens) && headerTokens > 0 ? 'header' : 'chars-approx',
+        },
+      });
     }
 
     return {

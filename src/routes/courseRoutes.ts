@@ -14,7 +14,6 @@ import {
   getLessonContentController,
   getLessonContentStatsController,
   executeCodeController,
-  streamLessonContentController,
   chatStreamController,
   getChatHistoryController,
   upsertLessonProgressController,
@@ -37,13 +36,18 @@ import {
 } from '@controlers/course';
 import { ENVIRONMENT } from '@conf/env';
 import { protect, requireVerified } from '@middleware/authMiddleware';
+import { usageContextMiddleware } from '@middleware/usageContext';
+import { requireCredits } from '@middleware/requireCredits';
 import { validateObjectId } from '@middleware/validateObjectId';
 
 const router = Router();
 
 // Every course route requires auth + a verified email. Applied router-wide
 // so new routes inherit the gate automatically; no per-route protect chain.
-router.use(protect, requireVerified);
+// `usageContextMiddleware` runs last so `req.userId` is already populated
+// and the AsyncLocalStorage scope tags every paid action that this
+// request's controller triggers (chat stream, clarify, code exec, …).
+router.use(protect, requireVerified, usageContextMiddleware);
 
 // Static paths (must be before /:id to avoid route conflict)
 router.get('/job/:jobId', validateObjectId('jobId'), getJobStatusController);
@@ -71,13 +75,17 @@ router.get('/:courseId/edit-impact', getEditImpactController);
 router.post('/:courseId/chat', chatStreamController);
 router.get('/:courseId/chat/history', getChatHistoryController);
 
-// AI generation (scoped to a course)
-router.post('/:courseId/clarify', clarifyCourseController);
-router.post('/:courseId/generate-structure', generateStructureController);
-router.post('/:courseId/depth-previews', generateDepthPreviewsController);
-router.post('/:courseId/refine-structure', refineStructureController);
-router.post('/:courseId/generate-lesson', generateLessonController);
-router.post('/:courseId/stream-lesson', streamLessonContentController);
+// AI generation (scoped to a course).
+//
+// Credit gating: requireCredits() is a single "balance ≥ 1 credit" gate.
+// Every paid action the user starts is then charged its real provider cost
+// on success via `debitActualSpend` inside jobRunner. Every job type flows
+// through it — clarify / depth-previews are no longer free.
+router.post('/:courseId/clarify', requireCredits(), clarifyCourseController);
+router.post('/:courseId/generate-structure', requireCredits(), generateStructureController);
+router.post('/:courseId/depth-previews', requireCredits(), generateDepthPreviewsController);
+router.post('/:courseId/refine-structure', requireCredits(), refineStructureController);
+router.post('/:courseId/generate-lesson', requireCredits(), generateLessonController);
 router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', getLessonContentController);
 
 // Progress tracking
@@ -86,7 +94,11 @@ router.post('/:courseId/progress/:moduleIndex/:lessonIndex', upsertLessonProgres
 router.get('/:courseId/generated-lessons', getGeneratedLessonsController);
 
 // Module quizzes
-router.post('/:courseId/module-quiz/:moduleIndex/generate', generateModuleQuizController);
+router.post(
+  '/:courseId/module-quiz/:moduleIndex/generate',
+  requireCredits(),
+  generateModuleQuizController,
+);
 router.get('/:courseId/module-quiz/:moduleIndex', getModuleQuizContentController);
 router.post('/:courseId/module-quiz/:moduleIndex/submit', submitQuizAttemptController);
 router.get('/:courseId/module-quiz/:moduleIndex/progress', getModuleQuizProgressController);

@@ -1,17 +1,23 @@
+import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { getClarifyModel, getStructureModel } from '@lib/langchain';
+import { HumanMessage } from '@langchain/core/messages';
+import { getStructureModel, getUtilityModel, MODEL_IDS } from '@lib/langchain';
+import { cachedSystemMessage } from '@lib/ai/cacheControl';
+import { logCacheUsage, usageFromAnthropic } from '@lib/ai/cacheLogger';
 import { withRetry } from '@lib/retry';
 import { jsonish } from '@lib/zodHelpers';
-import { COURSE_DEPTHS, COURSE_DOMAINS, CourseDepth, CourseDomain } from '@lib/constants';
+import { ANTHROPIC_API_KEY } from '@conf/env';
+import { COURSE_DEPTHS, COURSE_DOMAINS, CourseDepth, CourseDomain, QUESTION_TYPES } from '@lib/constants';
 import { sanitizePromptInput } from '@lib/sanitize';
-import { bumpClarifyRefinementRetry, bumpStructureCapExceededRetry, bumpStructureCapViolationUnresolved } from '@lib/metrics';
+import { bumpClarifyRefinementRetry, bumpStructureCapExceeded } from '@lib/metrics';
 import { detectSoftnessHint, getLessonCountHint, SoftnessHint } from './softness';
 import {
   clarifyOutputSchema,
   ClarifyOutput,
   CLARIFY_TEXT_QUESTION_REFINEMENT_MARKER,
 } from './clarifyValidation';
+
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // Re-export from the validation module so existing importers (jobRunner.ts)
 // continue working without a mechanical import refactor.
@@ -47,14 +53,89 @@ Question types — pick the best type for each question:
 
 Each question must have a unique id (q1, q2, q3, etc).`;
 
+// Tool schema for the clarify generation. Mirrors `clarifyOutputSchema` so
+// the tool_use payload passes Zod validation after parsing. Hand-written
+// (not derived via `z.toJSONSchema`) so the Anthropic tool definition stays
+// flat and predictable — no anyOf noise from `jsonish()` wrappers at the
+// tool root, which has been correlated with empty tool_use emissions
+// elsewhere in the codebase (see zodHelpers.ts:jsonish guidance).
+const CLARIFY_TOOL: Anthropic.Messages.Tool = {
+  name: 'clarify_output',
+  description:
+    "Return the generated course name and the learner's clarifying questions.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      courseName: { type: 'string', description: '2-6 word course title.' },
+      questions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Unique id (q1, q2, q3, …).' },
+            question: { type: 'string' },
+            type: { type: 'string', enum: [...QUESTION_TYPES] },
+            options: {
+              anyOf: [
+                { type: 'array', items: { type: 'string' } },
+                { type: 'null' },
+              ],
+              description:
+                'Array of option strings for multiple_choice/multiple_select; null for text.',
+            },
+          },
+          required: ['id', 'question', 'type', 'options'],
+        },
+      },
+    },
+    required: ['courseName', 'questions'],
+  },
+};
+
 export const clarifyCourse = async (params: { goal: string }): Promise<ClarifyOutput> => {
   const goal = sanitizePromptInput(params.goal);
-  const model = getClarifyModel();
-  const structuredModel = model.withStructuredOutput(clarifyOutputSchema);
 
+  // Raw Anthropic SDK (not LangChain `.withStructuredOutput`) so we keep the
+  // explicit tool_use contract and targeted cache breakpoint.
+  //
+  // Model: Haiku, switched from Sonnet as part of the 2026-04-21 cost audit.
+  // Clarify is structured tool_use with a constrained output (3-6 questions
+  // of known types) — Haiku handles this reliably at temperature 0.7, and the
+  // withRetry wrapper catches the rare parse miss. Prompt caching is a no-op
+  // here (system + tools ~1300 tok is below Haiku's 2048-tok minimum), so
+  // the cache_control annotation is retained only for defensive consistency
+  // with the cacheControl helper contract — no effective prefix hit on Haiku.
   const response = await withRetry(async () => {
     try {
-      return await structuredModel.invoke([new SystemMessage(CLARIFY_SYSTEM_PROMPT), new HumanMessage(goal)]);
+      const result = await anthropic.messages.create({
+        model: MODEL_IDS.HAIKU,
+        max_tokens: 4096,
+        temperature: 0.7,
+        system: [
+          {
+            type: 'text',
+            text: CLARIFY_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [{ role: 'user', content: goal }],
+        tools: [CLARIFY_TOOL],
+        tool_choice: { type: 'tool', name: CLARIFY_TOOL.name },
+      });
+
+      logCacheUsage({ label: 'clarify:questions', usage: usageFromAnthropic(result), model: MODEL_IDS.HAIKU });
+
+      const toolUse = result.content.find(
+        (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use',
+      );
+      if (!toolUse) {
+        throw new Error('clarify: model did not emit a tool_use block');
+      }
+
+      // Zod preserves the `.refine()` contract (≥1 text question). On failure
+      // the thrown ZodError carries CLARIFY_TEXT_QUESTION_REFINEMENT_MARKER so
+      // the catch below bumps the refinement-retry counter.
+      return clarifyOutputSchema.parse(toolUse.input);
     } catch (e) {
       // Detect refinement-triggered retries separately from generic JSON-parse
       // failures so `/metrics` exposes a clean "how often does the LLM ignore
@@ -145,7 +226,11 @@ interface DepthPreviewsInput {
 export const generateDepthPreviews = async (params: DepthPreviewsInput): Promise<DepthPreviewsOutput> => {
   const goal = sanitizePromptInput(params.goal);
   const softness = detectSoftnessHint({ answers: params.answers });
-  const model = getClarifyModel();
+  // Depth previews are 3 short outline previews (Bloom-labelled bullets) —
+  // structured extraction, low reasoning load. Downshifted Sonnet → Haiku
+  // (5× cheaper per token) as part of the 2026-04-21 cost audit; retry
+  // covers the occasional parse miss.
+  const model = getUtilityModel();
   const structuredModel = model.withStructuredOutput(depthPreviewsOutputSchema);
 
   const humanMessage = `Learning goal: ${goal}
@@ -158,7 +243,10 @@ ${formatSoftnessSection(softness)}
 Generate personalized depth previews for each tier.`;
 
   const response = await withRetry(() =>
-    structuredModel.invoke([new SystemMessage(DEPTH_PREVIEWS_SYSTEM_PROMPT), new HumanMessage(humanMessage)]),
+    structuredModel.invoke(
+      [cachedSystemMessage({ text: DEPTH_PREVIEWS_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
+      { metadata: { llmLabel: 'clarify:depth-previews' } },
+    ),
   );
 
   return response;
@@ -201,8 +289,8 @@ type StructureOutput = z.infer<typeof structureOutputSchema>;
 // being updated.
 
 const STRUCTURE_DOMAIN_GUIDANCE: Record<CourseDomain, string> = {
-  programming: 'software engineering, systems, web, devops, data engineering, security, any course whose primary content is source code.',
-  stem: 'mathematics, physics, chemistry, biology, statistics, engineering, economics, quantitative finance — disciplines whose content lives on equations, formulas, and quantitative reasoning. Choose this even when some coding is involved, as long as math is the heart of the subject.',
+  programming: 'software engineering, systems, web, devops, data engineering, security, data science with code (pandas, NumPy, scikit-learn, PyTorch, TensorFlow), MLOps, computational X with code — any course whose primary activity is WRITING AND READING SOURCE CODE. Choose this even when the underlying subject is math-heavy (statistics, ML, physics simulations) as long as the learner\'s day-to-day is in code. "Linear regression in scikit-learn" is programming; "Linear regression: least-squares derivation" is stem.',
+  stem: 'mathematics, physics, chemistry, biology, statistics, engineering, economics, quantitative finance — disciplines whose content lives on equations, formulas, and quantitative reasoning. Choose this ONLY when the learner\'s primary activity is thinking with symbols and numbers — solving problems on paper, deriving, proving, computing by hand or with a calculator. If the learner will spend most of their time WRITING CODE (even to apply math), prefer `programming`.',
   humanities: 'history, philosophy, literature, law, social sciences, religion.',
   language: 'natural-language learning (Spanish, Mandarin, ASL, etc.) — acquiring a language as a non-native speaker. NOT communication skills in the learner\'s own language (that is life-skills).',
   creative: 'visual art, music, writing craft, design, photography, performance — production-oriented courses where the learner MAKES something in a medium.',
@@ -226,7 +314,22 @@ Next, classify the course into ONE primary domain (the \`domain\` field). This c
 ${STRUCTURE_DOMAIN_BULLETS}
 Pick the SINGLE best fit. When a course spans domains (e.g., computational physics), pick the domain that best describes the lesson-level content the learner will read.
 
-Classify by the SUBJECT MATTER the learner will actually study, not by the action verb in their goal. Pedagogy-of-X keeps X's domain: "teaching creative writing to high schoolers" is \`creative\` (the subject IS creative writing); "learning to teach biology" is \`stem\` (the subject is biology). "Blockchain with Solidity" is \`programming\` (code-heavy); "the math behind zero-knowledge proofs" is \`stem\`. "Business writing" is \`business\` (the aim is business communication); "writing short fiction" is \`creative\`. Before defaulting to \`other\`, re-read the \`business\`, \`practical\`, and \`life-skills\` scopes — most non-STEM/non-code courses fit one of those three.
+Classify by the SUBJECT MATTER the learner will actually study, not by the action verb in their goal. Pedagogy-of-X keeps X's domain: "teaching creative writing to high schoolers" is \`creative\` (the subject IS creative writing); "learning to teach biology" is \`stem\` (the subject is biology).
+
+Programming-vs-stem disambiguator — use the PRIMARY-ACTIVITY test:
+- If the learner will spend the majority of their study time WRITING CODE — implementing algorithms, building pipelines, training models, fitting APIs — tag \`programming\` regardless of the mathematical content.
+- If the learner will spend the majority of their study time REASONING WITH SYMBOLS — deriving, proving, solving problems on paper, working through formulas — tag \`stem\`.
+- Worked examples:
+  - "Data science with pandas/SQL/scikit-learn, building classifiers in Python" → \`programming\`.
+  - "Deep learning from scratch: backprop math, optimization theory, without code" → \`stem\`.
+  - "MLOps: deploying PyTorch models with Docker + FastAPI" → \`programming\`.
+  - "Statistical mechanics: partition functions and ensembles" → \`stem\`.
+  - "Computational physics: simulating the n-body problem in NumPy" → \`programming\` (primary activity is code).
+  - "Bioinformatics with Biopython" → \`programming\` (code-first application of bio).
+  - "Molecular biology: central dogma, transcription regulation" → \`stem\` (no code).
+  - "Blockchain with Solidity" is \`programming\` (code-heavy); "the math behind zero-knowledge proofs" is \`stem\`.
+
+"Business writing" is \`business\` (the aim is business communication); "writing short fiction" is \`creative\`. Before defaulting to \`other\`, re-read the \`business\`, \`practical\`, and \`life-skills\` scopes — most non-STEM/non-code courses fit one of those three.
 
 CRITICAL — Before generating any modules, you MUST fill in the reasoning fields. Think carefully:
 
@@ -277,11 +380,6 @@ interface StructureInput {
   depth: CourseDepth;
 }
 
-/** How much over the cap we tolerate before bouncing. +2 accepts minor LLM
- *  rounding (e.g. cap 14, generated 15) without a full regeneration round
- *  trip. Anything more than 2 over is a meaningful scope violation. */
-const STRUCTURE_CAP_TOLERANCE = 2;
-
 /** Count total lessons across all modules in a generated structure. */
 const totalLessonCount = (structure: StructureOutput): number =>
   structure.modules.reduce((sum, m) => sum + m.lessons.length, 0);
@@ -294,7 +392,7 @@ export const generateCourseStructure = async (params: StructureInput): Promise<S
   const model = getStructureModel();
   const structuredModel = model.withStructuredOutput(structureOutputSchema);
 
-  const baseHumanMessage = `Learning goal: ${goal}
+  const humanMessage = `Learning goal: ${goal}
 
 Learner's answers to clarifying questions:
 ${formatAnswers(answers)}
@@ -307,54 +405,30 @@ Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules).
 
 Fill in the reasoning fields first, then design the course structure.`;
 
-  // First attempt — the prompt carries the cap guidance already.
-  const first = await withRetry(() =>
-    structuredModel.invoke([new SystemMessage(STRUCTURE_SYSTEM_PROMPT), new HumanMessage(baseHumanMessage)]),
+  const response = await withRetry(() =>
+    structuredModel.invoke(
+      [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
+      { metadata: { llmLabel: 'structure:generate' } },
+    ),
   );
 
-  const firstCount = totalLessonCount(first);
-  if (firstCount <= capMax + STRUCTURE_CAP_TOLERANCE) {
-    return first;
-  }
-
-  // The LLM ignored the cap. Retry exactly once with an explicit corrective
-  // message. The assessment's 3/5 persona scope-bloat pattern was partly
-  // because the cap was advisory — adding a code-enforced regenerate with a
-  // concrete "you produced N; trim to ≤ capMax" instruction gives the LLM a
-  // chance to re-plan rather than silently shipping an oversized course.
-  bumpStructureCapExceededRetry();
-  console.warn(
-    `[generateCourseStructure] First attempt exceeded cap: produced ${firstCount} lessons vs cap ${capMax}. Retrying with corrective message.`.yellow,
-  );
-
-  const correctiveMessage = `${baseHumanMessage}
-
---- PREVIOUS ATTEMPT EXCEEDED THE CAP ---
-Your previous attempt produced ${firstCount} lessons, which exceeds the cap of ${capMax}. Regenerate the structure trimmed to at most ${capMax} lessons total (sum across all modules). Preserve the Bloom progression and the learner's focus areas — cut the lowest-leverage lessons, merge closely-related ones, and shorten any modules that were padded. Explicitly name what you cut or merged in \`scopeDecisions\`.`;
-
-  const second = await withRetry(() =>
-    structuredModel.invoke([new SystemMessage(STRUCTURE_SYSTEM_PROMPT), new HumanMessage(correctiveMessage)]),
-  );
-
-  const secondCount = totalLessonCount(second);
-  if (secondCount > capMax + STRUCTURE_CAP_TOLERANCE) {
-    // Second attempt also failed — bump the pathological counter and surface
-    // a descriptive error. Do NOT silently truncate the result: truncation
-    // would violate the Bloom progression (the structure assumes all lessons
-    // build sequentially).
-    bumpStructureCapViolationUnresolved();
-    throw Object.assign(
-      new Error(
-        `Structure cap violation: generated ${secondCount} lessons after retry, cap is ${capMax} (depth=${depth}, soft=${softness.isSoft}).`,
-      ),
-      { statusCode: 500 },
+  // Observation-only post-check. The cap is a pedagogical suggestion the
+  // prompt carries — not a correctness invariant. Previous iteration of
+  // this function tried a corrective-regeneration + hard-throw, but that
+  // cost ~2 min of Sonnet time and failed entire courses on misses. A
+  // 32-lesson comprehensive course is verbose but usable; a failed Step 6
+  // is not. Per user directive: "range is only a suggestion, should not
+  // be a hard rule". We warn + emit a counter so dashboards can observe
+  // the LLM's miss rate, but we always return what the LLM produced.
+  const lessonCount = totalLessonCount(response);
+  if (lessonCount > capMax) {
+    bumpStructureCapExceeded();
+    console.warn(
+      `[generateCourseStructure] ⚠ Cap exceeded: ${lessonCount} lessons vs cap ${capMax} (depth=${depth}, soft=${softness.isSoft}). Accepting the result — cap is a suggestion, not a hard rule.`.yellow,
     );
   }
 
-  console.log(
-    `[generateCourseStructure] Retry succeeded: produced ${secondCount} lessons within cap ${capMax}.`.green,
-  );
-  return second;
+  return response;
 };
 
 // ── Refine course structure ─────────────────────────────
@@ -415,7 +489,10 @@ Rules for refinement:
 - The result should feel like a thoughtful revision, not a complete regeneration.`;
 
   const response = await withRetry(() =>
-    structuredModel.invoke([new SystemMessage(STRUCTURE_SYSTEM_PROMPT), new HumanMessage(humanMessage)]),
+    structuredModel.invoke(
+      [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
+      { metadata: { llmLabel: 'structure:refine' } },
+    ),
   );
 
   return response;

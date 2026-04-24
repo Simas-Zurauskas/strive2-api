@@ -7,6 +7,7 @@ import { jsonish } from '@lib/zodHelpers';
 import { INSIGHT_KINDS, INSIGHT_MAX_PER_LESSON, INSIGHT_MIN_PER_LESSON } from '@lib/insightConstants';
 import { GeneratedInsight } from '@services/insightContentService';
 import { LessonState } from '../state';
+import { validateInsightCandidate } from './insightGuardrails';
 
 // ── Schema & prompt ────────────────────────────────────
 
@@ -15,7 +16,7 @@ const insightCandidateSchema = z.object({
   kind: z.enum(INSIGHT_KINDS).describe("'qa' for a question+answer card, 'cloze' for a sentence with one {{blank}}"),
   prompt: z.string().min(5).describe('For qa: the question text (target ≤ 400 chars). For cloze: the sentence with exactly one {{blank}} placeholder.'),
   answer: z.string().min(1).describe('For qa: a terse answer (5-15 words ideal, target ≤ 200 chars). For cloze: the word or short phrase that fills the blank.'),
-  conceptTags: z.array(z.string()).min(1).describe('1-4 short lowercase tags representing the concepts covered (e.g. ["spaced-repetition", "memory"])'),
+  conceptTags: z.array(z.string()).optional().default([]).describe('1-4 short lowercase tags representing the concepts covered (e.g. ["spaced-repetition", "memory"]). REQUIRED on every card — omit only if no meaningful tag applies.'),
 });
 
 const insightsOutputSchema = z.object({
@@ -37,19 +38,28 @@ An insight card is a single retrieval-practice item — a question (or cloze sen
 
 - **Atomic.** Exactly one idea per card. No compound questions.
 - **Grounded.** The claim must be verifiable from the lesson content. Never introduce facts not in the source.
-- **Paraphrased.** Do NOT copy lesson wording verbatim. Rephrase so that a learner who read the lesson must genuinely retrieve the answer from memory rather than pattern-match.
+- **Paraphrased stem.** The stem (the question or cloze sentence framing the blank) must rephrase lesson wording so the learner genuinely retrieves the answer from memory rather than pattern-matches. Do NOT copy a whole lesson sentence into the stem.
+- **Canonical grounded in lesson wording.** The answer (QA answer or cloze deletion target) must be a term or phrase that appears in the source lesson — verbatim, or as a trivial inflection (case, plural, tense). Do NOT synthesize your own terminology when the lesson already has a term for the concept. If the lesson uses "harmonic rhythm" for a concept, the canonical is "harmonic rhythm" — not "harmonic turbulence." If no single lesson-supported term cleanly fits a cloze deletion, switch the card to a **qa** and let the answer paraphrase while using lesson-rooted keywords for the core concepts. Grading fairness depends on this: the typed-recall grader has no access to the lesson and can only compare the canonical to the learner's answer.
 - **Specific over general.** "Why does X outperform Y on Z?" beats "What is X?".
 - **Short.** Answers ideally 5-15 words. Cloze blanks target a single domain-specific noun or short phrase — never generic connectives like "the" or "and".
 - **Distinct.** Each card must test a different concept. Do not restate the same point with different wording.
 - **Skip filler.** If a lesson section is a setup paragraph or a code example without a testable claim, do not generate a card for it.
+- **Cloze answer discipline.** The word/phrase that fills {{blank}} must be a SINGLE atomic term:
+  - 1-3 words maximum (3 only for multi-word technical terms like "red-black tree", "stochastic gradient descent", "XOR mutability").
+  - No disjunctions: NEVER " or ", " / ", "X | Y", parentheses around alternatives ("(X or Y)"), or comma-separated lists.
+  - No code expressions: NEVER a function call (\`foo.bar()\`), a chained method (\`x.strip("_")\`), or an operator expression. If the concept is a code pattern, make it a **qa** card instead.
+  - No quotes and no backticks. Hyphens, CamelCase, and inline LaTeX (\`$\\Delta G$\`) are allowed.
+  - The stem must give enough context that exactly ONE canonical answer fits. If a reader could plausibly answer {{blank}} with two different single-token nouns ("props", "interface", "shape" all fitting a React context), the card is too ambiguous — rewrite the stem or drop the card.
+- **Cloze single-blank rule.** Exactly ONE {{blank}} per cloze. Never two blanks in one sentence — "{{blank}} and {{blank}} are marker traits" is forbidden; make two cards, one per concept.
+- **QA answer discipline.** QA answers ≤ 15 words. If the answer contains " and " linking two distinct named concepts (e.g., "Send and Sync"), SPLIT into two cards — one per concept.
 
 ## Quality examples
 
 Good qa card:
-{ "kind": "qa", "prompt": "Why does SM-2 suffer from 'ease hell' after many Hard ratings?", "answer": "Repeated Hard presses drive the ease factor to its 1.3 floor, after which intervals barely grow." }
+{ "kind": "qa", "prompt": "Why does SM-2 suffer from 'ease hell' after many Hard ratings?", "answer": "Repeated Hard presses drive the ease factor to its 1.3 floor, after which intervals barely grow.", "conceptTags": ["sm-2", "ease-factor"] }
 
 Good cloze card:
-{ "kind": "cloze", "prompt": "FSRS models memory with three variables: Difficulty, {{blank}}, and Retrievability.", "answer": "Stability" }
+{ "kind": "cloze", "prompt": "FSRS models memory with three variables: Difficulty, {{blank}}, and Retrievability.", "answer": "Stability", "conceptTags": ["fsrs", "memory-model"] }
 
 Bad (copies lesson verbatim, no retrieval needed):
 { "kind": "qa", "prompt": "What is spaced repetition?", "answer": "A technique where review intervals grow over time." }
@@ -81,7 +91,7 @@ const formatLessonForExtraction = (state: LessonState): string => {
 
 /** Post-filter candidates to guard against weak or duplicate items. */
 const filterCandidates = (
-  candidates: z.infer<typeof insightCandidateSchema>[],
+  candidates: z.input<typeof insightCandidateSchema>[],
 ): GeneratedInsight[] => {
   const out: GeneratedInsight[] = [];
   const seenAnswers = new Set<string>();
@@ -94,8 +104,13 @@ const filterCandidates = (
     if (!promptTrim || !answerTrim) continue;
     if (promptTrim.length < 10) continue;
 
-    // Cloze must have a {{blank}}
-    if (c.kind === 'cloze' && !/\{\{\s*blank\s*\}\}/i.test(promptTrim)) continue;
+    // Content-quality validator. Runs BEFORE dedupe so rejected candidates
+    // don't pollute the answer-map key space.
+    const validation = validateInsightCandidate(c);
+    if (!validation.valid) {
+      console.log(`[insightGeneration] drop candidate (${validation.reason})`.gray);
+      continue;
+    }
 
     // Single-word / trivial answer in qa mode is suspicious; allow short
     // cloze answers but reject qa answers that are likely too recognizable.
@@ -110,7 +125,7 @@ const filterCandidates = (
       kind: c.kind,
       prompt: promptTrim,
       answer: answerTrim,
-      conceptTags: c.conceptTags,
+      conceptTags: c.conceptTags ?? [],
       sourceBlockId: c.sourceBlockId,
     });
   }
@@ -156,10 +171,10 @@ Return ${INSIGHT_MIN_PER_LESSON}-${INSIGHT_MAX_PER_LESSON} insight cards coverin
 
     const model = getUtilityModel().withStructuredOutput(insightsOutputSchema);
     const result = await withRetry(() =>
-      model.invoke([
-        new SystemMessage(INSIGHT_SYSTEM_PROMPT),
-        new HumanMessage(humanMessage),
-      ]),
+      model.invoke(
+        [new SystemMessage(INSIGHT_SYSTEM_PROMPT), new HumanMessage(humanMessage)],
+        { metadata: { llmLabel: 'lesson:insights' } },
+      ),
     );
 
     const filtered = filterCandidates(result.insights ?? []);

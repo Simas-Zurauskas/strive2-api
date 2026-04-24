@@ -8,7 +8,7 @@ Each persona runs against its own auto-provisioned db user, so gamification, ins
 
 - API dev server running (`yarn dev` in `api/`)
 - `MONGO_URI` set in `api/.env` — the orchestrator connects directly to flip `emailVerified` on fresh test users
-- `OPENAI_API_KEY` set in `api/.env` (used for persona AI decisions and typed-recall grading)
+- `ANTHROPIC_API_KEY` set in `api/.env` (used for persona AI decisions and typed-recall grading — Claude Sonnet 4.6 for the orchestrator, Haiku 4.5 for the grader)
 
 ## Usage
 
@@ -60,7 +60,7 @@ For each AI-generated persona, the orchestrator runs the full learner journey:
 
 1. **Create Course** — submits the persona's learning goal
 2. **Clarify Questions** — triggers AI question generation, polls until complete
-3. **Answer Questions** — AI answers as the persona would (GPT-4o)
+3. **Answer Questions** — AI answers as the persona would (Claude Sonnet 4.6)
 4. **Depth Previews** — triggers depth preview generation, polls until complete
 5. **Select Depth** — AI picks a depth level as the persona (overview/comprehensive/deep_dive)
 6. **Generate Structure** — triggers course structure generation, polls until complete
@@ -69,7 +69,7 @@ For each AI-generated persona, the orchestrator runs the full learner journey:
 9. **Generate Lessons** — sequentially generates up to `--lessons` lessons via the job pipeline, fetches full content (blocks, quizzes, exercises, diagrams), and logs everything _(skipped if `--lessons 0`)_
 10. **Complete Lessons** — marks each generated lesson as completed via the progress API
 11. **Generate Module Quizzes** — for every module whose lessons were all generated in this run, triggers `POST /module-quiz/:m/generate` and fetches the quiz _(skipped unless `--quizzes`)_
-12. **Submit Quiz Attempts** — AI answers each quiz as the persona (GPT-4o, multiple-choice only) and posts to `/submit`; records score, mastery tier, question-by-question correctness, and next review date
+12. **Submit Quiz Attempts** — AI answers each quiz as the persona (Claude Sonnet 4.6, multiple-choice only) and posts to `/submit`; records score, mastery tier, question-by-question correctness, and next review date
 13. **Fetch Insight Queue** — GET `/api/insight/queue`; logs due/fresh/learned counts and lists every item the server returned _(skipped unless `--insights`)_
 14. **Review Insights** — walks every card the queue returned (due first, then fresh) and reviews each one. Mode (`tap-reveal` vs `typed-recall`) is chosen from the persona's `insightReviewStyle`. Tap-reveal runs `rateInsight` directly. Typed-recall generates a typed answer, hits `/grade`, maps the score to an Again/Hard/Good/Easy rating, and submits via `rateInsight` with `typedMatch`. Cards that fit the persona's "skip" profile get one deferral. Queue size is bounded server-side by `INSIGHT_QUEUE_DUE_LIMIT` + `INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT`.
 
@@ -143,7 +143,7 @@ debugOrchestrator/
   index.ts              — Entry point, CLI args, Mongo connect
   orchestrator.ts       — p-limit concurrency wrapper, per-persona lifecycle
   testUser.ts           — createVerifiedTestUser + deleteTestUser helpers
-  personaGenerator.ts   — GPT-4o persona generation
+  personaGenerator.ts   — Claude Sonnet 4.6 persona generation
   courseFlow.ts         — 14-step pipeline + AI-as-persona functions
   apiClient.ts          — HTTP client (fetch, job polling, SSE, auth helpers)
   markdownRecorder.ts   — Per-persona markdown report builder

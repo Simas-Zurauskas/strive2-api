@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { AWS_S3_BUCKET, AWS_S3_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from '@conf/env';
 
@@ -34,6 +34,27 @@ export const getPresignedUrl = async ({ key, expiresIn = SEVEN_DAYS }: { key: st
     Bucket: AWS_S3_BUCKET,
     Key: key,
   }), { expiresIn });
+};
+
+/**
+ * True when an object exists at `key`. Used by content-addressed dedup
+ * paths (e.g. hero-image hash cache) to short-circuit expensive generation
+ * calls when a previous run already produced an identical artefact.
+ *
+ * Propagates non-404 errors so auth / bucket misconfigurations surface
+ * instead of silently falling through to the paid regeneration path.
+ */
+export const objectExists = async ({ key }: { key: string }): Promise<boolean> => {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: AWS_S3_BUCKET, Key: key }));
+    return true;
+  } catch (e: unknown) {
+    const meta = e as { $metadata?: { httpStatusCode?: number }; name?: string } | undefined;
+    if (meta?.$metadata?.httpStatusCode === 404 || meta?.name === 'NotFound' || meta?.name === 'NoSuchKey') {
+      return false;
+    }
+    throw e;
+  }
 };
 
 /**

@@ -1,6 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import UserModel, { AuthProvider } from '@models/UserModel';
 import CourseModel from '@models/CourseModel';
+import CreditLedgerModel from '@models/CreditLedgerModel';
 import JobModel from '@models/JobModel';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
@@ -8,6 +9,9 @@ import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import UserInsightProgressModel from '@models/UserInsightProgressModel';
 import UserGamificationModel from '@models/UserGamificationModel';
 import { cleanupCourseContent } from '@services/courseCleanupService';
+import { recordAccountDeletion } from '@services/abuseLogService';
+import { cancelAllSubscriptionsForCustomer } from '@services/stripeService';
+import { bgError } from '@lib/bg';
 import { deleteAccountSchema } from './validation';
 
 /**
@@ -95,6 +99,47 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
     ),
   ]);
   await CourseModel.deleteMany({ userId: user._id });
+
+  // Cancel ALL active Stripe subscriptions on this customer so the user
+  // isn't billed next period. We list-and-cancel rather than relying on
+  // the single id we cached in DB — historical drift or manual Stripe
+  // tinkering can leave stragglers, and one orphan that keeps charging a
+  // deleted user is the worst possible regression.
+  //
+  // Done BEFORE the User row is deleted so the webhook each cancel fires
+  // (customer.subscription.deleted) can still find the user by
+  // stripeSubscriptionId/stripeCustomerId and apply its state transition.
+  // Failure here is logged but does not block deletion — the user's right
+  // to erasure takes priority; residual Stripe cleanup falls to admin.
+  const customerId = user.subscription?.stripeCustomerId;
+  if (customerId) {
+    try {
+      await cancelAllSubscriptionsForCustomer({ customerId });
+    } catch (err) {
+      bgError('stripe.cancelOnAccountDelete')(err);
+    }
+  }
+
+  // Upsert abuse-log BEFORE deleting the ledger, so the lifetime-credits
+  // aggregation can still read the soon-to-be-deleted rows. Failure here
+  // must not block deletion — the account drop is the user's primary
+  // right-to-erasure request. Log + continue on error.
+  try {
+    await recordAccountDeletion({ email: user.email, userId: user._id });
+  } catch (err) {
+    bgError('abuseLog.recordAccountDeletion')(err);
+  }
+
+  // Drop the credit ledger rows after the abuse-log snapshot is taken.
+  // We keep zero post-deletion bookkeeping:
+  //   - Lifetime totals needed for future abuse detection live in AbuseLog.
+  //   - Financial reconciliation can always be reconstructed from Stripe
+  //     (stripeEventId is the authoritative audit trail).
+  //   - Under GDPR this is the cleaner answer — no orphan rows hanging
+  //     around the system linked to a deleted user.
+  await CreditLedgerModel.deleteMany({ userId: user._id })
+    .catch(bgError('creditLedger.deleteOnAccountDelete'));
+
   await UserModel.findByIdAndDelete(userId);
 
   console.log(`[API] Account deleted: ${userId}`.green);

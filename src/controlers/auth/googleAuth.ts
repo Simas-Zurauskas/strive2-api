@@ -4,6 +4,8 @@ import { AuthProvider } from '@lib/constants';
 import asyncHandler from 'express-async-handler';
 import { OAuth2Client } from 'google-auth-library';
 import { generateAuthToken } from '@lib/auth';
+import { FREE_PERIOD_DAYS } from '@lib/creditPricing';
+import { resolveSignupAllowance } from '@services/abuseLogService';
 import { googleAuthSchema } from './validation';
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -104,6 +106,29 @@ export const googleAuthController = asyncHandler(async (req, res) => {
     );
   }
 
+  // Brand-new user (account didn't exist before this request) → abuse-log
+  // check gates the free-tier grant. Existing accounts pass through
+  // unchanged; their credit state (whatever it currently is) is preserved.
+  // Google OAuth never needs an email-verification step, so we also populate
+  // the credits period on insert since the Mongoose default would otherwise
+  // be shadowed by $setOnInsert conflict resolution.
+  const onInsertCredits = existing
+    ? {}
+    : await (async () => {
+      const { allowanceBalance, allowanceGranted } = await resolveSignupAllowance(email);
+      const periodStart = new Date();
+      const periodEnd = new Date(periodStart.getTime() + FREE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+      return {
+        credits: {
+          allowanceBalance,
+          allowanceGranted,
+          periodStart,
+          periodEnd,
+          bonusBalance: 0,
+        },
+      };
+    })();
+
   const user = await UserModel.findOneAndUpdate(
     { email },
     {
@@ -115,7 +140,7 @@ export const googleAuthController = asyncHandler(async (req, res) => {
       $push: {
         authProviders: { provider: AuthProvider.GOOGLE, providerId: sub },
       },
-      $setOnInsert: { email },
+      $setOnInsert: { email, ...onInsertCredits },
     },
     { upsert: true, returnDocument: 'after' },
   );

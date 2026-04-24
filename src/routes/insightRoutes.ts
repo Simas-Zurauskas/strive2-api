@@ -10,6 +10,7 @@ import {
   gradeInsightAnswerController,
 } from '@controlers/insight';
 import { protect, requireVerified } from '@middleware/authMiddleware';
+import { usageContextMiddleware } from '@middleware/usageContext';
 
 const router = Router();
 
@@ -26,7 +27,7 @@ const gradeLimiter = rateLimit({
   validate: { keyGeneratorIpFallback: false },
 });
 
-router.use(protect, requireVerified);
+router.use(protect, requireVerified, usageContextMiddleware);
 
 // Static paths must precede any parameterized ones (CLAUDE.md convention).
 router.get('/queue', getInsightQueueController);

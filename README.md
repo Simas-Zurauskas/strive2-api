@@ -24,7 +24,6 @@ For local development, you can optionally create a `.env.local` file to override
 
 - `ENVIRONMENT`: Environment type (development, test, production)
 - `MONGO_URI`: MongoDB connection string
-- `OPENAI_API_KEY`: OpenAI API key for course generation
 - `ANTHROPIC_API_KEY`: Anthropic API key for course generation
 - `BFL_API_KEY`: BFL API key for image generation
 - `JINA_API_KEY`: Jina API key for web content extraction

@@ -1,15 +1,46 @@
+import crypto from 'node:crypto';
 import { RunnableConfig } from '@langchain/core/runnables';
 import { BFL_API_KEY } from '@conf/env';
-import { uploadBuffer, getPresignedUrl } from '@services/s3Service';
+import { uploadBuffer, getPresignedUrl, objectExists } from '@services/s3Service';
+import { recordUsage } from '@services/usageService';
 import { bgError } from '@lib/bg';
 import { bumpLinksGenerationOutcome } from '@lib/metrics';
+import { priceFlatUnit } from '@lib/pricing';
 import { ILessonBlock } from '@models/LessonContentModel';
 import { LessonState } from '../state';
 import { curateLinks, toEmptyStateBlock } from '../links';
 
-// ── Flux Kontext Pro (BFL API) ────────────────────────
+// ── BFL image models ──────────────────────────────────
 
 const BFL_API_BASE = 'https://api.bfl.ai/v1';
+
+/**
+ * Tier-conditional image model selection. Overview-tier courses use Flux
+ * Dev ($0.025/image vs Kontext Pro's $0.04, ~37% cheaper) because their
+ * hero images function as scroll-past decoration rather than illustrative
+ * centerpieces — learners spend seconds per lesson card at this depth.
+ * Comprehensive and deep_dive keep Kontext Pro for detail-heavy imagery.
+ *
+ * Note: the earlier audit targeted Flux Schnell ($0.003/image) but Schnell
+ * is open-weights only — BFL's own API hosts Dev, Pro, Pro 1.1, Pro Ultra,
+ * Kontext Pro, and Kontext Max. For Schnell-tier pricing we'd need fal.ai
+ * / Replicate / Together, which adds infrastructure. Dev delivers the bulk
+ * of the overview-tier savings without that lift.
+ *
+ * If Dev ever goes unavailable, flip `pickHeroModel` back to always-Kontext
+ * — one-line revert, no pricing table edit needed.
+ */
+type BflModelKey = 'dev' | 'kontext';
+const BFL_MODELS: Record<BflModelKey, { path: string; sku: 'bfl_flux_dev' | 'bfl_flux_kontext_pro' }> = {
+  dev: { path: '/flux-dev', sku: 'bfl_flux_dev' },
+  kontext: { path: '/flux-kontext-pro', sku: 'bfl_flux_kontext_pro' },
+};
+
+const pickHeroModel = ({ depth }: { depth: string }) => {
+  return BFL_MODELS.dev;
+  // if (depth === 'overview') return BFL_MODELS.dev;
+  // return BFL_MODELS.kontext;
+};
 const BFL_POLL_INTERVAL_MS = 3_000;
 const BFL_TIMEOUT_MS = 120_000;
 
@@ -86,29 +117,106 @@ const getStyleForLesson = ({ moduleIndex, lessonIndex }: { moduleIndex: number; 
   return IMAGE_STYLES[index];
 };
 
-const generateHeroImage = async ({
+// Bump this when the hero-image prompt template changes in a way that should
+// invalidate previously-cached hashes. All content-hash-derived S3 keys
+// include this number so a template change forces fresh generations without
+// hunting down stale keys.
+const HERO_PROMPT_TEMPLATE_VERSION = 2;
+
+/**
+ * Deterministic hash of the inputs that drive the hero-image prompt. Two
+ * calls with identical (version, model, lessonName, moduleName, courseGoal,
+ * style) map to the same S3 key — so regenerating with unchanged inputs
+ * short-circuits to the existing image instead of spending on a fresh BFL
+ * call. Dedups across courses too.
+ *
+ * Always per-lesson — the earlier module-level variant (PR 3.2) merged all
+ * lessons within a module onto one shared image and that visibly broke the
+ * "each lesson has its own hero" expectation in testing. Reverted to
+ * lessonName-inclusive hashing so sibling lessons land on distinct images;
+ * identical-input regenerations still hit the cache.
+ *
+ * Includes the model path in the hash so switching the image model doesn't
+ * serve a cached image from the wrong one.
+ *
+ * Normalizing lowercases and trims only — we do NOT strip punctuation
+ * because "R vs Python" and "R, Python" carry different prompt nuance.
+ */
+const computeHeroHash = ({
   lessonName,
   moduleName,
   courseGoal,
-  courseId,
-  moduleIndex,
-  lessonIndex,
+  style,
+  modelPath,
 }: {
   lessonName: string;
   moduleName: string;
   courseGoal: string;
-  courseId: string;
+  style: string;
+  modelPath: string;
+}): string => {
+  const payload = JSON.stringify({
+    v: HERO_PROMPT_TEMPLATE_VERSION,
+    model: modelPath,
+    l: lessonName.trim().toLowerCase(),
+    m: moduleName.trim().toLowerCase(),
+    g: courseGoal.trim().toLowerCase(),
+    s: style,
+  });
+  return crypto.createHash('sha256').update(payload).digest('hex');
+};
+
+const generateHeroImage = async ({
+  lessonName,
+  moduleName,
+  courseGoal,
+  moduleIndex,
+  lessonIndex,
+  depth,
+}: {
+  lessonName: string;
+  moduleName: string;
+  courseGoal: string;
   moduleIndex: number;
   lessonIndex: number;
+  depth: string;
 }): Promise<string | null> => {
   try {
-    console.log(`[assetsGeneration] Generating hero image...`.cyan);
-
+    const model = pickHeroModel({ depth });
     const style = getStyleForLesson({ moduleIndex, lessonIndex });
+
+    // Content-addressed dedup. Shared across courses: two users asking the
+    // same lesson name in the same module / goal pay once. Per-lesson
+    // regenerations with unchanged inputs also hit this path, which is the
+    // common "user tweaked an unrelated field and the job refired" case.
+    // Any input change → new hash → fresh BFL call; no risk of serving a
+    // stale image for changed inputs.
+    const hash = computeHeroHash({
+      lessonName,
+      moduleName,
+      courseGoal,
+      style,
+      modelPath: model.path,
+    });
+    const hashKey = `lessons/hero/${hash}.png`;
+
+    if (await objectExists({ key: hashKey })) {
+      console.log(`[assetsGeneration] ✓ Hero image cache hit (${hash.slice(0, 8)}…) — skipping BFL`.green);
+      recordUsage({
+        service: 'bfl',
+        action: 'image:hero:dedup_hit',
+        costMicroCents: 0,
+        metadata: { hash, s3Key: hashKey },
+      });
+      return hashKey;
+    }
+
+    console.log(`[assetsGeneration] Generating hero image (hash ${hash.slice(0, 8)}…)…`.cyan);
+
     const prompt = `A wide editorial illustration about "${lessonName}" (part of "${moduleName}" in a course on ${courseGoal}). The image must clearly depict the specific subject matter of this lesson — show recognisable objects, diagrams, or scenes that someone familiar with the topic would instantly connect to "${lessonName}". Style: ${style} Wide 16:9 composition. No text, no letters, no digits, no human faces.`;
 
     // 1. Submit generation task
-    const submitRes = await fetch(`${BFL_API_BASE}/flux-kontext-pro`, {
+    const submitRes = await fetch(`${BFL_API_BASE}${model.path}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -154,23 +262,32 @@ const generateHeroImage = async ({
 
     const advertised = Number(imageRes.headers.get('content-length') ?? 0);
     if (Number.isFinite(advertised) && advertised > MAX_IMAGE_BYTES) {
-      throw new Error(
-        `BFL image exceeds ${MAX_IMAGE_BYTES} byte cap (advertised ${advertised})`,
-      );
+      throw new Error(`BFL image exceeds ${MAX_IMAGE_BYTES} byte cap (advertised ${advertised})`);
     }
 
     const buffer = Buffer.from(await imageRes.arrayBuffer());
     if (buffer.byteLength > MAX_IMAGE_BYTES) {
-      throw new Error(
-        `BFL image exceeds ${MAX_IMAGE_BYTES} byte cap (downloaded ${buffer.byteLength})`,
-      );
+      throw new Error(`BFL image exceeds ${MAX_IMAGE_BYTES} byte cap (downloaded ${buffer.byteLength})`);
     }
 
-    const key = `lessons/${courseId}/${moduleIndex}/${lessonIndex}/hero.png`;
-    await uploadBuffer({ key, body: buffer, contentType: 'image/png' });
+    // Write to the hash path so subsequent identical-input generations hit
+    // the objectExists() short-circuit above. The per-course/module/lesson
+    // path is gone — LessonContentModel stores whatever key we return, and
+    // reads go through getPresignedUrl/resolveImageUrl which work on any
+    // key. Old lessons with legacy `lessons/{courseId}/...` keys continue
+    // to read fine (the old objects are still there and lifecycle unchanged).
+    await uploadBuffer({ key: hashKey, body: buffer, contentType: 'image/png' });
 
-    console.log(`[assetsGeneration] ✓ Hero image uploaded to S3: ${key}`.green);
-    return key;
+    console.log(`[assetsGeneration] ✓ Hero image uploaded to S3: ${hashKey}`.green);
+
+    recordUsage({
+      service: 'bfl',
+      action: 'image:hero',
+      costMicroCents: priceFlatUnit({ sku: model.sku }),
+      metadata: { style, bytes: buffer.byteLength, s3Key: hashKey, hash, model: model.path, depth },
+    });
+
+    return hashKey;
   } catch (e) {
     console.warn(`[assetsGeneration] ✗ Hero image failed: ${e instanceof Error ? e.message : e}`.yellow);
     return null;
@@ -185,15 +302,15 @@ export const imageGeneration = async (state: LessonState, config?: RunnableConfi
     return { heroImageUrl: null };
   }
 
-  const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
+  const writer = config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined;
 
   const s3Key = await generateHeroImage({
     lessonName: state.lessonName,
     moduleName: state.moduleName,
     courseGoal: state.goal,
-    courseId: state.courseId,
     moduleIndex: state.moduleIndex,
     lessonIndex: state.lessonIndex,
+    depth: state.depth,
   });
 
   if (s3Key) {
@@ -222,7 +339,7 @@ export const linksGeneration = async (state: LessonState, config?: RunnableConfi
     return { linksBlock: null };
   }
 
-  const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
+  const writer = config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined;
 
   let timer: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<ILessonBlock>((resolve) => {
