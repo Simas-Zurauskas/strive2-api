@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import * as Sentry from '@sentry/node';
 import UserModel from '@models/UserModel';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import { emitCreditsUpdated } from '@lib/creditSocket';
@@ -9,6 +10,8 @@ import {
   PlanKey,
 } from '@lib/creditPricing';
 import { getUsageContext } from '@lib/usageContext';
+import { bumpCreditDebitExhausted } from '@lib/metrics';
+import { monetization } from '@lib/loggers';
 
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -24,6 +27,20 @@ export class InsufficientCreditsError extends Error {
   constructor({ need, have }: { need: number; have: number }) {
     super('Insufficient credits');
     this.meta = { need, have };
+  }
+}
+
+// Per-user concurrency cap. Distinct from `INSUFFICIENT_CREDITS` because the
+// user isn't out of money — they're hammering the submit button (or scripting).
+// 409 CONFLICT reads as "the state can't accept this now"; a future slot-free
+// retry will succeed without any user action.
+export class MaxConcurrentJobsError extends Error {
+  statusCode = 409;
+  errorCode = 'TOO_MANY_ACTIVE_JOBS' as const;
+  meta: { active: number; limit: number };
+  constructor({ active, limit }: { active: number; limit: number }) {
+    super(`Too many active jobs (${active}/${limit}). Wait for one to finish before starting another.`);
+    this.meta = { active, limit };
   }
 }
 
@@ -138,6 +155,10 @@ const applyFreePeriodReset = async ({
       reason: 'period_reset',
     },
   });
+
+  monetization.info(
+    `Free period reset: user=${String(userId)} allowance=${oldAllowance}→${plan.monthlyAllowance} next=${periodEnd.toISOString()}`,
+  );
 };
 
 // ── Debit real spend on job completion ────────────────────────
@@ -245,6 +266,13 @@ export const debitActualSpend = async ({
         },
       });
 
+      const clamped = totalDebit < credits
+        ? ` (clamped from ${credits} — ${credits - totalDebit} absorbed)`
+        : '';
+      monetization.info(
+        `Debited: user=${String(userId)} job=${jobType} credits=−${totalDebit} (allowance=−${allowanceDebit} bonus=−${bonusDebit}) spent=${microCents}μ¢${clamped} balance=${newAllowance + newBonus}`,
+      );
+
       return;
     }
     // Race: retry with a fresh read.
@@ -252,5 +280,17 @@ export const debitActualSpend = async ({
   // All retries lost — rare. Skip the debit (user gets free work this time)
   // rather than half-apply the debit with inconsistent accounting. The
   // UsageEvent row still captures the real spend for analytics.
-  console.warn(`[creditService] debitActualSpend exhausted retries for user ${String(userId)} job ${String(jobId)}`.yellow);
+  //
+  // Escalate to Sentry + bump the `credit_debit_exhausted_total` metric so
+  // a climbing rate is visible in dashboards — at a certain volume this
+  // stops being bounded-loss and starts being a reconciliation problem.
+  monetization.warn(
+    `Debit retries exhausted: user=${String(userId)} job=${String(jobId)} type=${jobType} spent=${microCents}μ¢ — user got free work`,
+  );
+  bumpCreditDebitExhausted();
+  Sentry.captureMessage('debitActualSpend exhausted retries', {
+    level: 'warning',
+    tags: { area: 'credits.debit', jobType },
+    extra: { userId: String(userId), jobId: String(jobId), microCents },
+  });
 };

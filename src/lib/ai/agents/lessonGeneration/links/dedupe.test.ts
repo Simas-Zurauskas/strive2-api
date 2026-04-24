@@ -11,15 +11,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { dedupeCandidates } from './dedupe';
 import { SearchCandidate } from './schemas';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
 const makeCandidate = (
   overrides: Partial<SearchCandidate> & Pick<SearchCandidate, 'id' | 'url' | 'title'>,
@@ -31,7 +26,6 @@ const makeCandidate = (
   ...overrides,
 });
 
-console.log('links.dedupe');
 
 // ── Tracking-parameter strippers ──────────────────────────────
 
@@ -226,4 +220,3 @@ test('hostname cap still applies after new dedup passes', () => {
   assert.equal(out.length, 2, 'host cap of 2 keeps only 2 rows per host');
 });
 
-console.log(`\n${passed} passed`);

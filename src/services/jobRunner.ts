@@ -15,7 +15,10 @@ import { GeneratedInsight, persistLessonInsights } from './insightContentService
 import { deleteByPrefix } from './s3Service';
 import { jobEvents } from './jobEvents';
 import { bgError } from '@lib/bg';
-import { InsufficientCreditsError, debitActualSpend, getBalance } from './creditService';
+import { InsufficientCreditsError, MaxConcurrentJobsError, debitActualSpend, getBalance } from './creditService';
+import UserModel from '@models/UserModel';
+import { PLANS, PlanKey } from '@lib/creditPricing';
+import { monetization } from '@lib/loggers';
 import {
   bumpLessonGenerationOutcome,
   bumpStructureThinFreeTextInput,
@@ -92,18 +95,45 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
     ...(params.metadata && { metadata: params.metadata }),
   });
 
-  // Credit gate: user may launch any job with balance ≥ 1 credit. Real cost
-  // is debited on job success by `debitActualSpend` (reads the spend
-  // accumulator built up by `recordUsage` during the job). No reservation,
-  // no pre-debit — if the job fails, the user isn't charged, and we eat
-  // the provider cost we incurred along the way.
+  // Pre-flight gates: credit balance + per-user concurrent-job cap. Credit
+  // gate is "balance ≥ 1 credit"; real cost is debited on job success by
+  // `debitActualSpend` (reads the spend accumulator built up by `recordUsage`
+  // during the job). No reservation, no pre-debit — if the job fails, the
+  // user isn't charged, and we eat the provider cost we incurred along the
+  // way.
   //
-  // The Job doc is deleted if the gate rejects, keeping the "submitJob
+  // The concurrency gate reads the plan's `maxConcurrentJobs` and counts the
+  // user's currently-active Job rows (pending + running, excluding the row
+  // we just inserted). A single user with 1 credit used to be able to hog
+  // all 50 slots of the global `p-limit`; this gates them to their plan.
+  //
+  // The Job doc is deleted if either gate rejects, keeping the "submitJob
   // throws → no orphan job row" invariant intact.
   try {
     const balance = await getBalance(params.userId);
     if (balance.total < 1) {
+      monetization.info(
+        `Job rejected (credits): user=${params.userId} type=${params.type} balance=${balance.total}`,
+      );
       throw new InsufficientCreditsError({ need: 1, have: balance.total });
+    }
+
+    const user = await UserModel.findById(params.userId).select('subscription.plan').lean();
+    const planKey: PlanKey = (user?.subscription?.plan as PlanKey | undefined) ?? 'free';
+    const limit = PLANS[planKey].maxConcurrentJobs;
+    // Exclude the row we just inserted; count the rest. `pending` is the
+    // initial state and `processing` is the worker-owned state before
+    // completed/failed.
+    const active = await JobModel.countDocuments({
+      _id: { $ne: jobId },
+      userId: params.userId,
+      status: { $in: ['pending', 'processing'] },
+    });
+    if (active >= limit) {
+      monetization.info(
+        `Job rejected (concurrency): user=${params.userId} plan=${planKey} active=${active}/${limit} type=${params.type}`,
+      );
+      throw new MaxConcurrentJobsError({ active, limit });
     }
   } catch (err) {
     await JobModel.deleteOne({ _id: jobId }).catch(bgError('jobRunner.gateRollback'));

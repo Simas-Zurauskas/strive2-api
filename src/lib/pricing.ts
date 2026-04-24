@@ -11,7 +11,7 @@ import 'colors';
  * that only surfaces after we've promised a user a quota.
  *
  * Numbers were reconciled against the public vendor pricing pages on
- * 2026-04-21. Confirm against the provider dashboards before any of this
+ * 2026-04-24. Confirm against the provider dashboards before any of this
  * gates real billing; wrong numbers here produce wrong allowance accounting
  * silently. If a model lookup fails we warn once and fall through with 0
  * cost — a visible zero beats a plausible-but-wrong invoice.
@@ -66,12 +66,13 @@ export const LLM_PRICING: Record<string, LlmPrice> = {
     cacheWrite1hMicroCentsPerMTok: 2_000_000,  // 2× input
     cacheReadMicroCentsPerMTok: 100_000,       // 0.10× input
   },
-  // Jina Reader (paid tier) — billed per token returned at $0.02/MTok, via the
+  // Jina Reader (paid tier) — billed per token returned at $0.05/MTok, via the
   // `uncached` bucket. Caching fields are zero because Jina Reader has no
   // cache tier. Capture the token count from the response (x-total-tokens
   // header when present, else chars/4 fallback) at the call site.
+  // Unit: $0.05/MTok = 5¢/MTok = 50,000 μ¢/MTok.
   jina_reader_paid: {
-    inputMicroCentsPerMTok: 200_000,           // $0.02/M
+    inputMicroCentsPerMTok: 50_000,            // $0.05/M
     outputMicroCentsPerMTok: 0,
     cacheWrite5mMicroCentsPerMTok: 0,
     cacheWrite1hMicroCentsPerMTok: 0,
@@ -88,11 +89,14 @@ export const LLM_PRICING: Record<string, LlmPrice> = {
  * rate uniformly over-estimates inside the free cap rather than silently
  * under-billing the moment we exceed it.
  */
+// Unit reminder: 1 cent = 10,000 μ¢. So $0.016 = 1.6¢ = 16,000 μ¢.
+// Prior values were 10× inflated (160_000 for Tavily's $0.016 query, etc.) —
+// caught because a user's $4 top-up was being eaten by one full lesson with
+// image + links, which in reality costs ~$0.45 of real API spend, not ~$1.40.
 export const SERVICE_PRICING = {
-  bfl_flux_kontext_pro: { perUnitMicroCents: 400_000 },   // $0.04/image
-  bfl_flux_dev: { perUnitMicroCents: 250_000 },           // $0.025/image — used for `overview`-tier hero images (cheapest BFL-hosted variant; Schnell is open-weights only via 3rd-party)
-  tavily_search_advanced: { perUnitMicroCents: 160_000 }, // 2 credits × $0.008 PAYG = $0.016/query
-  judge0_rapidapi: { perUnitMicroCents: 20_000 },         // $0.002/submission (RapidAPI Basic overage)
+  bfl_flux_dev: { perUnitMicroCents: 25_000 },           // $0.025/image — the only BFL hero-image model we call
+  tavily_search_advanced: { perUnitMicroCents: 16_000 }, // 2 credits × $0.008 PAYG = $0.016/query
+  judge0_rapidapi: { perUnitMicroCents: 2_000 },         // $0.002/submission (RapidAPI Basic overage)
 } as const;
 
 export type ServiceSku = keyof typeof SERVICE_PRICING;

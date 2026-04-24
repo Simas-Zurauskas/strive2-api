@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import {
   MICROCENTS_PER_CREDIT,
   PLANS,
@@ -16,14 +17,7 @@ import {
   microCentsToCredits,
 } from './creditPricing';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  ✓ ${name}`);
-};
 
-console.log('creditPricing');
 
 // ── microCentsToCredits — central cost/credit conversion ────────────
 
@@ -72,15 +66,6 @@ test('every PlanKey has a complete PlanDefinition', () => {
     assert.ok(plan.displayName.length > 0);
     assert.ok(plan.monthlyAllowance > 0);
     assert.ok(plan.maxConcurrentJobs >= 1);
-    assert.equal(typeof plan.allowImage, 'boolean');
-    assert.equal(typeof plan.allowLinks, 'boolean');
-  }
-});
-
-test('every plan grants full feature access (images + links)', () => {
-  for (const key of PLAN_KEYS) {
-    assert.equal(PLANS[key].allowImage, true, `${key} must allow image`);
-    assert.equal(PLANS[key].allowLinks, true, `${key} must allow links`);
   }
 });
 
@@ -141,4 +126,3 @@ test('per-plan gross margin ladder is sane (Free loss leader, paid > 40%)', () =
 
 // ── Done ──────────────────────────────────────────────────
 
-console.log(`\n✓ ${passed} test(s) passed`);

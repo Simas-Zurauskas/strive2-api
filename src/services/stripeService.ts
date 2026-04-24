@@ -21,6 +21,7 @@ import {
   TOPUP_MAX_USD,
   TOPUP_MIN_USD,
 } from '@lib/creditPricing';
+import { monetization } from '@lib/loggers';
 
 // ── Client singleton ──────────────────────────────────────
 
@@ -123,10 +124,11 @@ export const ensureStripeCustomer = async ({ userId }: { userId: string }): Prom
     // created will sit in Stripe unused — acceptable since customers are
     // free to create.
     const winner = await UserModel.findById(userId).select('subscription.stripeCustomerId').lean();
-    console.warn(`[stripe] race creating customer for user ${userId}, orphaned ${customer.id}`.yellow);
+    monetization.warn(`Race creating Stripe customer for user=${userId}, orphaned ${customer.id}`);
     return winner?.subscription?.stripeCustomerId ?? customer.id;
   }
 
+  monetization.info(`Stripe customer created: user=${userId} customer=${customer.id}`);
   return customer.id;
 };
 
@@ -212,7 +214,7 @@ export const createSubscriptionCheckout = async ({
     replacingSubscriptionId = blocker.id;
   }
 
-  return stripe.checkout.sessions.create({
+  const session = await stripe.checkout.sessions.create({
     customer,
     mode: 'subscription',
     line_items: [{ price: priceId, quantity: 1 }],
@@ -236,6 +238,10 @@ export const createSubscriptionCheckout = async ({
       },
     },
   });
+  monetization.info(
+    `Subscription checkout started: user=${userId} plan=${plan}/${cadence}${replacingSubscriptionId ? ` replacing=${replacingSubscriptionId}` : ''}`,
+  );
+  return session;
 };
 
 /**
@@ -278,7 +284,7 @@ export const createTopupCheckout = async ({
   const stripe = getStripe();
   const customer = await ensureStripeCustomer({ userId });
 
-  return stripe.checkout.sessions.create({
+  const session = await stripe.checkout.sessions.create({
     customer,
     mode: 'payment',
     line_items: [
@@ -308,6 +314,10 @@ export const createTopupCheckout = async ({
       metadata: { userId, flow: 'topup', credits: String(credits), amountUsd: String(amountUsd) },
     },
   });
+  monetization.info(
+    `Top-up checkout started: user=${userId} credits=${credits} amount=$${amountUsd}`,
+  );
+  return session;
 };
 
 // ── Customer Portal ──────────────────────────────────────
@@ -427,6 +437,9 @@ export const scheduleSubscriptionDowngrade = async ({
     proration_behavior: 'none',
   });
 
+  monetization.info(
+    `Downgrade requested: user=${userId} ${currentPlan}→${plan}/${cadence} applies at ${periodEnd?.toISOString() ?? '(unknown)'}`,
+  );
   return { periodEnd, scheduledPlan: plan };
 };
 
@@ -470,6 +483,9 @@ export const scheduleSubscriptionCancellation = async ({
   const periodEndSeconds = updated.items.data[0]?.current_period_end;
   const periodEnd = typeof periodEndSeconds === 'number' ? new Date(periodEndSeconds * 1000) : null;
 
+  monetization.info(
+    `Cancellation requested: user=${userId} subscription=${subId} ends=${periodEnd?.toISOString() ?? '(unknown)'}`,
+  );
   return { periodEnd };
 };
 
@@ -533,9 +549,14 @@ export const cancelAllSubscriptionsForCustomer = async ({
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (code === 'resource_missing') continue;
-      console.warn(`[stripe] failed to cancel ${s.id} during account deletion:`.yellow, err);
+      monetization.warn(
+        `Failed to cancel ${s.id} during account deletion: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
+  monetization.info(
+    `Cancelled ${canceled}/${cancellable.length} subscription(s) on customer ${customerId} during account deletion`,
+  );
   return canceled;
 };
 

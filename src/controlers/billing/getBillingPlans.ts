@@ -48,8 +48,6 @@ export const getBillingPlansController = asyncHandler(async (_req, res) => {
       annualUsd: Number((plan.annualMonthlyUsd * 12).toFixed(2)),
       monthlyAllowance: plan.monthlyAllowance,
       maxConcurrentJobs: plan.maxConcurrentJobs,
-      allowImage: plan.allowImage,
-      allowLinks: plan.allowLinks,
     };
   });
 

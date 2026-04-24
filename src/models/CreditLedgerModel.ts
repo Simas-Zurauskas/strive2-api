@@ -11,6 +11,8 @@ export const CREDIT_LEDGER_REASONS = [
   'refund_job_failed',
   'refund_job_canceled',
   'refund_cross_period',
+  'refund_topup',
+  'dispute_clawback',
   'admin_grant',
   'admin_clawback',
 ] as const;

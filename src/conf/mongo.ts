@@ -9,7 +9,7 @@ import { bgError } from '@lib/bg';
 
 import { MONGO_URI } from './env';
 
-const cleanupOrphanedJobs = async () => {
+export const cleanupOrphanedJobs = async () => {
   try {
     // Step 1: fail every in-flight job in one sweep.
     //

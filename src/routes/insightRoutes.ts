@@ -11,6 +11,7 @@ import {
 } from '@controlers/insight';
 import { protect, requireVerified } from '@middleware/authMiddleware';
 import { usageContextMiddleware } from '@middleware/usageContext';
+import { requireCredits } from '@middleware/requireCredits';
 
 const router = Router();
 
@@ -38,6 +39,6 @@ router.get('/due-count', getInsightsDueCountController);
 router.post('/:insightId/rate', rateInsightController);
 router.post('/:insightId/skip', skipInsightController);
 router.post('/:insightId/mode', setInsightModeController);
-router.post('/:insightId/grade', gradeLimiter, gradeInsightAnswerController);
+router.post('/:insightId/grade', gradeLimiter, requireCredits(), gradeInsightAnswerController);
 
 export { router as insightRoutes };

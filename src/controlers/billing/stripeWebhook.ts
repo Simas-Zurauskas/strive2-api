@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import * as Sentry from '@sentry/node';
 import { STRIPE_WEBHOOK_SECRET } from '@conf/env';
+import { monetization } from '@lib/loggers';
 import { constructWebhookEvent } from '@services/stripeService';
 import { handleStripeEvent } from '@services/stripeWebhookService';
 
@@ -17,7 +18,7 @@ import { handleStripeEvent } from '@services/stripeWebhookService';
  */
 export const stripeWebhookController = async (req: Request, res: Response): Promise<void> => {
   if (!STRIPE_WEBHOOK_SECRET) {
-    console.error('[stripe] webhook fired but STRIPE_WEBHOOK_SECRET is not configured'.red);
+    monetization.error('Webhook fired but STRIPE_WEBHOOK_SECRET is not configured');
     res.status(500).send('Webhook not configured');
     return;
   }
@@ -36,7 +37,7 @@ export const stripeWebhookController = async (req: Request, res: Response): Prom
       secret: STRIPE_WEBHOOK_SECRET,
     });
   } catch (err) {
-    console.warn('[stripe] webhook signature verification failed'.yellow, err);
+    monetization.warn(`Webhook signature verification failed: ${err instanceof Error ? err.message : String(err)}`);
     res.status(400).send('Signature verification failed');
     return;
   }
@@ -48,7 +49,9 @@ export const stripeWebhookController = async (req: Request, res: Response): Prom
     // Handler errors shouldn't trigger infinite Stripe retries. Log + ack.
     // Business reconciliation (if any rows drifted) falls to the Phase 5
     // nightly cron, not to Stripe's retry loop.
-    console.error(`[stripe] webhook handler threw for ${event.type} (${event.id})`.red, err);
+    monetization.error(
+      `Webhook handler threw for ${event.type} (${event.id}): ${err instanceof Error ? err.message : String(err)}`,
+    );
     Sentry.captureException(err, {
       tags: { area: 'stripe.webhook', eventType: event.type },
       extra: { eventId: event.id },

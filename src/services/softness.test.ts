@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import {
   detectSoftnessHint,
   detectFinishPressure,
@@ -19,16 +20,9 @@ import {
   LESSON_COUNT_HINTS,
 } from './softness';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
 const ans = (answer: string) => [{ questionId: 'q1', answer }];
 
-console.log('softness');
 
 // ── Baseline: no softness on empty / neutral answers ─────────
 
@@ -288,4 +282,3 @@ test('getEstimatedHoursRange: min floor is at least 1h', () => {
   assert.ok(lo >= 1);
 });
 
-console.log(`\n\u2713 softness: ${passed} test(s) passed`);

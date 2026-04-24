@@ -11,16 +11,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { lintDistractors, repairDistractors } from './distractorLint';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
-console.log('distractorLint');
 
 // ── Length uniformity ─────────────────────────────────────────
 
@@ -292,4 +286,3 @@ test('repair: degenerate input (out-of-bounds correctIndex) is a no-op', () => {
   assert.deepEqual(r.appliedRepairs, []);
 });
 
-console.log(`\n${passed} passed`);

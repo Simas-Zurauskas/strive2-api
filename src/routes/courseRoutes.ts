@@ -51,7 +51,7 @@ router.use(protect, requireVerified, usageContextMiddleware);
 
 // Static paths (must be before /:id to avoid route conflict)
 router.get('/job/:jobId', validateObjectId('jobId'), getJobStatusController);
-router.post('/execute-code', executeCodeController);
+router.post('/execute-code', requireCredits(), executeCodeController);
 router.get('/continue', getContinueLearningController);
 router.get('/progress-summary', getProgressSummaryController);
 router.get('/reviews-due', getReviewsDueController);
@@ -72,7 +72,7 @@ router.delete('/:id', deleteCourseController);
 router.get('/:courseId/edit-impact', getEditImpactController);
 
 // Chat (course design agent)
-router.post('/:courseId/chat', chatStreamController);
+router.post('/:courseId/chat', requireCredits(), chatStreamController);
 router.get('/:courseId/chat/history', getChatHistoryController);
 
 // AI generation (scoped to a course).

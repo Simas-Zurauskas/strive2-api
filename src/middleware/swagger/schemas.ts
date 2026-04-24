@@ -184,8 +184,6 @@ export const schemas: SchemaMap = {
       'annualUsd',
       'monthlyAllowance',
       'maxConcurrentJobs',
-      'allowImage',
-      'allowLinks',
     ],
     properties: {
       key: { $ref: '#/components/schemas/PlanKey' },
@@ -195,8 +193,6 @@ export const schemas: SchemaMap = {
       annualUsd: { type: 'number' },
       monthlyAllowance: { type: 'integer' },
       maxConcurrentJobs: { type: 'integer' },
-      allowImage: { type: 'boolean' },
-      allowLinks: { type: 'boolean' },
     },
   },
 

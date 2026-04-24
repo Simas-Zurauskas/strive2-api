@@ -12,14 +12,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { validateInsightCandidate } from './insightGuardrails';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
 type Candidate = Parameters<typeof validateInsightCandidate>[0];
 
@@ -39,7 +34,6 @@ const qa = (promptStr: string, answer: string): Candidate => ({
   sourceBlockId: 'section-1',
 });
 
-console.log('insightGeneration.validateInsightCandidate');
 
 // ── Cloze positive cases ───────────────────────────────────────
 
@@ -192,4 +186,3 @@ test('cloze: lower-case "and" between proper nouns in answer rejected via disjun
   assert.equal(r.valid, false);
 });
 
-console.log(`\n${passed} passed`);

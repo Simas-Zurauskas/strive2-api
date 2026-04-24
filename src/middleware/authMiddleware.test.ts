@@ -1,0 +1,251 @@
+/**
+ * Tests for the auth gates: `protect` and `requireVerified`. These are the
+ * single entry points for token-based session management; bugs here surface
+ * as session-hijack or unauthorized data access.
+ *
+ * Strategy:
+ *   - Real in-memory Mongo so tokenVersion + emailVerified live on real User
+ *     rows (avoids stubbing out the very behavior we want to test)
+ *   - decodeAuthToken is the real one, generating + verifying with the
+ *     test-setup JWT_SECRET
+ *   - express Request/Response/NextFunction are minimal mocks
+ *
+ * Run: yarn test authMiddleware
+ */
+
+import assert from 'node:assert/strict';
+import { describe, test, expect, vi } from 'vitest';
+import type { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+import { setupTestDb } from '../../test-helpers/db';
+import { makeUser, UserModel } from '../../test-helpers/factories';
+import { generateAuthToken, decodeAuthToken } from '@lib/auth';
+import { protect, requireVerified } from '@middleware/authMiddleware';
+import { JWT_SECRET } from '@conf/env';
+import { AuthProvider } from '@lib/constants';
+
+setupTestDb();
+
+const buildReqRes = (params: { authHeader?: string; userId?: string } = {}) => {
+  const req = {
+    headers: params.authHeader ? { authorization: params.authHeader } : {},
+    userId: params.userId,
+  } as unknown as Request;
+  const res = {
+    status: vi.fn(function (this: Response, _code: number) {
+      return this;
+    }),
+  } as unknown as Response;
+  const next = vi.fn() as NextFunction;
+  return { req, res, next };
+};
+
+const runMiddleware = (
+  handler: ReturnType<typeof protect>,
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    const wrappedNext = ((err?: unknown) => {
+      if (err) reject(err);
+      else {
+        (next as ReturnType<typeof vi.fn>)();
+        resolve();
+      }
+    }) as NextFunction;
+    Promise.resolve(handler(req, res, wrappedNext)).catch(reject);
+  });
+};
+
+// ── decodeAuthToken — JWT verification edge cases ───────
+
+describe('decodeAuthToken', () => {
+  test('valid HS256 token round-trips', () => {
+    const token = generateAuthToken({ id: 'user-1', tokenVersion: 0 });
+    const decoded = decodeAuthToken(token);
+    expect(decoded?.id).toBe('user-1');
+    expect(decoded?.tokenVersion).toBe(0);
+  });
+
+  test('garbage token → undefined (caught, not thrown)', () => {
+    expect(decodeAuthToken('not-a-jwt')).toBeUndefined();
+  });
+
+  test('empty string → undefined', () => {
+    expect(decodeAuthToken('')).toBeUndefined();
+  });
+
+  test('token signed with a DIFFERENT secret → undefined', () => {
+    const fake = jwt.sign({ id: 'attacker', tokenVersion: 0 }, 'wrong-secret', {
+      algorithm: 'HS256',
+      expiresIn: '30d',
+    });
+    expect(decodeAuthToken(fake)).toBeUndefined();
+  });
+
+  test('expired token → undefined', () => {
+    const expired = jwt.sign({ id: 'user-x', tokenVersion: 0 }, JWT_SECRET, {
+      algorithm: 'HS256',
+      expiresIn: -10, // already expired
+    });
+    expect(decodeAuthToken(expired)).toBeUndefined();
+  });
+
+  test('alg=none token is rejected (downgrade attack defense)', () => {
+    // Hand-craft an alg=none JWT: header.payload. (no signature)
+    const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(
+      JSON.stringify({ id: 'attacker', tokenVersion: 0, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 60 }),
+    ).toString('base64url');
+    const noneToken = `${header}.${payload}.`;
+    expect(decodeAuthToken(noneToken)).toBeUndefined();
+  });
+
+  test('token with RS256 alg (key-confusion attempt) → undefined under HS256-only allowlist', () => {
+    // jwt.sign with `algorithm: 'HS256'` is what we use; if someone managed
+    // to mint a token claiming alg=RS256, our verify call (algorithms:
+    // ['HS256']) would refuse. This test forges that header with the SAME
+    // secret as the symmetric "key" — under a buggy verifier this would
+    // pass as RS256-with-shared-key. Our allowlist must reject it.
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(
+      JSON.stringify({ id: 'attacker', tokenVersion: 0 }),
+    ).toString('base64url');
+    // Sign with HS256 over header+payload using the shared secret. The output
+    // would deceive a verifier that respects the alg field.
+    const crypto = require('node:crypto');
+    const sig = crypto
+      .createHmac('sha256', JWT_SECRET)
+      .update(`${header}.${payload}`)
+      .digest('base64url');
+    const forged = `${header}.${payload}.${sig}`;
+    expect(decodeAuthToken(forged)).toBeUndefined();
+  });
+});
+
+// ── protect middleware ─────────────────────────────────
+
+describe('protect', () => {
+  test('happy path: valid token + matching tokenVersion → next() with req.userId set', async () => {
+    const user = await makeUser();
+    const token = generateAuthToken({ id: user._id.toString(), tokenVersion: user.tokenVersion });
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${token}` });
+    await runMiddleware(protect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect((req as Request).userId).toBe(user._id.toString());
+  });
+
+  test('missing Authorization header → 401', async () => {
+    const { req, res, next } = buildReqRes();
+    await expect(runMiddleware(protect, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('Authorization header without Bearer prefix → 401', async () => {
+    const { req, res, next } = buildReqRes({ authHeader: 'Basic abc' });
+    await expect(runMiddleware(protect, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  test('garbage token → 401', async () => {
+    const { req, res, next } = buildReqRes({ authHeader: 'Bearer not-a-jwt' });
+    await expect(runMiddleware(protect, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  test('expired token → 401', async () => {
+    const user = await makeUser();
+    const expired = jwt.sign(
+      { id: user._id.toString(), tokenVersion: user.tokenVersion },
+      JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: -10 },
+    );
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${expired}` });
+    await expect(runMiddleware(protect, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  test('token with stale tokenVersion (post-logout) → 401', async () => {
+    const user = await makeUser();
+    // Mint at version 0, then bump on the user row to simulate logout.
+    const token = generateAuthToken({ id: user._id.toString(), tokenVersion: 0 });
+    await UserModel.updateOne({ _id: user._id }, { $inc: { tokenVersion: 1 } });
+
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${token}` });
+    await expect(runMiddleware(protect, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  test('token references a user that has been deleted → 401', async () => {
+    const user = await makeUser();
+    const token = generateAuthToken({ id: user._id.toString(), tokenVersion: user.tokenVersion });
+    await UserModel.deleteOne({ _id: user._id });
+
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${token}` });
+    await expect(runMiddleware(protect, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+});
+
+// ── requireVerified middleware ─────────────────────────
+
+describe('requireVerified', () => {
+  test('CREDENTIALS user, verified → next()', async () => {
+    const user = await makeUser({ emailVerified: true });
+    const { req, res, next } = buildReqRes({ userId: user._id.toString() });
+    await runMiddleware(requireVerified, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  test('CREDENTIALS user, UNverified → 403 EMAIL_NOT_VERIFIED (not 401)', async () => {
+    const user = await makeUser({ emailVerified: false });
+    const { req, res, next } = buildReqRes({ userId: user._id.toString() });
+
+    let caughtErr: unknown;
+    try {
+      await runMiddleware(requireVerified, req, res, next);
+    } catch (e) {
+      caughtErr = e;
+    }
+    expect(res.status).toHaveBeenCalledWith(403);
+    // 403 not 401 is critical — the client's axios interceptor signs the
+    // user out on 401 only.
+    expect(res.status).not.toHaveBeenCalledWith(401);
+    expect((caughtErr as { errorCode?: string }).errorCode).toBe('EMAIL_NOT_VERIFIED');
+  });
+
+  test('Google-only user (no CREDENTIALS provider): UNverified → still passes', async () => {
+    // Per CLAUDE.md / authMiddleware comments: only credential users are gated.
+    // A Google-only sign-in implicitly has emailVerified by virtue of OAuth.
+    const user = await makeUser({
+      emailVerified: false,
+      authProviders: [{ provider: AuthProvider.GOOGLE, providerId: 'google-uid-1' }],
+    });
+    const { req, res, next } = buildReqRes({ userId: user._id.toString() });
+    await runMiddleware(requireVerified, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  test('mixed providers (CREDENTIALS unverified + GOOGLE): 403 fires', async () => {
+    const user = await makeUser({
+      emailVerified: false,
+      authProviders: [
+        { provider: AuthProvider.CREDENTIALS },
+        { provider: AuthProvider.GOOGLE, providerId: 'google-uid-2' },
+      ],
+    });
+    const { req, res, next } = buildReqRes({ userId: user._id.toString() });
+    await expect(runMiddleware(requireVerified, req, res, next)).rejects.toMatchObject({
+      errorCode: 'EMAIL_NOT_VERIFIED',
+    });
+  });
+
+  test('user deleted between protect and requireVerified → 401', async () => {
+    const userId = 'aaaaaaaaaaaaaaaaaaaaaaaa'; // 24-hex but no row
+    const { req, res, next } = buildReqRes({ userId });
+    await expect(runMiddleware(requireVerified, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+});

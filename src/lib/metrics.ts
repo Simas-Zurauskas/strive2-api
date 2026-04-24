@@ -24,6 +24,20 @@ export const bumpRateLimitHit = () => {
   rateLimitHits += 1;
 };
 
+/**
+ * One bump per `debitActualSpend` call that exhausted its 3-retry compare-
+ * and-swap loop without a successful debit. The user got free work; the
+ * UsageEvent row still captures the real spend for analytics, but no credits
+ * were deducted. Rare in practice (concurrent debits on the same user are
+ * uncommon), but the rate climbing signals a load-pattern regression — a
+ * reconciliation sweep is then warranted.
+ */
+export let creditDebitExhausted = 0;
+
+export const bumpCreditDebitExhausted = () => {
+  creditDebitExhausted += 1;
+};
+
 // ── Insight queue / fresh-pool diagnostics ─────────────────
 //
 // The GET /api/insight/queue endpoint sometimes returns 0 fresh despite the
@@ -481,6 +495,12 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
   };
 
   metric('rate_limit_hits_total', 'Rate limiter 429 responses since process start', 'counter', rateLimitHits);
+  metric(
+    'credit_debit_exhausted_total',
+    'debitActualSpend calls that lost all 3 retries of the atomic compare-and-swap — the job completed but no credits were deducted',
+    'counter',
+    creditDebitExhausted,
+  );
   metric('job_runner_active', 'Jobs currently executing in jobRunner pLimit', 'gauge', activeJobs);
   metric('job_runner_pending', 'Jobs queued behind pLimit (waiting to start)', 'gauge', pendingJobs);
   metric('socket_connections', 'Currently connected Socket.io clients', 'gauge', socketConnections);

@@ -17,15 +17,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { z } from 'zod';
 import { quizOutputSchema } from './prompts';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
 type JsonSchemaNode = {
   type?: string | string[];
@@ -42,7 +37,6 @@ const toJsonSchema = (schema: z.ZodType): JsonSchemaNode => {
   return (z as unknown as { toJSONSchema: (s: z.ZodType) => JsonSchemaNode }).toJSONSchema(schema);
 };
 
-console.log('quizOutputSchema shape regression');
 
 const json = toJsonSchema(quizOutputSchema);
 
@@ -91,4 +85,3 @@ test('inner options field CAN still use anyOf (nested union is acceptable)', () 
   assert.ok(hasAnyOf || hasType, 'options must describe a shape (anyOf or type)');
 });
 
-console.log(`\n\u2713 quizOutputSchema shape: ${passed} regression(s) passed`);

@@ -79,7 +79,7 @@ const fetchOne = async (candidate: SearchCandidate): Promise<FetchedCandidate | 
 
     // Only the paid tier is billed; the free tier (JINA_API_KEY unset) stays
     // free and does not produce a ledger row. Jina Reader bills per token
-    // returned at $0.02/MTok: prefer the `x-total-tokens` response header
+    // returned at $0.05/MTok: prefer the `x-total-tokens` response header
     // (authoritative count from the provider) and fall back to chars/4 — the
     // standard tokens≈chars/4 approximation — when the header is absent so
     // we never silently record cost=0 for a real billed call.

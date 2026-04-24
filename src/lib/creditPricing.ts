@@ -44,20 +44,13 @@ export interface PlanDefinition {
   annualMonthlyUsd: number;
   monthlyAllowance: number;
   maxConcurrentJobs: number;
-  maxCourseDesignsPerWeek: number;
-  allowImage: boolean;
-  allowLinks: boolean;
 }
 
 // Every plan grants FULL feature access. The sole per-plan differentiator
-// is `monthlyAllowance` (and its $ price). Per-lesson flags, concurrency,
-// and abuse caps are uniform across tiers — users pay by consumption, not
-// by what they're allowed to do.
+// is `monthlyAllowance` (and its $ price) plus `maxConcurrentJobs`. Users pay
+// by consumption, not by what they're allowed to do.
 const UNIVERSAL_FEATURES = {
   maxConcurrentJobs: 3,
-  maxCourseDesignsPerWeek: 25,
-  allowImage: true,
-  allowLinks: true,
 } as const;
 
 // Allowance is surfaced to users as integer multiples of the Free grant

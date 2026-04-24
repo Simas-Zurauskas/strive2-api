@@ -8,18 +8,12 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { priceLlmUsage, priceFlatUnit, LLM_PRICING, SERVICE_PRICING } from './pricing';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  ✓ ${name}`);
-};
 
 const zeroTokens = { cacheRead: 0, cacheCreation5m: 0, cacheCreation1h: 0, uncached: 0, output: 0 };
 
-console.log('pricing');
 
 // ── priceLlmUsage ─────────────────────────────────────────
 
@@ -145,13 +139,14 @@ test('always returns an integer', () => {
   assert.equal(Number.isInteger(cost), true);
 });
 
-test('Jina Reader priced at $0.02/MTok via the uncached bucket', () => {
+test('Jina Reader priced at $0.05/MTok via the uncached bucket', () => {
   const cost = priceLlmUsage({
     model: 'jina_reader_paid',
     ...zeroTokens,
     uncached: 1_000_000,
   });
-  assert.equal(cost, 200_000, 'Jina Reader $0.02/MTok = 200_000 μ¢');
+  // $0.05/MTok → 5¢/MTok → 50,000 μ¢/MTok. 1M uncached tokens = 50,000 μ¢.
+  assert.equal(cost, 50_000, 'Jina Reader $0.05/MTok = 50,000 μ¢');
 });
 
 // ── priceFlatUnit ─────────────────────────────────────────
@@ -169,22 +164,25 @@ test('priceFlatUnit scales linearly with units', () => {
 });
 
 test('priceFlatUnit clamps negative units to 0', () => {
-  const cost = priceFlatUnit({ sku: 'bfl_flux_kontext_pro', units: -5 });
+  const cost = priceFlatUnit({ sku: 'bfl_flux_dev', units: -5 });
   assert.equal(cost, 0);
 });
 
-test('BFL Flux Kontext Pro priced at $0.04/image', () => {
-  assert.equal(priceFlatUnit({ sku: 'bfl_flux_kontext_pro' }), 400_000);
+// Unit anchor: 1¢ = 10,000 μ¢. $0.025 = 25,000 μ¢; $0.016 = 16,000 μ¢.
+// These tests pin the canonical values after a prior 10× inflation bug
+// (all SKUs were entered with the wrong scale factor).
+
+test('BFL Flux dev priced at $0.025/image = 25,000 μ¢', () => {
+  assert.equal(priceFlatUnit({ sku: 'bfl_flux_dev' }), 25_000);
 });
 
-test('Tavily advanced search priced at $0.016/query (2 credits PAYG)', () => {
-  assert.equal(priceFlatUnit({ sku: 'tavily_search_advanced' }), 160_000);
+test('Tavily advanced search priced at $0.016/query = 16,000 μ¢', () => {
+  assert.equal(priceFlatUnit({ sku: 'tavily_search_advanced' }), 16_000);
 });
 
-test('Judge0 RapidAPI priced at $0.002/exec (overage rate)', () => {
-  assert.equal(priceFlatUnit({ sku: 'judge0_rapidapi' }), 20_000);
+test('Judge0 RapidAPI priced at $0.002/exec = 2,000 μ¢', () => {
+  assert.equal(priceFlatUnit({ sku: 'judge0_rapidapi' }), 2_000);
 });
 
 // ── Done ──────────────────────────────────────────────────
 
-console.log(`\n✓ ${passed} test(s) passed`);

@@ -14,6 +14,7 @@ export const ERROR_CODES = [
   'PASSWORD_NOT_SET',
   'INSUFFICIENT_CREDITS',
   'SUBSCRIPTION_ALREADY_EXISTS',
+  'TOO_MANY_ACTIVE_JOBS',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

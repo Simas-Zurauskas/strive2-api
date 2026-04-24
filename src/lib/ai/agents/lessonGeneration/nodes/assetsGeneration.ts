@@ -10,37 +10,11 @@ import { ILessonBlock } from '@models/LessonContentModel';
 import { LessonState } from '../state';
 import { curateLinks, toEmptyStateBlock } from '../links';
 
-// ── BFL image models ──────────────────────────────────
+// ── BFL image model ──────────────────────────────────
 
 const BFL_API_BASE = 'https://api.bfl.ai/v1';
-
-/**
- * Tier-conditional image model selection. Overview-tier courses use Flux
- * Dev ($0.025/image vs Kontext Pro's $0.04, ~37% cheaper) because their
- * hero images function as scroll-past decoration rather than illustrative
- * centerpieces — learners spend seconds per lesson card at this depth.
- * Comprehensive and deep_dive keep Kontext Pro for detail-heavy imagery.
- *
- * Note: the earlier audit targeted Flux Schnell ($0.003/image) but Schnell
- * is open-weights only — BFL's own API hosts Dev, Pro, Pro 1.1, Pro Ultra,
- * Kontext Pro, and Kontext Max. For Schnell-tier pricing we'd need fal.ai
- * / Replicate / Together, which adds infrastructure. Dev delivers the bulk
- * of the overview-tier savings without that lift.
- *
- * If Dev ever goes unavailable, flip `pickHeroModel` back to always-Kontext
- * — one-line revert, no pricing table edit needed.
- */
-type BflModelKey = 'dev' | 'kontext';
-const BFL_MODELS: Record<BflModelKey, { path: string; sku: 'bfl_flux_dev' | 'bfl_flux_kontext_pro' }> = {
-  dev: { path: '/flux-dev', sku: 'bfl_flux_dev' },
-  kontext: { path: '/flux-kontext-pro', sku: 'bfl_flux_kontext_pro' },
-};
-
-const pickHeroModel = ({ depth }: { depth: string }) => {
-  return BFL_MODELS.dev;
-  // if (depth === 'overview') return BFL_MODELS.dev;
-  // return BFL_MODELS.kontext;
-};
+const BFL_MODEL_PATH = '/flux-dev';
+const BFL_MODEL_SKU = 'bfl_flux_dev' as const;
 const BFL_POLL_INTERVAL_MS = 3_000;
 const BFL_TIMEOUT_MS = 120_000;
 
@@ -182,7 +156,6 @@ const generateHeroImage = async ({
   depth: string;
 }): Promise<string | null> => {
   try {
-    const model = pickHeroModel({ depth });
     const style = getStyleForLesson({ moduleIndex, lessonIndex });
 
     // Content-addressed dedup. Shared across courses: two users asking the
@@ -196,7 +169,7 @@ const generateHeroImage = async ({
       moduleName,
       courseGoal,
       style,
-      modelPath: model.path,
+      modelPath: BFL_MODEL_PATH,
     });
     const hashKey = `lessons/hero/${hash}.png`;
 
@@ -216,7 +189,7 @@ const generateHeroImage = async ({
     const prompt = `A wide editorial illustration about "${lessonName}" (part of "${moduleName}" in a course on ${courseGoal}). The image must clearly depict the specific subject matter of this lesson — show recognisable objects, diagrams, or scenes that someone familiar with the topic would instantly connect to "${lessonName}". Style: ${style} Wide 16:9 composition. No text, no letters, no digits, no human faces.`;
 
     // 1. Submit generation task
-    const submitRes = await fetch(`${BFL_API_BASE}${model.path}`, {
+    const submitRes = await fetch(`${BFL_API_BASE}${BFL_MODEL_PATH}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -283,8 +256,8 @@ const generateHeroImage = async ({
     recordUsage({
       service: 'bfl',
       action: 'image:hero',
-      costMicroCents: priceFlatUnit({ sku: model.sku }),
-      metadata: { style, bytes: buffer.byteLength, s3Key: hashKey, hash, model: model.path, depth },
+      costMicroCents: priceFlatUnit({ sku: BFL_MODEL_SKU }),
+      metadata: { style, bytes: buffer.byteLength, s3Key: hashKey, hash, model: BFL_MODEL_PATH, depth },
     });
 
     return hashKey;

@@ -8,16 +8,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { canonicalizeEmail } from './emailCanonicalize';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  ✓ ${name}`);
-};
 
-console.log('emailCanonicalize');
 
 // ── Basic normalization ──────────────────────────────────────
 
@@ -115,4 +109,3 @@ test('multiple @ signs: only split on the last', () => {
 
 // ── Done ──────────────────────────────────────────────────
 
-console.log(`\n✓ ${passed} test(s) passed`);

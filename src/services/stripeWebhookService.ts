@@ -4,6 +4,7 @@ import UserModel from '@models/UserModel';
 import CreditLedgerModel, { CreditLedgerReason } from '@models/CreditLedgerModel';
 import { PLANS, PlanKey } from '@lib/creditPricing';
 import { emitCreditsUpdated } from '@lib/creditSocket';
+import { monetization } from '@lib/loggers';
 import { getStripe, mapPriceIdToPlan } from './stripeService';
 import Stripe from 'stripe';
 
@@ -16,6 +17,7 @@ import Stripe from 'stripe';
  * idempotent because the source of truth is the incoming Stripe object.
  */
 export const handleStripeEvent = async (event: Stripe.Event): Promise<void> => {
+  monetization.info(`Webhook received: ${event.type} (${event.id})`);
   switch (event.type) {
     case 'checkout.session.completed':
       await handleCheckoutSessionCompleted(event);
@@ -31,6 +33,12 @@ export const handleStripeEvent = async (event: Stripe.Event): Promise<void> => {
       return;
     case 'invoice.payment_failed':
       await handleInvoicePaymentFailed(event);
+      return;
+    case 'charge.refunded':
+      await handleChargeRefunded(event);
+      return;
+    case 'charge.dispute.created':
+      await handleChargeDisputeCreated(event);
       return;
     default:
       // Stripe sends lots of event types; ignore the ones we don't subscribe to.
@@ -65,9 +73,7 @@ const onSubscriptionCheckoutCompleted = async ({
 }): Promise<void> => {
   const userId = session.metadata?.userId;
   if (!userId) {
-    console.warn(
-      `[stripe] checkout.session.completed (subscription) without userId metadata, event ${event.id}`.yellow,
-    );
+    monetization.warn(`Subscription checkout without userId metadata, event ${event.id}`);
     return;
   }
 
@@ -79,7 +85,7 @@ const onSubscriptionCheckoutCompleted = async ({
   const priceId = subscription.items.data[0]?.price?.id;
   const planInfo = mapPriceIdToPlan(priceId);
   if (!planInfo) {
-    console.warn(`[stripe] unknown priceId ${priceId} on new subscription ${subscriptionId}`.yellow);
+    monetization.warn(`Unknown priceId ${priceId} on new subscription ${subscriptionId}`);
     return;
   }
 
@@ -119,6 +125,10 @@ const onSubscriptionCheckoutCompleted = async ({
     notes: `Subscription checkout → ${planInfo.plan} ${planInfo.cadence}`,
   });
 
+  monetization.info(
+    `Subscription activated: user=${userId} plan=${planInfo.plan}/${planInfo.cadence} allowance=${plan.monthlyAllowance}`,
+  );
+
   // Cancel-and-replace: if this Checkout was initiated by a paid user
   // switching plans, the old subscription id is stamped in session
   // metadata. Cancel it now that the NEW subscription is active + the
@@ -130,7 +140,7 @@ const onSubscriptionCheckoutCompleted = async ({
   if (replacingId && replacingId !== subscriptionId) {
     try {
       await stripe.subscriptions.cancel(replacingId);
-      console.log(`[stripe] replaced subscription ${replacingId} → ${subscriptionId} for user ${userId}`.cyan);
+      monetization.info(`Replaced subscription ${replacingId} → ${subscriptionId} for user=${userId}`);
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (code !== 'resource_missing') {
@@ -152,7 +162,7 @@ const onTopupCheckoutCompleted = async ({
 }): Promise<void> => {
   const userId = session.metadata?.userId;
   if (!userId) {
-    console.warn(`[stripe] topup checkout without userId metadata, event ${event.id}`.yellow);
+    monetization.warn(`Top-up checkout without userId metadata, event ${event.id}`);
     return;
   }
 
@@ -169,8 +179,8 @@ const onTopupCheckoutCompleted = async ({
   const credits = Number(creditsRaw);
   const amountUsd = Number(amountUsdRaw);
   if (!Number.isInteger(credits) || credits <= 0 || !Number.isInteger(amountUsd) || amountUsd <= 0) {
-    console.warn(
-      `[stripe] topup checkout with invalid metadata (credits=${creditsRaw}, amountUsd=${amountUsdRaw}), event ${event.id}`.yellow,
+    monetization.warn(
+      `Top-up checkout with invalid metadata (credits=${creditsRaw}, amountUsd=${amountUsdRaw}), event ${event.id}`,
     );
     return;
   }
@@ -195,6 +205,10 @@ const onTopupCheckoutCompleted = async ({
     // amount alone tells the user what they spent.
     notes: `Top-up: $${amountUsd}`,
   });
+
+  monetization.info(
+    `Top-up purchased: user=${userId} credits=+${credits} amount=$${amountUsd} bonus=${user.credits.bonusBalance}→${user.credits.bonusBalance + credits}`,
+  );
 };
 
 const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => {
@@ -260,10 +274,16 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
           notes: `Upgrade ${oldPlan} → ${newPlan}: +${deltaAllowance} allowance`,
         });
       }
+      monetization.info(
+        `Plan upgraded: user=${user._id} ${oldPlan}→${newPlan} bonus=+${deltaAllowance} allowance`,
+      );
     } catch (err) {
       // Duplicate-key on stripeEventId means we've already processed this
       // exact event; state sync happens once, safe to swallow.
-      if (!isDuplicateKeyError(err)) throw err;
+      if (!isDuplicateKeyError(err)) {
+        throw err;
+      }
+      monetization.info(`Duplicate subscription.updated event ${event.id}, skipping`);
     }
     return;
   }
@@ -272,6 +292,7 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
     // Defer downgrade until next invoice.paid applies the new plan. Keep
     // current plan + credits intact so the user has what they paid for.
     update['subscription.pendingPlan'] = newPlan;
+    monetization.info(`Downgrade scheduled: user=${user._id} ${oldPlan}→${newPlan} (applies at next renewal)`);
   }
 
   await UserModel.updateOne({ _id: user._id }, { $set: update });
@@ -321,8 +342,12 @@ const handleSubscriptionDeleted = async (event: Stripe.Event): Promise<void> => 
       bonusAfter: user.credits.bonusBalance,
       notes: 'Subscription ended — downgraded to Free',
     });
+    monetization.info(
+      `Subscription canceled: user=${user._id} → Free (allowance reset to ${freeAllowance})`,
+    );
   } catch (err) {
     if (!isDuplicateKeyError(err)) throw err;
+    monetization.info(`Duplicate subscription.deleted event ${event.id}, skipping`);
   }
 };
 
@@ -386,8 +411,12 @@ const handleInvoicePaid = async (event: Stripe.Event): Promise<void> => {
       bonusAfter: user.credits.bonusBalance,
       notes: `Renewal — ${effectivePlan} (${invoice.billing_reason})`,
     });
+    monetization.info(
+      `Period reset: user=${user._id} plan=${effectivePlan} allowance=${user.credits.allowanceBalance}→${plan.monthlyAllowance} (${invoice.billing_reason})`,
+    );
   } catch (err) {
     if (!isDuplicateKeyError(err)) throw err;
+    monetization.info(`Duplicate invoice.paid event ${event.id}, skipping`);
   }
 };
 
@@ -400,9 +429,183 @@ const handleInvoicePaymentFailed = async (event: Stripe.Event): Promise<void> =>
     { 'subscription.stripeSubscriptionId': subscriptionId },
     { $set: { 'subscription.status': 'past_due' } },
   );
+  monetization.warn(`Invoice payment failed: subscription=${subscriptionId} → past_due`);
   // No credit mutation here — user keeps current balance; Stripe's dunning
   // retries the payment over the next few days. A grace-period sweep job
   // (Phase 5) downgrades to free if dunning exhausts without success.
+};
+
+// ── Refunds & disputes ──────────────────────────────────────
+
+/**
+ * On a merchant-issued refund (full or partial), Stripe sends the money back
+ * to the user's card. We mirror that by clawing back bonus credits so the
+ * user can't keep both the money AND the credits from the refunded top-up.
+ *
+ * Only top-up payments carry the `flow=topup` + `userId` + `credits` metadata
+ * we need. Subscription refunds (invoice refunds) are ignored here — those
+ * clean up via `customer.subscription.deleted` if the sub is cancelled.
+ *
+ * Partial refunds are clawed back proportionally (ceil, so cent-scale
+ * partials always clear ≥ 1 credit). Clamped at the user's current bonus
+ * balance — if they've already spent part of the refunded top-up, we absorb
+ * the difference rather than let their balance go negative. Matches the same
+ * "bounded loss" principle the debit path uses.
+ *
+ * Idempotent via `stripeEventId` on the ledger row — duplicate webhook
+ * deliveries insert once, subsequent retries hit E11000 and no-op.
+ */
+const handleChargeRefunded = async (event: Stripe.Event): Promise<void> => {
+  const charge = event.data.object as Stripe.Charge;
+  const paymentIntentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+  if (!paymentIntentId) return;
+
+  const stripe = getStripe();
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+  const metadata = paymentIntent.metadata ?? {};
+  if (metadata.flow !== 'topup') return;
+
+  const userId = metadata.userId;
+  const creditsGranted = Number(metadata.credits);
+  if (!userId || !Number.isInteger(creditsGranted) || creditsGranted <= 0) {
+    monetization.warn(`charge.refunded for topup PI ${paymentIntentId} with invalid metadata, event ${event.id}`);
+    return;
+  }
+
+  // `charge.refunds.data` is newest-first; the refund that triggered this
+  // event is index 0. Fall back to `charge.amount_refunded` vs `charge.amount`
+  // if for some reason the list is empty.
+  const latestRefund = charge.refunds?.data?.[0];
+  const refundAmount = latestRefund?.amount ?? charge.amount_refunded;
+  const chargeAmount = charge.amount;
+  if (!refundAmount || !chargeAmount) return;
+
+  const clawbackCredits = Math.ceil((creditsGranted * refundAmount) / chargeAmount);
+  if (clawbackCredits <= 0) return;
+
+  await applyClawback({
+    userId,
+    stripeEventId: event.id,
+    reason: 'refund_topup',
+    clawbackCredits,
+    notes: `Refund ($${(refundAmount / 100).toFixed(2)}) on top-up ${paymentIntentId}`,
+    logLabel: `Refund: user=${userId} amount=$${(refundAmount / 100).toFixed(2)} of $${(chargeAmount / 100).toFixed(2)}`,
+  });
+};
+
+/**
+ * When Stripe opens a dispute, funds are pulled from our account immediately
+ * (the user's bank already has the money back). Clawback credits pre-emptively
+ * so the user isn't able to keep the credits while we're also down the cash.
+ * If the dispute resolves in our favor, the funds are returned — a future
+ * `charge.dispute.closed` handler could reverse the clawback, but for now
+ * that's a manual-admin path (out of scope per plan).
+ */
+const handleChargeDisputeCreated = async (event: Stripe.Event): Promise<void> => {
+  const dispute = event.data.object as Stripe.Dispute;
+  const paymentIntentId = typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id;
+  if (!paymentIntentId) return;
+
+  const stripe = getStripe();
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+  const metadata = paymentIntent.metadata ?? {};
+  if (metadata.flow !== 'topup') return;
+
+  const userId = metadata.userId;
+  const creditsGranted = Number(metadata.credits);
+  if (!userId || !Number.isInteger(creditsGranted) || creditsGranted <= 0) return;
+
+  // Disputes are typically for the full charge amount, but the Dispute object
+  // does expose `amount` — scale proportionally just like refunds.
+  const disputeAmount = dispute.amount;
+  const chargeAmount = typeof dispute.charge === 'string' ? 0 : (dispute.charge?.amount ?? 0);
+  const clawbackCredits = chargeAmount > 0
+    ? Math.ceil((creditsGranted * disputeAmount) / chargeAmount)
+    : creditsGranted;
+  if (clawbackCredits <= 0) return;
+
+  await applyClawback({
+    userId,
+    stripeEventId: event.id,
+    reason: 'dispute_clawback',
+    clawbackCredits,
+    notes: `Dispute opened on top-up ${paymentIntentId} ($${(disputeAmount / 100).toFixed(2)})`,
+    logLabel: `Dispute opened: user=${userId} amount=$${(disputeAmount / 100).toFixed(2)} pi=${paymentIntentId}`,
+  });
+};
+
+const applyClawback = async ({
+  userId,
+  stripeEventId,
+  reason,
+  clawbackCredits,
+  notes,
+  logLabel,
+}: {
+  userId: string;
+  stripeEventId: string;
+  reason: CreditLedgerReason;
+  clawbackCredits: number;
+  notes: string;
+  logLabel: string;
+}): Promise<void> => {
+  // Ledger-first idempotency. Unlike the grant handlers (which $inc then
+  // write ledger), clawbacks need to be rock-solid against webhook retries —
+  // a double-debit on a retry is user-visible pain, while a double-ledger
+  // lookup is cheap. Pre-check the unique stripeEventId and bail before the
+  // `$inc` if this event already landed.
+  const existing = await CreditLedgerModel.findOne({ stripeEventId }).select('_id').lean();
+  if (existing) {
+    monetization.info(`${logLabel} — duplicate event, skipping`);
+    return;
+  }
+
+  const user = await UserModel.findById(userId).select('credits').lean();
+  if (!user) return;
+
+  // Clamp at what's still in the bonus balance. Allowance is untouched —
+  // top-ups land in bonus, and clawback should only pull from where the
+  // money went in the first place.
+  const actualClawback = Math.min(clawbackCredits, user.credits.bonusBalance);
+
+  if (actualClawback > 0) {
+    await UserModel.updateOne(
+      { _id: userId },
+      { $inc: { 'credits.bonusBalance': -actualClawback } },
+    );
+  }
+
+  const bonusAfter = user.credits.bonusBalance - actualClawback;
+
+  try {
+    await writeLedger({
+      userId,
+      stripeEventId,
+      reason,
+      allowanceDelta: 0,
+      bonusDelta: -actualClawback,
+      balanceBefore: user.credits.allowanceBalance,
+      balanceAfter: user.credits.allowanceBalance,
+      bonusBefore: user.credits.bonusBalance,
+      bonusAfter,
+      notes: actualClawback < clawbackCredits
+        ? `${notes} (intended −${clawbackCredits}, clamped to −${actualClawback})`
+        : notes,
+    });
+    const clamped = actualClawback < clawbackCredits
+      ? ` (clamped from ${clawbackCredits} — ${clawbackCredits - actualClawback} absorbed)`
+      : '';
+    const level = reason === 'dispute_clawback' ? 'warn' : 'info';
+    monetization[level](
+      `${logLabel} → clawback=−${actualClawback} credits${clamped} bonus=${user.credits.bonusBalance}→${bonusAfter}`,
+    );
+  } catch (err) {
+    // If two events with the same id arrive concurrently and both pass the
+    // pre-check above, the second insert will E11000 here — the first
+    // webhook already debited. Swallow; rare and bounded.
+    if (!isDuplicateKeyError(err)) throw err;
+    monetization.info(`${logLabel} — duplicate event race, skipping`);
+  }
 };
 
 // ── Helpers ──────────────────────────────────────

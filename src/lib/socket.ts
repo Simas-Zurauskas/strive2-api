@@ -28,6 +28,52 @@ import { ENVIRONMENT, FRONTEND_URL } from '@conf/env';
  */
 let io: SocketIOServer;
 
+/**
+ * Socket.io handshake middleware. Extracted as a named export so unit tests
+ * can call it with a stub socket — the io.use callback shape matches what
+ * Socket.io invokes internally on every connection.
+ *
+ * Mirrors HTTP `protect + requireVerified` gates: rejects missing/invalid
+ * token, expired token, tokenVersion mismatch (post-logout), and unverified
+ * credentials users. Google-only users skip the verified check (Google has
+ * already verified the email).
+ */
+export const socketAuthMiddleware = async (
+  socket: { handshake: { auth: { token?: string } }; data: { userId?: string } },
+  next: (err?: Error) => void,
+): Promise<void> => {
+  const token = socket.handshake.auth.token;
+
+  if (!token) {
+    return next(new Error('Unauthorized'));
+  }
+
+  const decoded = decodeAuthToken(token);
+
+  if (!decoded?.id) {
+    return next(new Error('Unauthorized'));
+  }
+
+  const user = await UserModel.findById(decoded.id)
+    .select('tokenVersion emailVerified authProviders')
+    .lean();
+
+  if (!user || decoded.tokenVersion !== user.tokenVersion) {
+    return next(new Error('Unauthorized'));
+  }
+
+  // Mirror the HTTP `requireVerified` gate: unverified credential users
+  // stay out of rooms until they confirm their email. Prevents them from
+  // receiving job-complete events for work they shouldn't have triggered.
+  const hasCredentials = user.authProviders.some((p) => p.provider === AuthProvider.CREDENTIALS);
+  if (hasCredentials && !user.emailVerified) {
+    return next(new Error('EMAIL_NOT_VERIFIED'));
+  }
+
+  socket.data.userId = decoded.id;
+  next();
+};
+
 export const initSocketIO = (httpServer: HttpServer): SocketIOServer => {
   io = new SocketIOServer(httpServer, {
     cors: {
@@ -37,39 +83,7 @@ export const initSocketIO = (httpServer: HttpServer): SocketIOServer => {
     path: '/socket.io',
   });
 
-  // JWT authentication middleware
-  io.use(async (socket, next) => {
-    const token = socket.handshake.auth.token as string | undefined;
-
-    if (!token) {
-      return next(new Error('Unauthorized'));
-    }
-
-    const decoded = decodeAuthToken(token);
-
-    if (!decoded?.id) {
-      return next(new Error('Unauthorized'));
-    }
-
-    const user = await UserModel.findById(decoded.id)
-      .select('tokenVersion emailVerified authProviders')
-      .lean();
-
-    if (!user || decoded.tokenVersion !== user.tokenVersion) {
-      return next(new Error('Unauthorized'));
-    }
-
-    // Mirror the HTTP `requireVerified` gate: unverified credential users
-    // stay out of rooms until they confirm their email. Prevents them from
-    // receiving job-complete events for work they shouldn't have triggered.
-    const hasCredentials = user.authProviders.some((p) => p.provider === AuthProvider.CREDENTIALS);
-    if (hasCredentials && !user.emailVerified) {
-      return next(new Error('EMAIL_NOT_VERIFIED'));
-    }
-
-    socket.data.userId = decoded.id;
-    next();
-  });
+  io.use(socketAuthMiddleware);
 
   io.on('connection', (socket) => {
     const userId = socket.data.userId as string;
