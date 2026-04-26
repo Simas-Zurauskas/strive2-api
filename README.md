@@ -36,6 +36,7 @@ For local development, you can optionally create a `.env.local` file to override
 - `AWS_S3_REGION`: AWS S3 region
 - `AWS_ACCESS_KEY_ID`: AWS Access Key ID
 - `AWS_SECRET_ACCESS_KEY`: AWS Secret Access Key
+- `GOOGLE_TTS_CREDENTIALS_JSON`: Google TTS Credentials JSON for text to speech
 
 ### Optional Variables
 

@@ -7,6 +7,7 @@ import { bgError } from '@lib/bg';
 import { bumpLinksGenerationOutcome } from '@lib/metrics';
 import { priceFlatUnit } from '@lib/pricing';
 import { ILessonBlock } from '@models/LessonContentModel';
+import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { LessonState } from '../state';
 import { curateLinks, toEmptyStateBlock } from '../links';
 
@@ -275,7 +276,7 @@ export const imageGeneration = async (state: LessonState, config?: RunnableConfi
     return { heroImageUrl: null };
   }
 
-  const writer = config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined;
+  const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
   const s3Key = await generateHeroImage({
     lessonName: state.lessonName,
@@ -312,7 +313,7 @@ export const linksGeneration = async (state: LessonState, config?: RunnableConfi
     return { linksBlock: null };
   }
 
-  const writer = config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined;
+  const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
   let timer: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<ILessonBlock>((resolve) => {

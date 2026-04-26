@@ -40,6 +40,7 @@ export const getBillingPlansController = asyncHandler(async (_req, res) => {
     return {
       key: plan.key,
       displayName: plan.displayName,
+      description: plan.description,
       monthlyUsd: plan.monthlyUsd,
       annualMonthlyUsd: plan.annualMonthlyUsd,
       // Annual sticker = monthly-equiv × 12 (billed once/year). Clients can

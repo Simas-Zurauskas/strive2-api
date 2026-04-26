@@ -56,6 +56,24 @@ export interface IUserCredits {
   bonusBalance: number;
 }
 
+export interface IUserPreferences {
+  /**
+   * Default Google Cloud TTS voice id for lesson narration (e.g.
+   * "en-US-Wavenet-F"). Lesson screen offers a per-lesson override; this
+   * field is just the user's "play with what I picked last" default. Empty
+   * string ('') means "no preference saved yet" — the server falls back to
+   * the catalog default in `lib/narration/voices.ts`.
+   */
+  narrationVoice: string;
+  /**
+   * Default TTS playback rate sent to Google (their `speakingRate`,
+   * range 0.25–4.0). The lesson player can also adjust client-side
+   * playbackRate on the <audio> element; this is the value baked into
+   * the synthesised file so it survives across devices.
+   */
+  narrationRate: number;
+}
+
 /** Persisted user fields (includes system-managed state). */
 export interface IUser extends UserInput {
   emailVerified: boolean;
@@ -67,6 +85,7 @@ export interface IUser extends UserInput {
   favoriteCourseIds: mongoose.Types.ObjectId[];
   subscription: IUserSubscription;
   credits: IUserCredits;
+  preferences: IUserPreferences;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -165,6 +184,25 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
           bonusBalance: 0,
         };
       },
+    },
+    preferences: {
+      type: new Schema<IUserPreferences>(
+        {
+          // Empty string is the "unset" sentinel — the lesson narration
+          // job resolves this to the catalog default at synthesis time so
+          // we don't pin every legacy user to a voice they never picked.
+          // No `required: true` on the string because Mongoose treats the
+          // empty string as missing under that validator.
+          narrationVoice: { type: String, default: '' },
+          // Google's speakingRate range is 0.25–4.0; clamp at the schema
+          // so a stale client can't push out-of-range values that would
+          // make the synthesis call fail.
+          narrationRate: { type: Number, default: 1.0, min: 0.25, max: 4.0 },
+        },
+        { _id: false },
+      ),
+      required: true,
+      default: () => ({ narrationVoice: '', narrationRate: 1.0 }),
     },
   },
   {

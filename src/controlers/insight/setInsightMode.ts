@@ -27,8 +27,7 @@ import { parseInsightIdParam, setInsightModeSchema } from './validation';
  *             required: [mode]
  *             properties:
  *               mode:
- *                 type: string
- *                 enum: [tap-reveal, typed-recall]
+ *                 $ref: '#/components/schemas/InsightMode'
  *     responses:
  *       200:
  *         content:
@@ -42,8 +41,7 @@ import { parseInsightIdParam, setInsightModeSchema } from './validation';
  *                   required: [mode]
  *                   properties:
  *                     mode:
- *                       type: string
- *                       enum: [tap-reveal, typed-recall]
+ *                       $ref: '#/components/schemas/InsightMode'
  */
 export const setInsightModeController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

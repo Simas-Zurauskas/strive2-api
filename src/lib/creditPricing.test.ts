@@ -11,9 +11,11 @@ import {
   MICROCENTS_PER_CREDIT,
   PLANS,
   PLAN_KEYS,
+  PLAN_USD_PER_CREDIT,
   TOPUP_CREDITS_PER_USD,
   TOPUP_MAX_USD,
   TOPUP_MIN_USD,
+  TOPUP_USD_PER_CREDIT,
   microCentsToCredits,
 } from './creditPricing';
 
@@ -122,6 +124,28 @@ test('per-plan gross margin ladder is sane (Free loss leader, paid > 40%)', () =
   assert.ok(margin(PLANS.starter.monthlyUsd, PLANS.starter.monthlyAllowance) >= 0.4);
   assert.ok(margin(PLANS.pro.monthlyUsd, PLANS.pro.monthlyAllowance) >= 0.4);
   assert.ok(margin(PLANS.studio.monthlyUsd, PLANS.studio.monthlyAllowance) >= 0.4);
+});
+
+// ── Per-credit USD rates (used by engineer billing view) ───
+
+test('PLAN_USD_PER_CREDIT pins the four expected rates', () => {
+  // If any of these change, the engineer billing view's USD math shifts —
+  // updating this test makes the price change a deliberate edit.
+  assert.equal(PLAN_USD_PER_CREDIT.free, 0);
+  assert.ok(Math.abs(PLAN_USD_PER_CREDIT.starter - 12.99 / 650) < 1e-9);
+  assert.ok(Math.abs(PLAN_USD_PER_CREDIT.pro - 24.99 / 1_950) < 1e-9);
+  assert.ok(Math.abs(PLAN_USD_PER_CREDIT.studio - 49.99 / 5_200) < 1e-9);
+});
+
+test('rates ladder: Studio cheaper per credit than Pro, Pro cheaper than Starter', () => {
+  // Bigger plans should always come with a lower per-credit unit cost.
+  assert.ok(PLAN_USD_PER_CREDIT.studio < PLAN_USD_PER_CREDIT.pro);
+  assert.ok(PLAN_USD_PER_CREDIT.pro < PLAN_USD_PER_CREDIT.starter);
+});
+
+test('TOPUP_USD_PER_CREDIT == 1 / TOPUP_CREDITS_PER_USD', () => {
+  assert.equal(TOPUP_USD_PER_CREDIT, 1 / TOPUP_CREDITS_PER_USD);
+  assert.equal(TOPUP_USD_PER_CREDIT, 0.025);
 });
 
 // ── Done ──────────────────────────────────────────────────

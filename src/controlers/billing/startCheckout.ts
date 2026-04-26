@@ -21,9 +21,9 @@ import { checkoutSchema } from './validation';
  *               plan:
  *                 type: string
  *                 enum: [starter, pro, studio]
+ *                 description: Paid plan to subscribe to — free is excluded (handled via cancel).
  *               cadence:
- *                 type: string
- *                 enum: [monthly, annual]
+ *                 $ref: '#/components/schemas/BillingCadence'
  *               replaceCurrentSubscription:
  *                 type: boolean
  *                 description: >

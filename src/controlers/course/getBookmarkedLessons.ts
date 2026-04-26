@@ -22,27 +22,7 @@ import CourseModel from '@models/CourseModel';
  *                 data:
  *                   type: array
  *                   items:
- *                     type: object
- *                     required: [courseId, courseName, courseSlug, moduleIndex, lessonIndex, lessonName, moduleName, bookmarkedAt]
- *                     properties:
- *                       courseId:
- *                         type: string
- *                       courseName:
- *                         type: string
- *                       courseSlug:
- *                         type: string
- *                         nullable: true
- *                       moduleIndex:
- *                         type: number
- *                       lessonIndex:
- *                         type: number
- *                       moduleName:
- *                         type: string
- *                       lessonName:
- *                         type: string
- *                       bookmarkedAt:
- *                         type: string
- *                         format: date-time
+ *                     $ref: '#/components/schemas/BookmarkedLessonItem'
  */
 export const getBookmarkedLessonsController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

@@ -22,9 +22,15 @@
  * Spend accumulator
  * ──────────────────────────────────────────────────────────────────────
  * Every scope carries a mutable `spendMicroCents` counter. Each
- * `recordUsage(...)` call increments it with the real provider cost.
- * At job completion the job runner reads the running total and debits
- * the user's credit balance accordingly (see `creditService.debitActualSpend`).
+ * `recordUsage(...)` call increments it with the **user-charged** cost
+ * (vendor cost × any per-service markup; see `applyStaticMarkup` in
+ * `lib/pricing.ts`). For services without markup the increment equals the
+ * vendor cost. At job completion the job runner reads the running total
+ * and debits the user's credit balance accordingly (see
+ * `creditService.debitActualSpend`).
+ *
+ * The per-row vendor cost is still preserved on `UsageEventModel.costMicroCents`
+ * — that is the canonical source for unit-economics analytics.
  *
  * The counter is a plain object (not a primitive) so references stay live
  * across AsyncLocalStorage propagation — a primitive would be copied into
@@ -34,6 +40,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { PlanKey, SubscriptionStatus } from '@lib/creditPricing';
 
 export interface UsageContext {
   userId: string;
@@ -47,10 +54,19 @@ export interface UsageContext {
   moduleIndex?: number;
   lessonIndex?: number;
   /**
-   * Mutable accumulator of real provider spend for this scope. Incremented
-   * by `recordUsage` on every paid call; read at job end by
-   * `debitActualSpend`. The object wrapper is required for cross-async
-   * mutation visibility — don't swap it for a bare number.
+   * The user's plan + subscription status when this scope opened. Stamped onto
+   * every UsageEvent recorded under it so the engineer billing view can show
+   * which plan a row was attributable to even if the user later up/downgrades.
+   * Optional — bg reapers / scripts that run outside auth or job paths leave
+   * these undefined and rows simply have no plan info.
+   */
+  plan?: PlanKey;
+  subscriptionStatus?: SubscriptionStatus;
+  /**
+   * Mutable accumulator of user-charged spend for this scope (vendor cost ×
+   * per-service markup). Incremented by `recordUsage` on every paid call;
+   * read at job end by `debitActualSpend`. The object wrapper is required
+   * for cross-async mutation visibility — don't swap it for a bare number.
    */
   spendMicroCents: { current: number };
 }

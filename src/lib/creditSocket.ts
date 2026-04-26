@@ -1,17 +1,9 @@
 import mongoose from 'mongoose';
 import * as Sentry from '@sentry/node';
+import type { CreditsUpdatedEvent } from '@src/types/socketEvents';
 import { getIO } from './socket';
 
-export interface CreditsUpdatedPayload {
-  allowance: number;
-  bonus: number;
-  total: number;
-  /** Signed delta that caused the update (for nudging UI toast/animation). */
-  delta: number;
-  reason: string;
-  /** Optional: actionType when reason is debit/refund. */
-  actionType?: string;
-}
+export type CreditsUpdatedPayload = CreditsUpdatedEvent;
 
 /**
  * Push a credits:updated event to a specific user's socket room so the

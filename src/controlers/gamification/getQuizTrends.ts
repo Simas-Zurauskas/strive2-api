@@ -19,7 +19,7 @@ import { getQuizTrends } from '@services/gamificationService';
  *               required: [data]
  *               properties:
  *                 data:
- *                   type: object
+ *                   $ref: '#/components/schemas/QuizTrendsResult'
  */
 export const getQuizTrendsController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

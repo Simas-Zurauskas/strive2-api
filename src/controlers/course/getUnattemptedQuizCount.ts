@@ -21,20 +21,7 @@ import { getUnattemptedQuizzes } from '@services/reviewSchedulingService';
  *                 data:
  *                   type: array
  *                   items:
- *                     type: object
- *                     required: [courseId, courseName, moduleIndex, moduleName]
- *                     properties:
- *                       courseId:
- *                         type: string
- *                       courseSlug:
- *                         type: string
- *                         nullable: true
- *                       courseName:
- *                         type: string
- *                       moduleIndex:
- *                         type: number
- *                       moduleName:
- *                         type: string
+ *                     $ref: '#/components/schemas/UnattemptedQuizItem'
  */
 export const getUnattemptedQuizCountController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

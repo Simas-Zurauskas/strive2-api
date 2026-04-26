@@ -90,13 +90,7 @@ const writeSSE = (res: import('express').Response, payload: Record<string, unkno
  *               messages:
  *                 type: array
  *                 items:
- *                   type: object
- *                   properties:
- *                     role:
- *                       type: string
- *                       enum: [user, assistant]
- *                     content:
- *                       type: string
+ *                   $ref: '#/components/schemas/ChatMessage'
  *     responses:
  *       200:
  *         description: SSE stream of chat response

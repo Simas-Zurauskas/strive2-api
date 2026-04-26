@@ -3,6 +3,7 @@ import UsageEventModel from '@models/UsageEventModel';
 import { bgError } from '@lib/bg';
 import { getUsageContext } from '@lib/usageContext';
 import { UsageService } from '@lib/usageConstants';
+import { applyStaticMarkup } from '@lib/pricing';
 
 /**
  * Append one row to the per-user usage ledger AND increment the active
@@ -38,11 +39,16 @@ export const recordUsage = ({
   if (!ctx) return;
   if (!Number.isFinite(costMicroCents) || costMicroCents <= 0) return;
 
-  // Increment the scope's running real-cost total BEFORE the DB write so a
-  // DB failure can't desync the accumulator from the analytics ledger (they
-  // diverge by the lost row, which is acceptable; the opposite — a row
-  // written but not counted — would silently under-charge the user).
-  ctx.spendMicroCents.current += costMicroCents;
+  // The user is debited against `chargedMicroCents` (vendor cost × any
+  // per-service markup). For services without markup the two values are
+  // identical, so this stays a pass-through for Anthropic LLM cost.
+  const chargedMicroCents = applyStaticMarkup({ service, costMicroCents });
+
+  // Increment the scope's running user-charged total BEFORE the DB write so
+  // a DB failure can't desync the accumulator from the analytics ledger
+  // (they diverge by the lost row, which is acceptable; the opposite — a
+  // row written but not counted — would silently under-charge the user).
+  ctx.spendMicroCents.current += chargedMicroCents;
 
   const userId = new mongoose.Types.ObjectId(ctx.userId);
   const mergedMetadata = {
@@ -60,6 +66,9 @@ export const recordUsage = ({
     service,
     action,
     costMicroCents,
+    chargedMicroCents,
+    ...(ctx.plan ? { planAtTime: ctx.plan } : {}),
+    ...(ctx.subscriptionStatus ? { subscriptionStatusAtTime: ctx.subscriptionStatus } : {}),
     metadata: mergedMetadata,
   }).catch(bgError('usage.record'));
 };

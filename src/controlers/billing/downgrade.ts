@@ -26,9 +26,9 @@ import { downgradeSchema } from './validation';
  *               plan:
  *                 type: string
  *                 enum: [starter, pro]
+ *                 description: Downgrade target — must be strictly lower than the current plan. Excludes studio (top tier) and free (handled via cancel).
  *               cadence:
- *                 type: string
- *                 enum: [monthly, annual]
+ *                 $ref: '#/components/schemas/BillingCadence'
  *     responses:
  *       200:
  *         content:
@@ -42,7 +42,7 @@ import { downgradeSchema } from './validation';
  *                   required: [scheduledPlan]
  *                   properties:
  *                     scheduledPlan:
- *                       type: string
+ *                       $ref: '#/components/schemas/PlanKey'
  *                     periodEnd:
  *                       type: string
  *                       format: date-time

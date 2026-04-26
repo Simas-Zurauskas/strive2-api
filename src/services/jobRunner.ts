@@ -7,6 +7,8 @@ import LessonContentModel, { ILessonBlock } from '@models/LessonContentModel';
 import InsightModel from '@models/InsightModel';
 import { JobType, CourseDepth } from '@lib/constants';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
+import { contextLoad, imageGeneration, linksGeneration } from '@lib/ai/agents/lessonGeneration/nodes';
+import type { LessonState } from '@lib/ai/agents/lessonGeneration/state';
 import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { clarifyCourse, generateCourseStructure, refineCourseStructure, generateDepthPreviews, isThinFreeText } from './courseService';
@@ -14,6 +16,7 @@ import { cleanupCourseContent } from './courseCleanupService';
 import { GeneratedInsight, persistLessonInsights } from './insightContentService';
 import { deleteByPrefix } from './s3Service';
 import { jobEvents } from './jobEvents';
+import type { LessonProgressEvent } from '@src/types/socketEvents';
 import { bgError } from '@lib/bg';
 import { InsufficientCreditsError, MaxConcurrentJobsError, debitActualSpend, getBalance } from './creditService';
 import UserModel from '@models/UserModel';
@@ -27,6 +30,7 @@ import {
 } from '@lib/metrics';
 import { generateUniqueSlug } from '@lib/slugify';
 import { runWithUsageContext } from '@lib/usageContext';
+import { runLessonNarration } from './lessonNarrationService';
 
 // ── Concurrency & timeout ───────────────────────────────
 
@@ -298,7 +302,7 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         }, 500);
       };
 
-      const emitProgress = (event: Record<string, unknown>) => {
+      const emitProgress = (event: LessonProgressEvent) => {
         jobEvents.emit('progress', {
           jobId,
           userId,
@@ -315,13 +319,13 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       // same shape as the old SSE writer, and the agent's nodes (which were
       // already wired for the SSE path via `config.configurable.writer`)
       // continue to work unmodified.
-      const trackingWriter = (event: Record<string, unknown>) => {
+      const trackingWriter = (event: LessonProgressEvent) => {
         emitProgress(event);
         if (event.type === 'block') {
-          allBlocks.push(event.block as ILessonBlock);
+          allBlocks.push(event.block);
           debouncedSave({ summary: null });
         } else if (event.type === 'hero_image') {
-          savedHeroImageUrl = (event.s3Key as string) || (event.url as string);
+          savedHeroImageUrl = event.s3Key ?? event.url;
           debouncedSave({ summary: null });
         }
       };
@@ -521,6 +525,109 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       );
       return;
     }
+    case 'regenerate_hero': {
+      const moduleIndex = (metadata?.moduleIndex as number) ?? 0;
+      const lessonIndex = (metadata?.lessonIndex as number) ?? 0;
+      const lessonContent = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
+      if (!lessonContent) throw new Error(`Lesson content missing: ${moduleIndex}/${lessonIndex}`);
+
+      const emitProgress = (event: LessonProgressEvent) => {
+        jobEvents.emit('progress', { jobId, userId, courseId, type: 'regenerate_hero', moduleIndex, lessonIndex, event });
+      };
+
+      const baseState = {
+        courseId,
+        goal: course.goal,
+        answers: formatCourseAnswers(course),
+        depth: course.depth ?? 'comprehensive',
+        domain: course.domain ?? null,
+        structure: course.structure as LessonState['structure'],
+        moduleIndex,
+        lessonIndex,
+        includeImage: true,
+        includeLinks: false,
+      };
+      const derived = await contextLoad(baseState as unknown as LessonState);
+      const state = { ...baseState, ...derived } as LessonState;
+
+      const result = await imageGeneration(state, { configurable: { writer: emitProgress } });
+      const s3Key = result.heroImageUrl ?? null;
+
+      if (!(await CourseModel.exists({ _id: courseId }))) return;
+      await LessonContentModel.updateOne(
+        { courseId, moduleIndex, lessonIndex },
+        { heroImageUrl: s3Key, includeHeroImage: true },
+      );
+      return;
+    }
+    case 'regenerate_links': {
+      const moduleIndex = (metadata?.moduleIndex as number) ?? 0;
+      const lessonIndex = (metadata?.lessonIndex as number) ?? 0;
+      const lessonContent = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
+      if (!lessonContent) throw new Error(`Lesson content missing: ${moduleIndex}/${lessonIndex}`);
+
+      const emitProgress = (event: LessonProgressEvent) => {
+        jobEvents.emit('progress', { jobId, userId, courseId, type: 'regenerate_links', moduleIndex, lessonIndex, event });
+      };
+
+      const baseState = {
+        courseId,
+        goal: course.goal,
+        answers: formatCourseAnswers(course),
+        depth: course.depth ?? 'comprehensive',
+        domain: course.domain ?? null,
+        structure: course.structure as LessonState['structure'],
+        moduleIndex,
+        lessonIndex,
+        includeImage: false,
+        includeLinks: true,
+        contentSummary: lessonContent.summary ?? '',
+      };
+      const derived = await contextLoad(baseState as unknown as LessonState);
+      const state = { ...baseState, ...derived } as LessonState;
+
+      const result = await linksGeneration(state, { configurable: { writer: emitProgress } });
+      const linksBlock = result.linksBlock ?? null;
+      if (!linksBlock) return;
+
+      if (!(await CourseModel.exists({ _id: courseId }))) return;
+      const blocks = [...lessonContent.blocks];
+      const existingIdx = blocks.findIndex((b) => b.type === 'links');
+      if (existingIdx >= 0) {
+        blocks[existingIdx] = linksBlock;
+      } else {
+        blocks.push(linksBlock);
+      }
+      await LessonContentModel.updateOne(
+        { courseId, moduleIndex, lessonIndex },
+        { blocks },
+      );
+      return;
+    }
+    case 'lesson_narration': {
+      const moduleIndex = (metadata?.moduleIndex as number) ?? 0;
+      const lessonIndex = (metadata?.lessonIndex as number) ?? 0;
+      const voiceId = (metadata?.voiceId as string | undefined) ?? null;
+      const rate = (metadata?.rate as number | undefined) ?? null;
+
+      const emitProgress = (event: LessonProgressEvent) => {
+        jobEvents.emit('progress', {
+          jobId, userId, courseId, type: 'lesson_narration', moduleIndex, lessonIndex, event,
+        });
+      };
+      emitProgress({ type: 'narration_started' });
+
+      const result = await runLessonNarration({
+        courseId, moduleIndex, lessonIndex, voiceId, rate,
+      });
+
+      emitProgress({
+        type: 'narration_ready',
+        cached: result.cached,
+        voiceId: result.voiceId,
+      });
+      return;
+    }
     default:
       throw new Error(`Unknown job type: ${type}`);
   }
@@ -538,6 +645,16 @@ const processJob = async (jobId: string): Promise<void> => {
   let errorMessage: string | undefined;
 
   const jobMetadata = (job.metadata ?? {}) as Record<string, unknown>;
+  // Snapshot the user's plan + subscription status at job-start so every
+  // recordUsage call under the scope stamps these onto the persisted row.
+  // Single projection — cheap; failures fall through to a stamp-less scope
+  // (events still record, just with no plan info).
+  const planSnapshot = await UserModel.findById(job.userId, { 'subscription.plan': 1, 'subscription.status': 1 })
+    .lean()
+    .catch((e) => {
+      bgError('jobRunner.planSnapshot')(e);
+      return null;
+    });
   // Enter a usage-tracking scope so every paid action the agents trigger
   // (LLMs, image gen, Tavily, Jina) is attributed to this user + job.
   // Module/lesson indices are threaded where present so a single
@@ -551,6 +668,8 @@ const processJob = async (jobId: string): Promise<void> => {
         courseId: job.courseId.toString(),
         ...(typeof jobMetadata.moduleIndex === 'number' ? { moduleIndex: jobMetadata.moduleIndex } : {}),
         ...(typeof jobMetadata.lessonIndex === 'number' ? { lessonIndex: jobMetadata.lessonIndex } : {}),
+        ...(planSnapshot?.subscription?.plan ? { plan: planSnapshot.subscription.plan } : {}),
+        ...(planSnapshot?.subscription?.status ? { subscriptionStatus: planSnapshot.subscription.status } : {}),
       },
       fn,
     }) as Promise<T>;

@@ -13,6 +13,7 @@ export const USAGE_SERVICES = [
   'tavily',    // Tavily advanced web search
   'jina',      // Jina Reader — main-content extraction
   'judge0',    // Judge0 — sandboxed code execution
+  'tts',       // Google Cloud Text-to-Speech — lesson audio narration
 ] as const;
 
 export type UsageService = typeof USAGE_SERVICES[number];

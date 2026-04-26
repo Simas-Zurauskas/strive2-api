@@ -28,6 +28,17 @@ export const AWS_S3_REGION = getEnv('AWS_S3_REGION');
 export const AWS_ACCESS_KEY_ID = getEnv('AWS_ACCESS_KEY_ID');
 export const AWS_SECRET_ACCESS_KEY = getEnv('AWS_SECRET_ACCESS_KEY');
 
+// Google Cloud Text-to-Speech credentials. Either:
+//   GOOGLE_TTS_CREDENTIALS_JSON — full JSON service-account key as a single
+//     env var (preferred for hosted envs where mounting a credentials file
+//     is awkward).
+//   GOOGLE_APPLICATION_CREDENTIALS — standard Google SDK env pointing to a
+//     credentials file path; auto-picked up by the SDK if set.
+// At least one must be provided; the TTS client throws on first synth call
+// if neither is reachable. Optional at server boot so dev environments
+// without TTS still start.
+export const GOOGLE_TTS_CREDENTIALS_JSON = process.env.GOOGLE_TTS_CREDENTIALS_JSON;
+
 export const PORT = process.env.PORT || 4000;
 export const API_URL = process.env.API_URL || `http://localhost:${PORT}`;
 

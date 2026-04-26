@@ -38,6 +38,15 @@ export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
 export interface PlanDefinition {
   key: PlanKey;
   displayName: string;
+  /**
+   * Public-facing one-paragraph blurb shown on the /pricing page card and
+   * mirrored in the matching Stripe product's `description`. Phrased in
+   * usage-shape terms (courses, lessons, regenerations) rather than naked
+   * credit numbers — credits are an internal accounting unit, not a UX one.
+   * Update both this string and the Stripe product description together so
+   * the pricing page and Checkout copy stay in lockstep.
+   */
+  description: string;
   /** Public monthly USD price, surfaced on pricing page. 0 for free. */
   monthlyUsd: number;
   /** Public annual USD price (monthly-equivalent), for the –20% annual plan. */
@@ -64,6 +73,8 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
   free: {
     key: 'free',
     displayName: 'Free',
+    description:
+      'Get started at no cost. A modest recurring AI-generation allowance to try personalized course building, lesson generation, quizzes, and code-execution practice.',
     monthlyUsd: 0,
     annualMonthlyUsd: 0,
     monthlyAllowance: ALLOWANCE_UNIT * 1,
@@ -72,6 +83,8 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
   starter: {
     key: 'starter',
     displayName: 'Starter',
+    description:
+      'Monthly plan for occasional learners. Recurring AI-generation allowance sized for building a few personalized courses each month, plus regular lesson generation, quizzes, and code-execution practice.',
     monthlyUsd: 12.99,
     annualMonthlyUsd: 10.39,
     monthlyAllowance: ALLOWANCE_UNIT * 5,
@@ -80,6 +93,8 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
   pro: {
     key: 'pro',
     displayName: 'Pro',
+    description:
+      'Monthly plan for active learners. Substantially larger recurring AI-generation allowance — comfortable headroom for ongoing course building, frequent lesson regeneration, and intensive review and code practice.',
     monthlyUsd: 24.99,
     annualMonthlyUsd: 19.99,
     monthlyAllowance: ALLOWANCE_UNIT * 15,
@@ -88,6 +103,8 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
   studio: {
     key: 'studio',
     displayName: 'Studio',
+    description:
+      'Monthly plan for power users and educators. Our largest recurring AI-generation allowance, designed for heavy continuous use — building several courses in parallel and frequent re-generation across the platform.',
     monthlyUsd: 49.99,
     annualMonthlyUsd: 39.99,
     monthlyAllowance: ALLOWANCE_UNIT * 40,
@@ -137,6 +154,17 @@ export const microCentsToCredits = (microCents: number): number => {
   return Math.ceil(microCents / MICROCENTS_PER_CREDIT);
 };
 
+// User-facing $/credit by funding source. Derived directly from PLANS so
+// any monthlyUsd / monthlyAllowance change cascades automatically. Used by
+// the engineer billing view to translate per-row credits into the dollars
+// the user effectively paid given which balance bucket covered them.
+export const PLAN_USD_PER_CREDIT: Record<PlanKey, number> = {
+  free: 0,
+  starter: PLANS.starter.monthlyUsd / PLANS.starter.monthlyAllowance,
+  pro: PLANS.pro.monthlyUsd / PLANS.pro.monthlyAllowance,
+  studio: PLANS.studio.monthlyUsd / PLANS.studio.monthlyAllowance,
+};
+
 // ──────────────────────────────────────────────────────────────────────
 // Top-up rate (variable-amount, pay-as-you-go)
 // ──────────────────────────────────────────────────────────────────────
@@ -154,5 +182,6 @@ export const microCentsToCredits = (microCents: number): number => {
 // always an integer. Cents would need rounding (e.g. $5.01 × 40 = 200.4 cr)
 // and the rounding policy becomes a footgun nobody wants to audit later.
 export const TOPUP_CREDITS_PER_USD = 40;
+export const TOPUP_USD_PER_CREDIT = 1 / TOPUP_CREDITS_PER_USD;
 export const TOPUP_MIN_USD = 5;
 export const TOPUP_MAX_USD = 500;

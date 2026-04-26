@@ -49,9 +49,24 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
   // One aggregation: totals for today/month/all-time plus a per-service
   // breakdown. Grouping by null once and by service once in $facet keeps the
   // query hitting a single index (userId+timestamp).
+  //
+  // Each total tracks two sums:
+  //   - cost: vendor spend (what we paid the provider)
+  //   - charged: user-charged spend (vendor × per-service markup)
+  // Legacy rows have no `chargedMicroCents` field; `$ifNull` falls them back
+  // to `costMicroCents` so historical totals don't dip when read post-deploy.
+  const chargedExpr = { $ifNull: ['$chargedMicroCents', '$costMicroCents'] };
+
   const agg = await UsageEventModel.aggregate<{
-    totals: { today: number; thisMonth: number; allTime: number }[];
-    byService: { _id: UsageService; total: number }[];
+    totals: {
+      todayCost: number;
+      todayCharged: number;
+      monthCost: number;
+      monthCharged: number;
+      allTimeCost: number;
+      allTimeCharged: number;
+    }[];
+    byService: { _id: UsageService; cost: number; charged: number }[];
   }>([
     { $match: { userId: userObjId } },
     {
@@ -60,44 +75,65 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
           {
             $group: {
               _id: null,
-              today: {
-                $sum: {
-                  $cond: [{ $gte: ['$timestamp', todayStart] }, '$costMicroCents', 0],
-                },
+              todayCost: {
+                $sum: { $cond: [{ $gte: ['$timestamp', todayStart] }, '$costMicroCents', 0] },
               },
-              thisMonth: {
-                $sum: {
-                  $cond: [{ $gte: ['$timestamp', monthStart] }, '$costMicroCents', 0],
-                },
+              todayCharged: {
+                $sum: { $cond: [{ $gte: ['$timestamp', todayStart] }, chargedExpr, 0] },
               },
-              allTime: { $sum: '$costMicroCents' },
+              monthCost: {
+                $sum: { $cond: [{ $gte: ['$timestamp', monthStart] }, '$costMicroCents', 0] },
+              },
+              monthCharged: {
+                $sum: { $cond: [{ $gte: ['$timestamp', monthStart] }, chargedExpr, 0] },
+              },
+              allTimeCost: { $sum: '$costMicroCents' },
+              allTimeCharged: { $sum: chargedExpr },
             },
           },
         ],
         byService: [
-          { $group: { _id: '$service', total: { $sum: '$costMicroCents' } } },
+          {
+            $group: {
+              _id: '$service',
+              cost: { $sum: '$costMicroCents' },
+              charged: { $sum: chargedExpr },
+            },
+          },
         ],
       },
     },
   ]);
 
-  const row = agg[0]?.totals?.[0] ?? { today: 0, thisMonth: 0, allTime: 0 };
-  const byServiceMap = new Map<string, number>(
-    (agg[0]?.byService ?? []).map((r) => [r._id, r.total]),
+  const row =
+    agg[0]?.totals?.[0] ?? {
+      todayCost: 0,
+      todayCharged: 0,
+      monthCost: 0,
+      monthCharged: 0,
+      allTimeCost: 0,
+      allTimeCharged: 0,
+    };
+  const byServiceMap = new Map<string, { cost: number; charged: number }>(
+    (agg[0]?.byService ?? []).map((r) => [r._id, { cost: r.cost, charged: r.charged }]),
   );
 
   // Emit every enum value so the client can render a full chart with zero
   // bars for unused services rather than a ragged list.
-  const byService = USAGE_SERVICES.map((service) => ({
-    service,
-    costMicroCents: byServiceMap.get(service) ?? 0,
-  }));
+  const byService = USAGE_SERVICES.map((service) => {
+    const entry = byServiceMap.get(service) ?? { cost: 0, charged: 0 };
+    return {
+      service,
+      costMicroCents: entry.cost,
+      chargedMicroCents: entry.charged,
+    };
+  });
 
   res.status(200).json({
     data: {
-      today: { costMicroCents: row.today },
-      thisMonth: { costMicroCents: row.thisMonth },
-      allTime: { costMicroCents: row.allTime },
+      today: { costMicroCents: row.todayCost, chargedMicroCents: row.todayCharged },
+      thisMonth: { costMicroCents: row.monthCost, chargedMicroCents: row.monthCharged },
+      allTime: { costMicroCents: row.allTimeCost, chargedMicroCents: row.allTimeCharged },
       byService,
     },
   });

@@ -1,78 +1,35 @@
 import { jobEvents } from '@services/jobEvents';
+import type {
+  JobStartedEvent,
+  JobStatusEvent,
+  JobProgressEvent,
+} from '@src/types/socketEvents';
 import { getIO } from './socket';
 
-interface JobStartedPayload {
-  jobId: string;
-  courseId: string;
-  type: string;
-  userId: string;
-  moduleIndex?: number;
-  lessonIndex?: number;
-}
+// Internal event-bus payloads carry `userId` (used to route to the per-user
+// socket room) in addition to the public event shape sent over the wire.
 
-interface JobUpdatePayload {
-  jobId: string;
-  status: 'completed' | 'failed';
-  error?: string | null;
-  courseId: string;
-  type: string;
-  userId: string;
-  moduleIndex?: number;
-  lessonIndex?: number;
-}
+type JobStartedInternal = JobStartedEvent & { userId: string };
+type JobStatusInternal = JobStatusEvent & { userId: string };
+type JobProgressInternal = JobProgressEvent & { userId: string };
 
-// Live per-job progress payload. Used by generate_lesson to stream individual
-// agent events (block, hero_image, content_ready, insights_saved) to the
-// client. `event` mirrors the writer shape the LangGraph nodes produce —
-// preserved verbatim so adding a new event type on the server doesn't require
-// a client-side schema change.
-export interface JobProgressPayload {
-  jobId: string;
-  userId: string;
-  courseId: string;
-  type: string;
-  moduleIndex?: number;
-  lessonIndex?: number;
-  event: Record<string, unknown>;
-}
+// Re-export the public payload type under its historical name so callers
+// that still import `JobProgressPayload` from this module keep working.
+export type JobProgressPayload = JobProgressInternal;
 
 export const initJobSocketBridge = () => {
-  jobEvents.on('started', (payload: JobStartedPayload) => {
-    getIO()
-      .to(`user:${payload.userId}`)
-      .emit('job:started', {
-        jobId: payload.jobId,
-        courseId: payload.courseId,
-        type: payload.type,
-        moduleIndex: payload.moduleIndex,
-        lessonIndex: payload.lessonIndex,
-      });
+  jobEvents.on('started', (payload: JobStartedInternal) => {
+    const { userId, ...event } = payload;
+    getIO().to(`user:${userId}`).emit('job:started', event satisfies JobStartedEvent);
   });
 
-  jobEvents.on('update', (payload: JobUpdatePayload) => {
-    getIO()
-      .to(`user:${payload.userId}`)
-      .emit('job:status', {
-        jobId: payload.jobId,
-        status: payload.status,
-        error: payload.error,
-        courseId: payload.courseId,
-        type: payload.type,
-        moduleIndex: payload.moduleIndex,
-        lessonIndex: payload.lessonIndex,
-      });
+  jobEvents.on('update', (payload: JobStatusInternal) => {
+    const { userId, ...event } = payload;
+    getIO().to(`user:${userId}`).emit('job:status', event satisfies JobStatusEvent);
   });
 
-  jobEvents.on('progress', (payload: JobProgressPayload) => {
-    getIO()
-      .to(`user:${payload.userId}`)
-      .emit('job:progress', {
-        jobId: payload.jobId,
-        courseId: payload.courseId,
-        type: payload.type,
-        moduleIndex: payload.moduleIndex,
-        lessonIndex: payload.lessonIndex,
-        event: payload.event,
-      });
+  jobEvents.on('progress', (payload: JobProgressInternal) => {
+    const { userId, ...event } = payload;
+    getIO().to(`user:${userId}`).emit('job:progress', event satisfies JobProgressEvent);
   });
 };

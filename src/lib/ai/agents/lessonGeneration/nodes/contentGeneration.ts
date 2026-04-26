@@ -3,6 +3,8 @@ import { streamObject, NoObjectGeneratedError } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { MODEL_IDS } from '@lib/langchain';
 import { logCacheUsage, usageFromVercelAi } from '@lib/ai/cacheLogger';
+import type { LessonProgressWriter } from '@src/types/socketEvents';
+import type { ILessonBlock } from '@models/LessonContentModel';
 import { LessonState } from '../state';
 import { contentOutputSchema, buildLessonSystemPrompt } from '../prompts';
 
@@ -47,7 +49,7 @@ const logNoObjectDetails = (label: string, err: unknown): void => {
 };
 
 export const contentGeneration = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
-  const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
+  const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
   const MIN_BLOCKS_ACCEPTABLE = minBlocksForDepth(state.depth);
 
   console.log(`[contentGeneration] Starting block-by-block generation (min blocks: ${MIN_BLOCKS_ACCEPTABLE} for depth '${state.depth}')...`.cyan);
@@ -104,7 +106,7 @@ export const contentGeneration = async (state: LessonState, config?: RunnableCon
               throw new Error(`[contentGeneration] duplicate block id "${block.id}" at index ${cursor} — model entered a repetition loop`);
             }
             console.log(`[contentGeneration] → Block ${cursor}: ${block.id} (${block.type})`.gray);
-            writer?.({ type: 'block', block });
+            writer?.({ type: 'block', block: block as ILessonBlock });
             emittedIds.add(block.id);
           }
           cursor++;
@@ -164,7 +166,7 @@ export const contentGeneration = async (state: LessonState, config?: RunnableCon
       for (const block of retry.blocks) {
         if (!emittedIds.has(block.id)) {
           console.log(`[contentGeneration] → Block (recovery): ${block.id} (${block.type})`.gray);
-          writer?.({ type: 'block', block });
+          writer?.({ type: 'block', block: block as ILessonBlock });
           emittedIds.add(block.id);
         }
       }
@@ -192,7 +194,7 @@ export const contentGeneration = async (state: LessonState, config?: RunnableCon
         for (const block of retry.blocks) {
           if (!emittedIds.has(block.id)) {
             console.log(`[contentGeneration] → Block (retry): ${block.id} (${block.type})`.gray);
-            writer?.({ type: 'block', block });
+            writer?.({ type: 'block', block: block as ILessonBlock });
             emittedIds.add(block.id);
           }
         }

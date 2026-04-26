@@ -22,27 +22,7 @@ import CourseModel from '@models/CourseModel';
  *                 data:
  *                   type: array
  *                   items:
- *                     type: object
- *                     required: [courseId, courseSlug, courseName, moduleIndex, lessonIndex, moduleName, lessonName, lastAccessedAt]
- *                     properties:
- *                       courseId:
- *                         type: string
- *                       courseSlug:
- *                         type: string
- *                         nullable: true
- *                       courseName:
- *                         type: string
- *                       moduleIndex:
- *                         type: number
- *                       lessonIndex:
- *                         type: number
- *                       moduleName:
- *                         type: string
- *                       lessonName:
- *                         type: string
- *                       lastAccessedAt:
- *                         type: string
- *                         format: date-time
+ *                     $ref: '#/components/schemas/RecentActivityItem'
  */
 export const getRecentActivityController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

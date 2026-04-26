@@ -39,6 +39,8 @@ import {
   InsufficientCreditsError,
   MaxConcurrentJobsError,
 } from '@services/creditService';
+import { recordUsage } from '@services/usageService';
+import UsageEventModel from '@models/UsageEventModel';
 
 setupTestDb();
 
@@ -308,6 +310,79 @@ describe('debitActualSpend', () => {
     const ledger = await CreditLedgerModel.find({ userId: user._id }).lean();
     expect(ledger).toHaveLength(2);
   });
+});
+
+// ── End-to-end: recordUsage → debitActualSpend with static markup ──
+
+describe('static-markup integration (recordUsage → debit)', () => {
+  test('marked services debit at 2× vendor; anthropic at 1×; ledger preserves vendor', async () => {
+    const user = await seedUserOutside({ allowance: 1_000 });
+    const jobId = new mongoose.Types.ObjectId();
+
+    await runWithUsageContext({
+      ctx: { userId: user._id.toString(), source: 'job', jobId: jobId.toString() },
+      fn: async () => {
+        recordUsage({ service: 'anthropic', action: 'lesson:content', costMicroCents: 10_000 });
+        recordUsage({ service: 'tavily',    action: 'search:advanced', costMicroCents: 16_000 });
+        recordUsage({ service: 'bfl',       action: 'image:hero',      costMicroCents: 25_000 });
+        recordUsage({ service: 'jina',      action: 'reader:fetch',    costMicroCents: 5_000 });
+        recordUsage({ service: 'judge0',    action: 'code:exec',       costMicroCents: 2_000 });
+        await debitActualSpend({ userId: user._id, jobId, jobType: 'generate_lesson' });
+      },
+    });
+    // recordUsage's UsageEventModel.create is fire-and-forget (.catch only).
+    // Poll briefly for the rows to materialise instead of betting on a fixed
+    // microtask flush — keeps the test resilient under CI scheduler jitter.
+    for (let i = 0; i < 50; i++) {
+      const count = await UsageEventModel.countDocuments({ userId: user._id });
+      if (count >= 5) break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    // Charged total = 10_000 (1×) + 32_000 + 50_000 + 10_000 + 4_000 (all 2×) = 106_000 μ¢.
+    // Credits debited = ceil(106_000 / 5_000) = 22.
+    const after = await UserModel.findById(user._id).lean();
+    expect(after?.credits.allowanceBalance).toBe(1_000 - 22);
+
+    const debitRow = await CreditLedgerModel.findOne({ userId: user._id, reason: 'debit_action' }).lean();
+    expect(debitRow?.allowanceDelta).toBe(-22);
+
+    // Vendor cost on the analytics ledger remains the raw vendor numbers — no doubling.
+    const usageRows = await UsageEventModel.find({ userId: user._id }).lean();
+    const vendorByService = Object.fromEntries(usageRows.map((r) => [r.service, r.costMicroCents]));
+    expect(vendorByService).toMatchObject({
+      anthropic: 10_000,
+      tavily: 16_000,
+      bfl: 25_000,
+      jina: 5_000,
+      judge0: 2_000,
+    });
+    const chargedByService = Object.fromEntries(
+      usageRows.map((r) => [r.service, (r as { chargedMicroCents?: number }).chargedMicroCents]),
+    );
+    expect(chargedByService).toMatchObject({
+      anthropic: 10_000,
+      tavily: 32_000,
+      bfl: 50_000,
+      jina: 10_000,
+      judge0: 4_000,
+    });
+  });
+
+  // Local helper: the `seedUser` from the debitActualSpend describe block isn't in scope here.
+  async function seedUserOutside(params: { allowance: number; bonus?: number }) {
+    const user = await makeUser();
+    await UserModel.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          'credits.allowanceBalance': params.allowance,
+          'credits.bonusBalance': params.bonus ?? 0,
+        },
+      },
+    );
+    return user;
+  }
 });
 
 // ── debitActualSpend retry exhaustion (force the warning path) ──

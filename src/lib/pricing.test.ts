@@ -9,7 +9,15 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { priceLlmUsage, priceFlatUnit, LLM_PRICING, SERVICE_PRICING } from './pricing';
+import {
+  priceLlmUsage,
+  priceFlatUnit,
+  LLM_PRICING,
+  SERVICE_PRICING,
+  applyStaticMarkup,
+  STATIC_MARKUP_FACTOR,
+  STATIC_MARKUP_SERVICES,
+} from './pricing';
 
 
 const zeroTokens = { cacheRead: 0, cacheCreation5m: 0, cacheCreation1h: 0, uncached: 0, output: 0 };
@@ -182,6 +190,41 @@ test('Tavily advanced search priced at $0.016/query = 16,000 μ¢', () => {
 
 test('Judge0 RapidAPI priced at $0.002/exec = 2,000 μ¢', () => {
   assert.equal(priceFlatUnit({ sku: 'judge0_rapidapi' }), 2_000);
+});
+
+// ── applyStaticMarkup ─────────────────────────────────────
+
+test('applyStaticMarkup doubles cost for every marked service', () => {
+  for (const service of STATIC_MARKUP_SERVICES) {
+    assert.equal(
+      applyStaticMarkup({ service, costMicroCents: 1_000 }),
+      1_000 * STATIC_MARKUP_FACTOR,
+      `${service} should be charged at ${STATIC_MARKUP_FACTOR}× vendor cost`,
+    );
+  }
+});
+
+test('applyStaticMarkup covers exactly judge0, tavily, jina, bfl, tts', () => {
+  // Pin the list — adding a service to the markup set is a deliberate billing
+  // change and should require updating this assertion.
+  assert.deepEqual([...STATIC_MARKUP_SERVICES].sort(), ['bfl', 'jina', 'judge0', 'tavily', 'tts']);
+});
+
+test('applyStaticMarkup leaves anthropic untouched', () => {
+  assert.equal(applyStaticMarkup({ service: 'anthropic', costMicroCents: 1_234 }), 1_234);
+});
+
+test('applyStaticMarkup of a zero cost is zero (no surprise charge on dedup-hit rows)', () => {
+  for (const service of STATIC_MARKUP_SERVICES) {
+    assert.equal(applyStaticMarkup({ service, costMicroCents: 0 }), 0);
+  }
+});
+
+test('applyStaticMarkup returns an integer for fractional inputs', () => {
+  // Math.round inside applyStaticMarkup keeps the ledger field integer-clean.
+  const charged = applyStaticMarkup({ service: 'tavily', costMicroCents: 1.5 });
+  assert.equal(Number.isInteger(charged), true);
+  assert.equal(charged, 3);
 });
 
 // ── Done ──────────────────────────────────────────────────

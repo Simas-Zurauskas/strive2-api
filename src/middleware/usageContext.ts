@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { runWithUsageContext } from '@lib/usageContext';
+import UserModel from '@models/UserModel';
+import { bgError } from '@lib/bg';
 
 /**
  * Enter an AsyncLocalStorage scope stamped with the authenticated user for
@@ -12,15 +14,31 @@ import { runWithUsageContext } from '@lib/usageContext';
  * scope entirely and any accidental paid action in those paths produces an
  * untagged (no-op) `recordUsage` call — safer than attributing to the wrong
  * user.
+ *
+ * Loads the user's plan + subscription status once per request and stamps
+ * them on the scope so every UsageEvent recorded under it carries the plan
+ * snapshot. A failed lookup falls through to a stamp-less scope — unattributed
+ * events are honest about the missing context.
  */
-export const usageContextMiddleware = (req: Request, _res: Response, next: NextFunction): void => {
+export const usageContextMiddleware = async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
   const userId = req.userId;
   if (!userId) {
     next();
     return;
   }
+  const user = await UserModel.findById(userId, { 'subscription.plan': 1, 'subscription.status': 1 })
+    .lean()
+    .catch((e) => {
+      bgError('usageContextMiddleware.userLookup')(e);
+      return null;
+    });
   runWithUsageContext({
-    ctx: { userId, source: 'request' },
+    ctx: {
+      userId,
+      source: 'request',
+      ...(user?.subscription?.plan ? { plan: user.subscription.plan } : {}),
+      ...(user?.subscription?.status ? { subscriptionStatus: user.subscription.status } : {}),
+    },
     fn: () => {
       next();
     },

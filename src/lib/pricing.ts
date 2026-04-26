@@ -1,4 +1,5 @@
 import 'colors';
+import type { UsageService } from '@lib/usageConstants';
 
 /**
  * Single source of truth for how much every paid action costs us.
@@ -99,6 +100,24 @@ export const SERVICE_PRICING = {
   judge0_rapidapi: { perUnitMicroCents: 2_000 },         // $0.002/submission (RapidAPI Basic overage)
 } as const;
 
+/**
+ * Per-1M-character pricing for TTS providers. Stored as μ¢ per 1M chars
+ * (not per-char) because per-char is sub-microcent for cheap providers
+ * (WaveNet at $4/M = 0.4 μ¢/char) and we'd lose precision on flat unit
+ * pricing. Use `priceTtsUsage` to compute the cost for a given char count.
+ *
+ * Numbers reconciled against vendor pricing pages on 2026-04-26.
+ */
+export const TTS_PRICING = {
+  // Google Cloud Text-to-Speech.
+  // https://cloud.google.com/text-to-speech/pricing
+  // WaveNet/Studio voices billed at $0.000004/char, Neural2 at $0.000016/char.
+  google_wavenet: { microCentsPer1MChars: 400_000 },  // $4/M chars
+  google_neural2: { microCentsPer1MChars: 1_600_000 }, // $16/M chars (deferred to v2 but priced ahead)
+} as const;
+
+export type TtsSku = keyof typeof TTS_PRICING;
+
 export type ServiceSku = keyof typeof SERVICE_PRICING;
 
 // ── Pricing functions ──────────────────────────────────────
@@ -152,3 +171,49 @@ export const priceFlatUnit = ({ sku, units = 1 }: { sku: ServiceSku; units?: num
   const price = SERVICE_PRICING[sku];
   return Math.max(0, Math.round(price.perUnitMicroCents * units));
 };
+
+/**
+ * Compute the vendor microcent cost of a TTS synthesis call from its
+ * character count. WaveNet's per-character rate is sub-microcent so we
+ * scale via the per-1M-chars rate and round up — under-billing here
+ * silently eats into our margin once aggregated over thousands of lessons.
+ */
+export const priceTtsUsage = ({ sku, characters }: { sku: TtsSku; characters: number }): number => {
+  if (!Number.isFinite(characters) || characters <= 0) return 0;
+  const rate = TTS_PRICING[sku].microCentsPer1MChars;
+  return Math.max(0, Math.ceil((characters * rate) / 1_000_000));
+};
+
+// ── User-facing markup ─────────────────────────────────────
+//
+// A flat multiplier applied to the four 3rd-party "premium" services on the
+// user-charged side of the ledger. Vendor cost (what we actually pay the
+// provider) is unchanged and continues to be recorded on `costMicroCents`;
+// the user is debited against `chargedMicroCents = vendor × factor` for these
+// services. Anthropic LLM cost — including the LLM-as-judge insight grader —
+// flows through 1:1.
+//
+// Markup is intentionally tier- and balance-source-agnostic: free, paid
+// subscription, and top-up bonus credits all see the same factor for these
+// services. If we later want a per-tier ratio, branch inside `applyStaticMarkup`
+// — every other piece of credit accounting reads through this single helper.
+export const STATIC_MARKUP_FACTOR = 2;
+
+export const STATIC_MARKUP_SERVICES: ReadonlySet<UsageService> = new Set<UsageService>([
+  'judge0',
+  'tavily',
+  'jina',
+  'bfl',
+  'tts',
+]);
+
+export const applyStaticMarkup = ({
+  service,
+  costMicroCents,
+}: {
+  service: UsageService;
+  costMicroCents: number;
+}): number =>
+  STATIC_MARKUP_SERVICES.has(service)
+    ? Math.max(0, Math.round(costMicroCents * STATIC_MARKUP_FACTOR))
+    : costMicroCents;

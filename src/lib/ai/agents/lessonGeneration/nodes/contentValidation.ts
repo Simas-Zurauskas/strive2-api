@@ -9,6 +9,7 @@ import {
   bumpContentValidationRepairHaikuAttempt,
   bumpContentValidationRepairHaikuFallback,
 } from '@lib/metrics';
+import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { LessonState } from '../state';
 import { lessonBlockSchema } from '../prompts';
 
@@ -151,7 +152,7 @@ async function repairStructuralGaps({
 }: {
   blocks: LessonState['contentBlocks'];
   gaps: StructuralGaps;
-  writer?: (event: Record<string, unknown>) => void;
+  writer?: LessonProgressWriter;
 }): Promise<LessonState['contentBlocks']> {
   const missing: string[] = [];
   if (gaps.missingIntro) missing.push('1 "intro" block (2-4 sentence compelling opening)');
@@ -267,7 +268,7 @@ async function repairStructuralGaps({
 export const contentValidation = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
   let blocks = state.contentBlocks;
   const warnings: string[] = [];
-  const writer = config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined;
+  const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
   // Check required block types
   const introBlocks = blocks.filter((b) => b.type === 'intro');

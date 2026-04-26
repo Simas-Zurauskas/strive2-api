@@ -11,6 +11,8 @@ import {
   deleteCourseController,
   getJobStatusController,
   generateLessonController,
+  regenerateHeroController,
+  regenerateLinksController,
   getLessonContentController,
   getLessonContentStatsController,
   executeCodeController,
@@ -33,6 +35,9 @@ import {
   getFavoriteCourseIdsController,
   getBookmarkedLessonsController,
   getRecentActivityController,
+  generateLessonNarrationController,
+  deleteLessonNarrationController,
+  getNarrationVoicesController,
 } from '@controlers/course';
 import { ENVIRONMENT } from '@conf/env';
 import { protect, requireVerified } from '@middleware/authMiddleware';
@@ -60,6 +65,7 @@ router.get('/favorites', getFavoriteCourseIdsController);
 router.post('/favorite/:courseId', toggleFavoriteCourseController);
 router.get('/bookmarked-lessons', getBookmarkedLessonsController);
 router.get('/recent-activity', getRecentActivityController);
+router.get('/narration-voices', getNarrationVoicesController);
 
 // Course CRUD
 router.post('/', createCourseController);
@@ -86,6 +92,25 @@ router.post('/:courseId/generate-structure', requireCredits(), generateStructure
 router.post('/:courseId/depth-previews', requireCredits(), generateDepthPreviewsController);
 router.post('/:courseId/refine-structure', requireCredits(), refineStructureController);
 router.post('/:courseId/generate-lesson', requireCredits(), generateLessonController);
+router.post(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/regenerate-hero',
+  requireCredits(),
+  regenerateHeroController,
+);
+router.post(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/regenerate-links',
+  requireCredits(),
+  regenerateLinksController,
+);
+router.post(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/narration',
+  requireCredits(),
+  generateLessonNarrationController,
+);
+router.delete(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/narration',
+  deleteLessonNarrationController,
+);
 router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', getLessonContentController);
 
 // Progress tracking

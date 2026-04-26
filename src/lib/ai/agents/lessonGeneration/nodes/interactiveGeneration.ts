@@ -18,6 +18,7 @@ import {
 import { withRetry } from '@lib/retry';
 import { shuffleOptionsWithCorrectIndex } from '@lib/ai/shuffleOptions';
 import { lintDistractors, repairDistractors } from '@lib/ai/distractorLint';
+import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { LessonState } from '../state';
 import { interactiveOutputSchema, buildInteractiveSystemPrompt } from '../prompts';
 
@@ -248,7 +249,7 @@ const buildDistractorLintFeedback = ({
 };
 
 export const interactiveGeneration = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
-  const writer = (config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined);
+  const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
   console.log(`[interactiveGeneration] Generating quizzes + exercise...`.cyan);
 

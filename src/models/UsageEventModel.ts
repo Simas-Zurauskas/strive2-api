@@ -1,5 +1,6 @@
 import mongoose, { HydratedDocument, Schema, Types } from 'mongoose';
 import { USAGE_SERVICES, UsageService } from '@lib/usageConstants';
+import { PLAN_KEYS, SUBSCRIPTION_STATUSES, PlanKey, SubscriptionStatus } from '@lib/creditPricing';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -9,8 +10,25 @@ export interface IUsageEvent {
   service: UsageService;
   /** Stable call-site label, e.g. 'lesson:content', 'image:hero', 'search:advanced'. */
   action: string;
-  /** Integer microcents — see `lib/pricing.ts` for the unit rationale. */
+  /** Vendor cost: what we actually paid the provider. Integer microcents — see `lib/pricing.ts`. */
   costMicroCents: number;
+  /**
+   * What we charged the user (vendor cost × any per-service markup; see
+   * `applyStaticMarkup` in `lib/pricing.ts`). For services without markup
+   * this equals `costMicroCents`. Optional so legacy rows written before the
+   * markup feature still load — readers should treat a missing value as
+   * equal to `costMicroCents`.
+   */
+  chargedMicroCents?: number;
+  /**
+   * The user's plan + subscription status at the moment this row was
+   * recorded. Stamped by `recordUsage` from the active `usageContext`
+   * scope; absent for rows recorded outside an authenticated/job scope, or
+   * for legacy rows pre-dating this field. Used by the engineer billing
+   * view to attribute USD-equivalent cost back to the right per-credit rate.
+   */
+  planAtTime?: PlanKey;
+  subscriptionStatusAtTime?: SubscriptionStatus;
   /**
    * Free-form per-service payload: model id + token breakdown for LLM rows,
    * url/hostname for fetch/search rows, jobId/courseId/moduleIndex/lessonIndex
@@ -33,6 +51,9 @@ const schema = new Schema<IUsageEvent>(
     service: { type: String, enum: [...USAGE_SERVICES], required: true },
     action: { type: String, required: true },
     costMicroCents: { type: Number, required: true, min: 0 },
+    chargedMicroCents: { type: Number, min: 0 },
+    planAtTime: { type: String, enum: [...PLAN_KEYS] },
+    subscriptionStatusAtTime: { type: String, enum: [...SUBSCRIPTION_STATUSES] },
     metadata: { type: Schema.Types.Mixed },
   },
   {

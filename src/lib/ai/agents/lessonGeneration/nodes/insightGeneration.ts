@@ -6,6 +6,7 @@ import { withRetry } from '@lib/retry';
 import { jsonish } from '@lib/zodHelpers';
 import { INSIGHT_KINDS, INSIGHT_MAX_PER_LESSON, INSIGHT_MIN_PER_LESSON } from '@lib/insightConstants';
 import { GeneratedInsight } from '@services/insightContentService';
+import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { LessonState } from '../state';
 import { validateInsightCandidate } from './insightGuardrails';
 
@@ -139,9 +140,7 @@ export const insightGeneration = async (
   state: LessonState,
   config?: RunnableConfig,
 ): Promise<Partial<LessonState>> => {
-  const writer = config?.configurable?.writer as
-    | ((event: Record<string, unknown>) => void)
-    | undefined;
+  const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
   // Guard: nothing to do if no teachable content.
   const teachable = state.contentBlocks.filter((b) =>
