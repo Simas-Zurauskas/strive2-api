@@ -32,16 +32,7 @@ import CourseDesignChatModel from '@models/CourseDesignChatModel';
  *                     messages:
  *                       type: array
  *                       items:
- *                         type: object
- *                         properties:
- *                           role:
- *                             type: string
- *                             enum: [user, assistant]
- *                           content:
- *                             type: string
- *                           createdAt:
- *                             type: string
- *                             format: date-time
+ *                         $ref: '#/components/schemas/ChatHistoryMessage'
  */
 export const getChatHistoryController = asyncHandler(async (req, res) => {
   const userId = req.userId!;

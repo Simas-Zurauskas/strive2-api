@@ -14,6 +14,7 @@ import {
   resetPasswordController,
   setPasswordController,
   changePasswordController,
+  updatePreferencesController,
 } from '@controlers/auth';
 import { protect } from '@middleware/authMiddleware';
 
@@ -38,6 +39,7 @@ router.post('/reset-password', authLimiter, resetPasswordController);
 router.post('/set-password', authLimiter, protect, setPasswordController);
 router.post('/change-password', authLimiter, protect, changePasswordController);
 router.get('/me', protect, getMeController);
+router.patch('/me/preferences', protect, updatePreferencesController);
 router.post('/logout', protect, logoutController);
 router.post('/resend-verification-authenticated', authLimiter, protect, resendVerificationAuthenticatedController);
 router.delete('/delete-account', protect, deleteAccountController);

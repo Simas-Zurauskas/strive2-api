@@ -57,7 +57,11 @@ export const getLessonContentController = asyncHandler(async (req, res) => {
   }
 
   const data = content.toJSON();
+  // resolveImageUrl is a misleading name — the helper just turns S3 keys
+  // into 7-day presigned URLs. Reusing it here for audio so we don't
+  // duplicate the S3 plumbing.
   data.heroImageUrl = await resolveImageUrl(content.heroImageUrl);
+  data.audioUrl = await resolveImageUrl(content.audioUrl);
 
   res.status(200).json({ data });
 });

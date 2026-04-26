@@ -10,7 +10,6 @@ const getEnv = (key: string): string => {
 };
 
 export const ENVIRONMENT = getEnv('ENVIRONMENT'); // development|production
-export const OPENAI_API_KEY = getEnv('OPENAI_API_KEY');
 export const BFL_API_KEY = getEnv('BFL_API_KEY');
 export const ANTHROPIC_API_KEY = getEnv('ANTHROPIC_API_KEY');
 export const MONGO_URI = getEnv('MONGO_URI');
@@ -20,14 +19,7 @@ export const GOOGLE_CLIENT_ID = getEnv('GOOGLE_CLIENT_ID');
 export const MAILJET_API_KEY = getEnv('MAILJET_API_KEY');
 export const MAILJET_API_SECRET = getEnv('MAILJET_API_SECRET');
 export const TAVILY_API_KEY = getEnv('TAVILY_API_KEY');
-
-// Optional. Free tier (~20 req/min/IP) was exhausted by the curated-links
-// pipeline during orchestrator runs, producing a burst of HTTP 429s that
-// showed up in metrics as `links_fetch_failure_total{reason="http_error"}`.
-// Set a paid key (200 req/min) to clear the rate-limit wall; the pipeline
-// still works unkeyed, just at reduced reliability.
 export const JINA_API_KEY = getEnv('JINA_API_KEY');
-
 export const JUDGE0_API_KEY = getEnv('JUDGE0_API_KEY');
 export const JUDGE0_API_URL = getEnv('JUDGE0_API_URL');
 
@@ -36,5 +28,25 @@ export const AWS_S3_REGION = getEnv('AWS_S3_REGION');
 export const AWS_ACCESS_KEY_ID = getEnv('AWS_ACCESS_KEY_ID');
 export const AWS_SECRET_ACCESS_KEY = getEnv('AWS_SECRET_ACCESS_KEY');
 
+// Google Cloud Text-to-Speech credentials. Either:
+//   GOOGLE_TTS_CREDENTIALS_JSON — full JSON service-account key as a single
+//     env var (preferred for hosted envs where mounting a credentials file
+//     is awkward).
+//   GOOGLE_APPLICATION_CREDENTIALS — standard Google SDK env pointing to a
+//     credentials file path; auto-picked up by the SDK if set.
+// At least one must be provided; the TTS client throws on first synth call
+// if neither is reachable. Optional at server boot so dev environments
+// without TTS still start.
+export const GOOGLE_TTS_CREDENTIALS_JSON = process.env.GOOGLE_TTS_CREDENTIALS_JSON;
+
 export const PORT = process.env.PORT || 4000;
 export const API_URL = process.env.API_URL || `http://localhost:${PORT}`;
+
+export const STRIPE_SECRET_KEY = getEnv('STRIPE_SECRET_KEY');
+export const STRIPE_WEBHOOK_SECRET = getEnv('STRIPE_WEBHOOK_SECRET');
+export const STRIPE_PRICE_ID_STARTER_MONTHLY = getEnv('STRIPE_PRICE_ID_STARTER_MONTHLY');
+export const STRIPE_PRICE_ID_STARTER_ANNUAL = getEnv('STRIPE_PRICE_ID_STARTER_ANNUAL');
+export const STRIPE_PRICE_ID_PRO_MONTHLY = getEnv('STRIPE_PRICE_ID_PRO_MONTHLY');
+export const STRIPE_PRICE_ID_PRO_ANNUAL = getEnv('STRIPE_PRICE_ID_PRO_ANNUAL');
+export const STRIPE_PRICE_ID_STUDIO_MONTHLY = getEnv('STRIPE_PRICE_ID_STUDIO_MONTHLY');
+export const STRIPE_PRICE_ID_STUDIO_ANNUAL = getEnv('STRIPE_PRICE_ID_STUDIO_ANNUAL');

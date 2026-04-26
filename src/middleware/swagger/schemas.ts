@@ -4,6 +4,8 @@ import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, JOB_TYP
 import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 import { INSIGHT_KINDS, INSIGHT_MODES, INSIGHT_RATINGS, INSIGHT_STATES } from '@lib/insightConstants';
+import { USAGE_SERVICES } from '@lib/usageConstants';
+import { CREDIT_LEDGER_REASONS } from '@models/CreditLedgerModel';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
 
@@ -76,6 +78,11 @@ export const schemas: SchemaMap = {
     enum: ['time', 'progression'],
   },
 
+  UsageService: {
+    type: 'string',
+    enum: [...USAGE_SERVICES],
+  },
+
   // ── Object schemas ───────────────────────────────────────
 
   ApiError: {
@@ -84,6 +91,14 @@ export const schemas: SchemaMap = {
     properties: {
       message: { type: 'string' },
       errorCode: { $ref: '#/components/schemas/ErrorCode' },
+      // Optional structured error metadata. For 402 INSUFFICIENT_CREDITS the
+      // shape is `{ need: number, have: number }`. Kept as a free-form object
+      // so new error codes can add fields without a schema churn every time.
+      meta: {
+        type: 'object',
+        additionalProperties: true,
+      },
+      requestId: { type: 'string' },
     },
   },
 
@@ -96,9 +111,64 @@ export const schemas: SchemaMap = {
     },
   },
 
+  PlanKey: {
+    type: 'string',
+    enum: ['free', 'starter', 'pro', 'studio'],
+  },
+
+  SubscriptionStatus: {
+    type: 'string',
+    enum: ['active', 'past_due', 'canceling', 'canceled'],
+  },
+
+  BillingCadence: {
+    type: 'string',
+    enum: ['monthly', 'annual'],
+  },
+
+  CreditLedgerReason: {
+    type: 'string',
+    enum: [...CREDIT_LEDGER_REASONS],
+  },
+
+  UserSubscription: {
+    type: 'object',
+    required: ['plan', 'status', 'cancelAtPeriodEnd'],
+    properties: {
+      plan: { $ref: '#/components/schemas/PlanKey' },
+      status: { $ref: '#/components/schemas/SubscriptionStatus' },
+      cancelAtPeriodEnd: { type: 'boolean' },
+      pendingPlan: { $ref: '#/components/schemas/PlanKey' },
+      currentPeriodStart: { type: 'string', format: 'date-time' },
+      currentPeriodEnd: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  UserCredits: {
+    type: 'object',
+    required: ['allowanceBalance', 'allowanceGranted', 'bonusBalance', 'periodStart', 'periodEnd'],
+    properties: {
+      allowanceBalance: { type: 'integer', minimum: 0 },
+      allowanceGranted: { type: 'integer', minimum: 0 },
+      bonusBalance: { type: 'integer', minimum: 0 },
+      periodStart: { type: 'string', format: 'date-time' },
+      periodEnd: { type: 'string', format: 'date-time' },
+    },
+  },
+
   AuthorisedUser: {
     type: 'object',
-    required: ['_id', 'email', 'emailVerified', 'authProviders', 'createdAt', 'updatedAt'],
+    required: [
+      '_id',
+      'email',
+      'emailVerified',
+      'authProviders',
+      'subscription',
+      'credits',
+      'preferences',
+      'createdAt',
+      'updatedAt',
+    ],
     properties: {
       _id: { type: 'string' },
       email: { type: 'string' },
@@ -109,8 +179,125 @@ export const schemas: SchemaMap = {
         type: 'array',
         items: { $ref: '#/components/schemas/AuthProvider' },
       },
+      subscription: { $ref: '#/components/schemas/UserSubscription' },
+      credits: { $ref: '#/components/schemas/UserCredits' },
+      preferences: { $ref: '#/components/schemas/UserPreferences' },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  BillingPlan: {
+    type: 'object',
+    required: [
+      'key',
+      'displayName',
+      'description',
+      'monthlyUsd',
+      'annualMonthlyUsd',
+      'annualUsd',
+      'monthlyAllowance',
+      'maxConcurrentJobs',
+    ],
+    properties: {
+      key: { $ref: '#/components/schemas/PlanKey' },
+      displayName: { type: 'string' },
+      // One-paragraph public-facing blurb. Mirrors the matching Stripe
+      // product description so /pricing and Checkout copy stay aligned.
+      description: { type: 'string' },
+      monthlyUsd: { type: 'number' },
+      annualMonthlyUsd: { type: 'number' },
+      annualUsd: { type: 'number' },
+      monthlyAllowance: { type: 'integer' },
+      maxConcurrentJobs: { type: 'integer' },
+    },
+  },
+
+  BillingTopupRate: {
+    type: 'object',
+    required: ['creditsPerUsd', 'minUsd', 'maxUsd'],
+    properties: {
+      // How many credits one USD buys. Integer so any whole-dollar amount
+      // yields an integer credit grant.
+      creditsPerUsd: { type: 'integer' },
+      // Inclusive bounds enforced both client-side (input clamping) and
+      // server-side (Zod schema on the /topup endpoint).
+      minUsd: { type: 'integer' },
+      maxUsd: { type: 'integer' },
+    },
+  },
+
+  BillingCatalog: {
+    type: 'object',
+    required: ['plans', 'topupRate'],
+    properties: {
+      plans: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/BillingPlan' },
+      },
+      topupRate: { $ref: '#/components/schemas/BillingTopupRate' },
+    },
+  },
+
+  BillingSummary: {
+    type: 'object',
+    required: ['plan', 'displayName', 'status', 'cancelAtPeriodEnd', 'credits'],
+    properties: {
+      plan: { $ref: '#/components/schemas/PlanKey' },
+      displayName: { type: 'string' },
+      status: { $ref: '#/components/schemas/SubscriptionStatus' },
+      cancelAtPeriodEnd: { type: 'boolean' },
+      pendingPlan: {
+        // nullable-via-oneOf would be stricter but openapi-types v12 rejects
+        // `{ type: 'null' }`. Using a nullable $ref wrapper instead.
+        allOf: [{ $ref: '#/components/schemas/PlanKey' }],
+        nullable: true,
+      },
+      credits: {
+        type: 'object',
+        required: ['allowance', 'bonus', 'total', 'allowanceGranted', 'periodStart', 'periodEnd'],
+        properties: {
+          allowance: { type: 'integer' },
+          bonus: { type: 'integer' },
+          total: { type: 'integer' },
+          allowanceGranted: { type: 'integer' },
+          periodStart: { type: 'string', format: 'date-time' },
+          periodEnd: { type: 'string', format: 'date-time' },
+        },
+      },
+    },
+  },
+
+  CreditLedgerEntry: {
+    type: 'object',
+    required: [
+      '_id',
+      'userId',
+      'timestamp',
+      'delta',
+      'allowanceDelta',
+      'bonusDelta',
+      'balanceBefore',
+      'balanceAfter',
+      'bonusBefore',
+      'bonusAfter',
+      'reason',
+    ],
+    properties: {
+      _id: { type: 'string' },
+      userId: { type: 'string' },
+      timestamp: { type: 'string', format: 'date-time' },
+      delta: { type: 'integer' },
+      allowanceDelta: { type: 'integer' },
+      bonusDelta: { type: 'integer' },
+      balanceBefore: { type: 'integer' },
+      balanceAfter: { type: 'integer' },
+      bonusBefore: { type: 'integer' },
+      bonusAfter: { type: 'integer' },
+      reason: { $ref: '#/components/schemas/CreditLedgerReason' },
+      actionType: { type: 'string' },
+      jobId: { type: 'string' },
+      notes: { type: 'string' },
     },
   },
 
@@ -252,10 +439,44 @@ export const schemas: SchemaMap = {
       heroImageUrl: { type: 'string', nullable: true },
       includeHeroImage: { type: 'boolean' },
       audioUrl: { type: 'string', nullable: true },
+      audioVoice: { type: 'string', nullable: true },
+      audioRate: { type: 'number', nullable: true },
+      audioContentHash: { type: 'string', nullable: true },
+      audioGeneratedAt: { type: 'string', format: 'date-time', nullable: true },
       summary: { type: 'string', nullable: true },
       version: { type: 'integer' },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  NarrationVoice: {
+    type: 'object',
+    required: ['id', 'label', 'locale', 'gender', 'description'],
+    properties: {
+      id: { type: 'string' },
+      label: { type: 'string' },
+      locale: { type: 'string' },
+      gender: { type: 'string', enum: ['male', 'female', 'neutral'] },
+      description: { type: 'string' },
+    },
+  },
+
+  NarrationVoicesResponse: {
+    type: 'object',
+    required: ['defaultVoiceId', 'voices'],
+    properties: {
+      defaultVoiceId: { type: 'string' },
+      voices: { type: 'array', items: { $ref: '#/components/schemas/NarrationVoice' } },
+    },
+  },
+
+  UserPreferences: {
+    type: 'object',
+    required: ['narrationVoice', 'narrationRate'],
+    properties: {
+      narrationVoice: { type: 'string', description: 'Empty string means "no preference" — server falls back to the catalog default.' },
+      narrationRate: { type: 'number', minimum: 0.5, maximum: 2.0 },
     },
   },
 
@@ -442,6 +663,280 @@ export const schemas: SchemaMap = {
     },
   },
 
+  UnattemptedQuizItem: {
+    type: 'object',
+    required: ['courseId', 'courseSlug', 'courseName', 'moduleIndex', 'moduleName'],
+    properties: {
+      courseId: { type: 'string' },
+      courseSlug: { type: 'string', nullable: true },
+      courseName: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+      moduleName: { type: 'string' },
+    },
+  },
+
+  BookmarkedLessonItem: {
+    type: 'object',
+    required: [
+      'courseId',
+      'courseName',
+      'courseSlug',
+      'moduleIndex',
+      'lessonIndex',
+      'moduleName',
+      'lessonName',
+      'bookmarkedAt',
+    ],
+    properties: {
+      courseId: { type: 'string' },
+      courseName: { type: 'string' },
+      courseSlug: { type: 'string', nullable: true },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+      moduleName: { type: 'string' },
+      lessonName: { type: 'string' },
+      bookmarkedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  RecentActivityItem: {
+    type: 'object',
+    required: [
+      'courseId',
+      'courseSlug',
+      'courseName',
+      'moduleIndex',
+      'lessonIndex',
+      'moduleName',
+      'lessonName',
+      'lastAccessedAt',
+    ],
+    properties: {
+      courseId: { type: 'string' },
+      courseSlug: { type: 'string', nullable: true },
+      courseName: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+      moduleName: { type: 'string' },
+      lessonName: { type: 'string' },
+      lastAccessedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  ChatMessageRole: {
+    type: 'string',
+    enum: ['user', 'assistant'],
+  },
+
+  ChatMessage: {
+    type: 'object',
+    required: ['role', 'content'],
+    properties: {
+      role: { $ref: '#/components/schemas/ChatMessageRole' },
+      content: { type: 'string' },
+    },
+  },
+
+  ChatHistoryMessage: {
+    type: 'object',
+    required: ['role', 'content'],
+    properties: {
+      role: { $ref: '#/components/schemas/ChatMessageRole' },
+      content: { type: 'string' },
+      createdAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  // ── Socket.io event payloads ─────────────────────────────
+  //
+  // These events are not tied to any HTTP endpoint, but they are part of
+  // the public contract between client and server. Defining them here lets
+  // codegen produce shared types so both sides stay in sync. The server
+  // side keeps a TypeScript mirror at api/src/types/socketEvents.ts.
+
+  JobStartedEvent: {
+    type: 'object',
+    required: ['jobId', 'courseId', 'type'],
+    properties: {
+      jobId: { type: 'string' },
+      courseId: { type: 'string' },
+      type: { $ref: '#/components/schemas/JobType' },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+    },
+  },
+
+  JobStatusEvent: {
+    type: 'object',
+    required: ['jobId', 'status', 'courseId', 'type'],
+    properties: {
+      jobId: { type: 'string' },
+      status: {
+        type: 'string',
+        enum: ['completed', 'failed'],
+        description: 'Terminal status only — progress updates use the job:progress channel.',
+      },
+      error: { type: 'string', nullable: true },
+      courseId: { type: 'string' },
+      type: { $ref: '#/components/schemas/JobType' },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+    },
+  },
+
+  LessonPlaceholderType: {
+    type: 'string',
+    enum: ['quiz', 'exercise'],
+  },
+
+  LessonPlaceholderBlock: {
+    type: 'object',
+    required: ['id', 'type', 'order'],
+    properties: {
+      id: { type: 'string' },
+      type: { $ref: '#/components/schemas/LessonPlaceholderType' },
+      order: { type: 'number' },
+    },
+  },
+
+  GeneratedInsight: {
+    type: 'object',
+    required: ['kind', 'prompt', 'answer', 'conceptTags', 'sourceBlockId'],
+    properties: {
+      kind: { $ref: '#/components/schemas/InsightKind' },
+      prompt: { type: 'string' },
+      answer: { type: 'string' },
+      conceptTags: { type: 'array', items: { type: 'string' } },
+      sourceBlockId: { type: 'string' },
+    },
+  },
+
+  LessonProgressBlockEvent: {
+    type: 'object',
+    required: ['type', 'block'],
+    properties: {
+      type: { type: 'string', enum: ['block'] },
+      block: { $ref: '#/components/schemas/LessonBlock' },
+    },
+  },
+
+  LessonProgressHeroImageEvent: {
+    type: 'object',
+    required: ['type', 'url'],
+    properties: {
+      type: { type: 'string', enum: ['hero_image'] },
+      url: { type: 'string' },
+      s3Key: { type: 'string' },
+    },
+  },
+
+  LessonProgressContentReadyEvent: {
+    type: 'object',
+    required: ['type', 'placeholders'],
+    properties: {
+      type: { type: 'string', enum: ['content_ready'] },
+      placeholders: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/LessonPlaceholderBlock' },
+      },
+    },
+  },
+
+  LessonProgressInsightEvent: {
+    type: 'object',
+    required: ['type', 'insight'],
+    properties: {
+      type: { type: 'string', enum: ['insight'] },
+      insight: { $ref: '#/components/schemas/GeneratedInsight' },
+    },
+  },
+
+  LessonProgressInsightsSavedEvent: {
+    type: 'object',
+    required: ['type', 'count'],
+    properties: {
+      type: { type: 'string', enum: ['insights_saved'] },
+      count: { type: 'integer' },
+    },
+  },
+
+  LessonProgressNarrationStartedEvent: {
+    type: 'object',
+    required: ['type'],
+    properties: {
+      type: { type: 'string', enum: ['narration_started'] },
+    },
+  },
+
+  LessonProgressNarrationReadyEvent: {
+    type: 'object',
+    required: ['type', 'cached', 'voiceId'],
+    properties: {
+      type: { type: 'string', enum: ['narration_ready'] },
+      // True when the audio was reused from S3's content-hashed cache
+      // (no vendor synthesis happened). Surface this to the user so an
+      // instant playback after Clear→Generate doesn't read as broken.
+      cached: { type: 'boolean' },
+      voiceId: { type: 'string' },
+    },
+  },
+
+  LessonProgressEvent: {
+    oneOf: [
+      { $ref: '#/components/schemas/LessonProgressBlockEvent' },
+      { $ref: '#/components/schemas/LessonProgressHeroImageEvent' },
+      { $ref: '#/components/schemas/LessonProgressContentReadyEvent' },
+      { $ref: '#/components/schemas/LessonProgressInsightEvent' },
+      { $ref: '#/components/schemas/LessonProgressInsightsSavedEvent' },
+      { $ref: '#/components/schemas/LessonProgressNarrationStartedEvent' },
+      { $ref: '#/components/schemas/LessonProgressNarrationReadyEvent' },
+    ],
+    discriminator: {
+      propertyName: 'type',
+      mapping: {
+        block: '#/components/schemas/LessonProgressBlockEvent',
+        hero_image: '#/components/schemas/LessonProgressHeroImageEvent',
+        content_ready: '#/components/schemas/LessonProgressContentReadyEvent',
+        insight: '#/components/schemas/LessonProgressInsightEvent',
+        insights_saved: '#/components/schemas/LessonProgressInsightsSavedEvent',
+        narration_started: '#/components/schemas/LessonProgressNarrationStartedEvent',
+        narration_ready: '#/components/schemas/LessonProgressNarrationReadyEvent',
+      },
+    },
+  } as unknown as OpenAPIV3.SchemaObject,
+
+  JobProgressEvent: {
+    type: 'object',
+    required: ['jobId', 'courseId', 'type', 'event'],
+    properties: {
+      jobId: { type: 'string' },
+      courseId: { type: 'string' },
+      type: { $ref: '#/components/schemas/JobType' },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+      event: { $ref: '#/components/schemas/LessonProgressEvent' },
+    },
+  },
+
+  CreditsUpdatedEvent: {
+    type: 'object',
+    required: ['allowance', 'bonus', 'total', 'delta', 'reason'],
+    properties: {
+      allowance: { type: 'integer' },
+      bonus: { type: 'integer' },
+      total: { type: 'integer' },
+      delta: {
+        type: 'integer',
+        description: 'Signed delta that caused the update (for nudging UI toast/animation).',
+      },
+      reason: { $ref: '#/components/schemas/CreditLedgerReason' },
+      actionType: {
+        type: 'string',
+        description: 'Present when reason is debit_action / refund_* — identifies which action spent or refunded.',
+      },
+    },
+  },
+
   // ── Gamification schemas ─────────────────────────────────
 
   XpSource: {
@@ -512,31 +1007,56 @@ export const schemas: SchemaMap = {
     },
   },
 
+  XpDaySources: {
+    type: 'object',
+    required: [
+      'lesson_complete',
+      'quiz_score',
+      'exercise_pass',
+      'review_complete',
+      'insight_review',
+      'insight_mastery',
+    ],
+    properties: {
+      lesson_complete: { type: 'number' },
+      quiz_score: { type: 'number' },
+      exercise_pass: { type: 'number' },
+      review_complete: { type: 'number' },
+      insight_review: { type: 'number' },
+      insight_mastery: { type: 'number' },
+    },
+  },
+
+  XpDayEntry: {
+    type: 'object',
+    required: ['date', 'xp', 'sources'],
+    properties: {
+      date: { type: 'string' },
+      xp: { type: 'number' },
+      sources: { $ref: '#/components/schemas/XpDaySources' },
+    },
+  },
+
+  XpWeekEntry: {
+    type: 'object',
+    required: ['week', 'xp'],
+    properties: {
+      week: { type: 'string' },
+      xp: { type: 'number' },
+    },
+  },
+
   GamificationStats: {
     type: 'object',
-    required: ['xpByDay', 'xpByWeek', 'totalTimeLearned', 'lessonsThisWeek'],
+    required: ['xpByDay', 'xpByWeek', 'totalTimeLearned', 'lessonsThisWeek', 'weeklySummary'],
     properties: {
       xpByDay: {
         type: 'array',
-        items: {
-          type: 'object',
-          required: ['date', 'xp'],
-          properties: {
-            date: { type: 'string' },
-            xp: { type: 'number' },
-          },
-        },
+        items: { $ref: '#/components/schemas/XpDayEntry' },
       },
       xpByWeek: {
         type: 'array',
-        items: {
-          type: 'object',
-          required: ['week', 'xp'],
-          properties: {
-            week: { type: 'string' },
-            xp: { type: 'number' },
-          },
-        },
+        items: { $ref: '#/components/schemas/XpWeekEntry' },
       },
       totalTimeLearned: { type: 'number' },
       lessonsThisWeek: { type: 'integer' },
@@ -548,6 +1068,32 @@ export const schemas: SchemaMap = {
           lastWeek: { $ref: '#/components/schemas/WeeklySummaryPeriod' },
         },
       },
+    },
+  },
+
+  QuizTrendsAttempt: {
+    type: 'object',
+    required: ['date', 'score', 'courseId', 'courseName', 'moduleName', 'moduleIndex'],
+    properties: {
+      date: { type: 'string' },
+      score: { type: 'number' },
+      courseId: { type: 'string' },
+      courseName: { type: 'string' },
+      moduleName: { type: 'string' },
+      moduleIndex: { type: 'integer' },
+    },
+  },
+
+  QuizTrendsResult: {
+    type: 'object',
+    required: ['attempts', 'averageScore', 'recentTrend'],
+    properties: {
+      attempts: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/QuizTrendsAttempt' },
+      },
+      averageScore: { type: 'number' },
+      recentTrend: { type: 'number' },
     },
   },
 
@@ -571,6 +1117,15 @@ export const schemas: SchemaMap = {
       pendingFeedback: { type: 'string' },
       currentStep: { type: 'number' },
       activeJobId: { type: 'string' },
+      activeLesson: {
+        type: 'object',
+        nullable: true,
+        required: ['moduleIndex', 'lessonIndex'],
+        properties: {
+          moduleIndex: { type: 'number' },
+          lessonIndex: { type: 'number' },
+        },
+      },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
     },
@@ -724,6 +1279,101 @@ export const schemas: SchemaMap = {
             avgRating: { type: 'number' },
           },
         },
+      },
+    },
+  },
+
+  // ── Usage ledger ─────────────────────────────────────────
+
+  UsageEvent: {
+    type: 'object',
+    required: [
+      'id',
+      'timestamp',
+      'service',
+      'action',
+      'costMicroCents',
+      'chargedMicroCents',
+      'creditsCharged',
+      'planAtTime',
+      'source',
+      'userPaidUsd',
+      'metadata',
+    ],
+    properties: {
+      id: { type: 'string' },
+      timestamp: { type: 'string', format: 'date-time' },
+      service: { $ref: '#/components/schemas/UsageService' },
+      action: { type: 'string' },
+      // Vendor cost — what we paid the provider (real API spend).
+      costMicroCents: { type: 'integer' },
+      // What we charged the user (vendor cost × any per-service markup).
+      // Equal to costMicroCents for services without markup.
+      chargedMicroCents: { type: 'integer' },
+      // Decimal credits this row was worth (chargedMicroCents / MICROCENTS_PER_CREDIT).
+      // Decimal — no per-row ceil, see controller note.
+      creditsCharged: { type: 'number' },
+      // The user's plan when the row was recorded; null for legacy rows or
+      // for events recorded outside an authenticated/job scope.
+      planAtTime: nullableRef('#/components/schemas/PlanKey'),
+      // Dominant balance source for the row's pro-rated debit, or null when
+      // no debit row is associated yet (job in flight / failed).
+      source: {
+        type: 'string',
+        enum: ['allowance', 'topup', 'mixed'],
+        nullable: true,
+      },
+      // Pro-rated dollars the user effectively paid for this row. null when
+      // no debit attribution is available.
+      userPaidUsd: { type: 'number', nullable: true },
+      metadata: { type: 'object', additionalProperties: true },
+    },
+  },
+
+  UsageHistory: {
+    type: 'object',
+    required: ['events', 'total', 'limit', 'offset', 'hasMore'],
+    properties: {
+      events: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/UsageEvent' },
+      },
+      total: { type: 'integer' },
+      limit: { type: 'integer' },
+      offset: { type: 'integer' },
+      hasMore: { type: 'boolean' },
+    },
+  },
+
+  UsageCostBucket: {
+    type: 'object',
+    required: ['costMicroCents', 'chargedMicroCents'],
+    properties: {
+      costMicroCents: { type: 'integer' },
+      chargedMicroCents: { type: 'integer' },
+    },
+  },
+
+  UsageServiceTotal: {
+    type: 'object',
+    required: ['service', 'costMicroCents', 'chargedMicroCents'],
+    properties: {
+      service: { $ref: '#/components/schemas/UsageService' },
+      costMicroCents: { type: 'integer' },
+      chargedMicroCents: { type: 'integer' },
+    },
+  },
+
+  UsageSummary: {
+    type: 'object',
+    required: ['today', 'thisMonth', 'allTime', 'byService'],
+    properties: {
+      today: { $ref: '#/components/schemas/UsageCostBucket' },
+      thisMonth: { $ref: '#/components/schemas/UsageCostBucket' },
+      allTime: { $ref: '#/components/schemas/UsageCostBucket' },
+      byService: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/UsageServiceTotal' },
       },
     },
   },

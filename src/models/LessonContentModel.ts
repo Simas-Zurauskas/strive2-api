@@ -24,6 +24,10 @@ export interface ILessonContent {
   heroImageUrl: string | null;
   includeHeroImage: boolean;
   audioUrl: string | null;
+  audioVoice: string | null;
+  audioRate: number | null;
+  audioContentHash: string | null;
+  audioGeneratedAt: Date | null;
   summary: string | null;
   completed: boolean;
   version: number;
@@ -64,6 +68,10 @@ const schema = new Schema<ILessonContent>(
     heroImageUrl: { type: String, default: null },
     includeHeroImage: { type: Boolean, default: true },
     audioUrl: { type: String, default: null },
+    audioVoice: { type: String, default: null },
+    audioRate: { type: Number, default: null },
+    audioContentHash: { type: String, default: null },
+    audioGeneratedAt: { type: Date, default: null },
     summary: { type: String, default: null },
     completed: { type: Boolean, default: false },
     version: { type: Number, default: 1 },

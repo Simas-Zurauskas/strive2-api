@@ -64,7 +64,7 @@ export const curateLinks = async (state: LessonState): Promise<ILessonBlock> => 
     });
 
     // Stage 2
-    const rawCandidates = await searchCandidates(plan);
+    const rawCandidates = await searchCandidates({ ...plan, courseId: state.courseId });
     if (rawCandidates.length === 0) {
       bumpLinksGenerationOutcome('zero_candidates');
       recordLinksCandidateCount(0);

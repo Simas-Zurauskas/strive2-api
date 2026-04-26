@@ -37,11 +37,14 @@ const compressHistory = async (
 
   try {
     const model = getUtilityModel();
-    const result = await model.invoke([
-      new HumanMessage(
-        `Summarize this course design conversation in 3-5 bullet points. Focus on: what structural changes were requested, what was decided, and any important context. Be concise.\n\n${conversationText}`,
-      ),
-    ]);
+    const result = await model.invoke(
+      [
+        new HumanMessage(
+          `Summarize this course design conversation in 3-5 bullet points. Focus on: what structural changes were requested, what was decided, and any important context. Be concise.\n\n${conversationText}`,
+        ),
+      ],
+      { metadata: { llmLabel: 'course:history-compress' } },
+    );
 
     const summary = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
     console.log(`[chatStream] Compressed ${olderMessages.length} older messages into summary`.gray);
@@ -87,13 +90,7 @@ const writeSSE = (res: import('express').Response, payload: Record<string, unkno
  *               messages:
  *                 type: array
  *                 items:
- *                   type: object
- *                   properties:
- *                     role:
- *                       type: string
- *                       enum: [user, assistant]
- *                     content:
- *                       type: string
+ *                   $ref: '#/components/schemas/ChatMessage'
  *     responses:
  *       200:
  *         description: SSE stream of chat response

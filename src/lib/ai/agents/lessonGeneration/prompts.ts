@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 import { jsonish } from '@lib/zodHelpers';
-import { COURSE_DOMAINS, CourseDomain } from '@lib/constants';
+import { CourseDomain } from '@lib/constants';
 
 // ── Schemas ────────────────────────────────────────────
 
@@ -40,10 +40,12 @@ const interactiveBlockSchema = z.object({
 
 export const contentOutputSchema = z.object({
   blocks: jsonish(z.array(lessonBlockSchema)),
-  // Min 60 chars catches regressions where the LLM returns a placeholder
-  // ("test", "summary here", etc.) and ships it through to the learner.
-  // 800 caps runaway prose; real lesson summaries fit comfortably under this.
-  summary: z.string().min(60).max(800),
+  // Target ≥60 / ≤800 chars. Enforced post-stream in contentGeneration.ts
+  // (short-summary throw triggers the recovery retry; long summaries are
+  // truncated gracefully). Keeping this as plain `z.string()` means the
+  // AI SDK's streamObject never rejects a truncated-stream response, which
+  // previously surfaced as `NoObjectGeneratedError` and crashed the lesson.
+  summary: z.string().describe('One or two sentence plain-text summary — target 60–800 characters.'),
 });
 
 export const interactiveOutputSchema = z.object({
@@ -93,27 +95,35 @@ const LESSON_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
 
 const LESSON_NULL_DOMAIN_BRANCH = 'follow the general rules above, letting the lesson name and description guide you.';
 
-const LESSON_DOMAIN_BULLETS = COURSE_DOMAINS
-  .map((d) => {
-    const body = LESSON_DOMAIN_BRANCHES[d];
-    // Multi-line branches (stem) open with a newline + indent, so the
-    // post-colon separator is empty. Single-line branches get a space.
-    const sep = body.startsWith('\n') ? '' : ' ';
-    return `- ${LESSON_DOMAIN_LABELS[d]}:${sep}${body}`;
-  })
-  .join('\n\n');
+/**
+ * Build the "Adapting to the course domain" section with ONLY the active
+ * domain's guidance inlined (plus the null fallback). The constant-time
+ * bullets list across all 9 domains was baked into the cached prefix before,
+ * which wrote/read ~1000 tokens per call that the model never consulted for
+ * the other 8 domains. Per-domain prefixes cache independently so each
+ * domain's first lesson pays one write and every subsequent lesson in the
+ * same domain reuses the cached prefix.
+ */
+const buildLessonDomainSection = ({ domain }: { domain: CourseDomain | null }): string => {
+  if (!domain) {
+    return `## Adapting to the course domain
 
-const LESSON_DOMAIN_SECTION = `## Adapting to the course domain
+The \`## Course context\` in the user message includes a \`Course domain\` field. This course has no explicit domain set — follow the general rules above, letting the lesson name and description guide you. ${LESSON_NULL_DOMAIN_BRANCH}`;
+  }
+  const body = LESSON_DOMAIN_BRANCHES[domain];
+  const sep = body.startsWith('\n') ? '' : ' ';
+  return `## Adapting to the course domain
 
-The \`## Course context\` in the user message includes a \`Course domain\` field. Adapt block selection to it:
+The \`## Course context\` in the user message includes a \`Course domain\` field. This course is tagged **${domain}**. Apply the matching guidance:
 
-${LESSON_DOMAIN_BULLETS}
-
-- **null / unknown domain**: ${LESSON_NULL_DOMAIN_BRANCH}`;
+- ${LESSON_DOMAIN_LABELS[domain]}:${sep}${body}`;
+};
 
 // ── System prompts ─────────────────────────────────────
 
-export const LESSON_SYSTEM_PROMPT = `You are a world-class educator and technical writer. You create lesson content that is clear, engaging, and deeply personalized to the learner's context.
+const lessonSystemPromptCache = new Map<string, string>();
+
+const LESSON_SYSTEM_PROMPT_PREFIX = `You are a world-class educator and technical writer. You create lesson content that is clear, engaging, and deeply personalized to the learner's context.
 
 Your task: Generate the full content for a single lesson as structured blocks. Each block has a type, content, and order. You must produce high-quality educational content that a learner can read and understand without external help.
 
@@ -143,6 +153,7 @@ Your task: Generate the full content for a single lesson as structured blocks. E
    - Keep diagrams focused — 5-15 nodes maximum
    - Do NOT wrap the mermaid code in markdown code fences — just the raw mermaid syntax
    - ALWAYS quote node labels containing special characters (parentheses, colons, commas, brackets) with double quotes
+   - Line breaks inside node labels use \`<br/>\`, never \`\\n\` — literal backslash-n renders as text, not a newline
    - Do NOT use semicolons at the end of lines
 
    Valid mermaid examples:
@@ -205,14 +216,26 @@ Write EVERY mathematical expression in LaTeX — never approximate with ASCII.
 - LaTeX inside JSON must escape backslashes correctly: write \`$\\\\alpha$\` in your JSON output, which deserializes to the LaTeX source \`$\\alpha$\`.
 - The client renders LaTeX with KaTeX. Unsupported macros (e.g. \`\\require{...}\`, \`\\begin{tikzpicture}\`) will fall back to plaintext — stick to standard math-mode commands.
 
-${LESSON_DOMAIN_SECTION}
+`;
 
-## Quality principles
+const LESSON_SYSTEM_PROMPT_SUFFIX = `## Quality principles
 
 - PERSONALIZE: Reference the learner's stated goals, experience level, and chosen depth.
 - CONCRETE > ABSTRACT: Every concept gets a concrete example.
 - PROGRESSIVE COMPLEXITY: Start simple, build up. Don't front-load jargon.
 - POSITION IN COURSE: Reference where this lesson fits — what previous lessons covered (don't repeat), what upcoming lessons will build on.`;
+
+export const buildLessonSystemPrompt = ({ domain }: { domain: CourseDomain | null }): string => {
+  const key = domain ?? 'null';
+  const cached = lessonSystemPromptCache.get(key);
+  if (cached) return cached;
+  const assembled = `${LESSON_SYSTEM_PROMPT_PREFIX}
+${buildLessonDomainSection({ domain })}
+
+${LESSON_SYSTEM_PROMPT_SUFFIX}`;
+  lessonSystemPromptCache.set(key, assembled);
+  return assembled;
+};
 
 // ── Per-domain guidance (interactive exercises) ───────
 // Same typed-Record pattern as the lesson-content domain section. Adding a
@@ -238,7 +261,7 @@ const INTERACTIVE_DOMAIN_LABELS: Record<CourseDomain, string> = {
 };
 
 const INTERACTIVE_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
-  programming: 'use a CODE exercise. Existing code-exercise rules apply.',
+  programming: `use a CODE exercise. Existing code-exercise rules apply. Match \`metadata.language\` to the subject being taught — if the lesson is about SQL, PostgreSQL, MySQL, SQLite, dbt, BigQuery, Snowflake, Redshift, data modeling, or analytics queries, set \`language: "sql"\` and write a real SQL exercise (the sandbox is SQLite-backed, so use SQLite-compatible syntax). NEVER simulate SQL behavior inside a JavaScript sandbox — it breaks tool fidelity for a learner whose declared tools are pgAdmin/DBeaver/dbt CLI.`,
   stem: `
   - DEFAULT to a THOUGHT exercise (\`metadata: null\`): a math/science problem the learner solves with paper and pencil. Examples: "compute this derivative", "find the limit", "evaluate the integral", "apply this theorem", "show this identity", "for which $x$ does the equation hold?", "compute the force given these values", "balance this reaction", "find the variance of $X$".
   - Use LaTeX liberally in the exercise \`content\` — canonical equations, explicit variables, numerical setup.
@@ -255,23 +278,25 @@ const INTERACTIVE_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
 
 const INTERACTIVE_NULL_DOMAIN_BRANCH = "judge from the lesson's main subject. If it teaches how to write code, use a code exercise. If it teaches concepts, ideas, or quantitative reasoning, use a thought exercise.";
 
-const INTERACTIVE_DOMAIN_BULLETS = COURSE_DOMAINS
-  .map((d) => {
-    const body = INTERACTIVE_DOMAIN_BRANCHES[d];
-    const sep = body.startsWith('\n') ? '' : ' ';
-    return `- ${INTERACTIVE_DOMAIN_LABELS[d]}:${sep}${body}`;
-  })
-  .join('\n\n');
+/** Counterpart to `buildLessonDomainSection` — same rationale. */
+const buildInteractiveDomainSection = ({ domain }: { domain: CourseDomain | null }): string => {
+  if (!domain) {
+    return `## Adapting the exercise to the course domain
 
-const INTERACTIVE_DOMAIN_SECTION = `## Adapting the exercise to the course domain
+The \`Course domain\` in the lesson info is null or unknown — ${INTERACTIVE_NULL_DOMAIN_BRANCH}`;
+  }
+  const body = INTERACTIVE_DOMAIN_BRANCHES[domain];
+  const sep = body.startsWith('\n') ? '' : ' ';
+  return `## Adapting the exercise to the course domain
 
-The \`Course domain\` in the lesson info tells you how the exercise should be shaped. It OVERRIDES any signal from code appearing in the lesson body (code in a stem lesson is illustration, not prescription).
+The \`Course domain\` in the lesson info is **${domain}**. It OVERRIDES any signal from code appearing in the lesson body (code in a stem lesson is illustration, not prescription). Apply the matching guidance:
 
-${INTERACTIVE_DOMAIN_BULLETS}
+- ${INTERACTIVE_DOMAIN_LABELS[domain]}:${sep}${body}`;
+};
 
-- **null or unknown domain**: ${INTERACTIVE_NULL_DOMAIN_BRANCH}`;
+const interactiveSystemPromptCache = new Map<string, string>();
 
-export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer for educational content. Given lesson content that a learner will read, generate inline quiz questions and a practical exercise.
+const INTERACTIVE_SYSTEM_PROMPT_PREFIX = `You are an expert assessment designer for educational content. Given lesson content that a learner will read, generate inline quiz questions and a practical exercise.
 
 ## What to generate
 
@@ -286,13 +311,44 @@ export const INTERACTIVE_SYSTEM_PROMPT = `You are an expert assessment designer 
    - VERIFY CONSISTENCY: After writing the question, options, correctIndex, and explanation, check that the explanation's reasoning leads to the option at correctIndex — not a different one. If the explanation derives a different answer, fix the correctIndex to match. This is critical for math, calculation, and metric-based questions.
    - Each quiz MUST test a DIFFERENT concept from the lesson. If generating 2 quizzes, they should cover two distinct sections — never ask the same underlying question with different wording.
 
+   **Distractor discipline (defends against skim-gaming):**
+   - **Surface-intuition trap.** At LEAST ONE distractor must share a surface feature with the correct answer — the same keyword, direction, sign, unit, or named concept — but be wrong for a named reason. A learner picking the "reasonable-looking" option based on keyword overlap alone must not be able to win.
+   - **Flip the length gradient.** Correct answers drift to being the most precise, which drifts to being the longest — that's a tell a skim-reader can exploit. Invert it: draft distractors at the LONGER end with plausible-but-wrong elaboration (a specific mechanism, a named misconception, an extra qualifying clause) and keep the correct answer closer to the SHORTER end. Target: all four options within ±35% of the median character count, and the correct answer is NOT the strictly longest.
+   - **No absolute qualifiers in distractors alone.** Never put "always", "never", "only", "all", "none", "every", "any" into a distractor UNLESS the correct answer also uses one.
+   - **Position-neutral.** Options shuffle client-side; do not bias correctIndex toward 0 or 3. Write distractors you'd be proud of at ANY position.
+   - **Grounded misconceptions, not fabricated facts.** A distractor may be factually wrong, but it must NOT invent specific regulatory, legal, tax, medical, or scientific rules — or specific quantities, dates, named entities, statute numbers, or citations — that the lesson does not mention. If a distractor reads like an authoritative factual claim ("The IRS classifies…", "Section 409A requires…", "Studies show a 47% reduction…"), the claim itself must come from the lesson. A distractor that sounds authoritative while inventing a specific rule is a content-safety regression a learner will absorb as fact.
+
+   **Worked example of distractor discipline (contrast pair):**
+
+   ❌ Rejected — correct answer is strictly longest, and "never" appears in a distractor alone:
+   \`\`\`
+   question: "Why does a closure retain access to variables after its enclosing function returns?"
+   options:
+     0: "Variables are garbage collected immediately"
+     1: "The engine never frees closure scopes"
+     2: "Functions are first-class values"
+     3: "The closure captures references to the variables in its lexical scope, which the GC keeps alive as long as the closure is reachable"
+   correctIndex: 3
+   \`\`\`
+
+   ✅ Accepted — distractors carry the elaboration, correct answer is tight, no lone absolute qualifiers:
+   \`\`\`
+   question: "Why does a closure retain access to variables after its enclosing function returns?"
+   options:
+     0: "It captures references, which keep those variables reachable"
+     1: "The engine copies variable values into the closure at creation time"
+     2: "Closures pin the entire call stack until they are garbage collected"
+     3: "The closure captures names but resolves them against the global scope"
+   correctIndex: 0
+   \`\`\`
+
 2. **exercise** block (exactly 1): A practical challenge the learner can do to apply what they learned. Rules:
    - Content is a markdown description of the exercise
    - Should be achievable in 5-10 minutes
    - For code topics (including web/frontend topics like JavaScript, TypeScript, React, Vue, etc.), set these metadata fields:
-     - metadata.language: the programming language (e.g., "javascript", "typescript", "python", etc.)
-     - metadata.starterCode: pre-filled code the learner will modify/extend (must be syntactically valid and runnable as-is, even if incomplete)
-     - metadata.expectedOutput: the expected stdout when solved correctly
+     - metadata.language: the programming language (e.g., "javascript", "typescript", "python", "sql", etc.). Pick the language that matches what the lesson actually teaches. For SQL-family subjects (PostgreSQL, MySQL, SQLite, dbt, BigQuery, Snowflake, Redshift, data modeling, analytics queries) use "sql" — the sandbox is SQLite, so write SQLite-compatible syntax. Do NOT use "javascript" to simulate SQL; the starter code must be runnable in the language the subject is taught in.
+     - metadata.starterCode: pre-filled code the learner will modify/extend (must be syntactically valid and runnable as-is, even if incomplete). For SQL exercises include the schema (CREATE TABLE) and sample data (INSERT) so the learner's SELECT returns deterministic rows.
+     - metadata.expectedOutput: the expected stdout when solved correctly. For SQL, this is SQLite's default \`.mode list\` output: one row per line, columns pipe-separated, no header.
      - For frontend/web topics, focus exercises on JavaScript logic that produces console output (e.g., DOM manipulation logic, data transformations, event handling logic, state management patterns) rather than visual rendering. Use console.log to verify results.
      - For topics that are purely visual (CSS layouts, styling, design) where stdout validation is not practical, generate a thought exercise instead (metadata: null) — ask the learner to build something locally or analyze a given design.
    - For non-code topics: write a thought exercise, analysis task, or application scenario as the content. Set metadata to null. The exercise should require the learner to apply concepts from the lesson to a concrete situation — not just summarize what they read.
@@ -303,9 +359,9 @@ Write EVERY mathematical expression in LaTeX — in quiz \`question\` and \`expl
 
 Quiz OPTIONS are rendered as plain text — do NOT put LaTeX inside options. If a choice needs a symbol, use Unicode (π, ², ³, √, ∞, ≤, ≠, ≈, ±, ·, ×, ∫, Σ, Δ) instead.
 
-${INTERACTIVE_DOMAIN_SECTION}
+`;
 
-## Depth calibration
+const INTERACTIVE_SYSTEM_PROMPT_SUFFIX = `## Depth calibration
 
 Adjust difficulty based on the course depth:
 - **overview**: Questions test conceptual understanding and recognition. Exercise is a guided application or reflection task.
@@ -358,6 +414,19 @@ Good code exercise block:
   "order": 5.5
 }
 
+Good SQL exercise block (for a PostgreSQL/dbt/analytics course — schema + data baked into starter code, SQLite-compatible syntax, pipe-separated expected output):
+{
+  "id": "exercise-1",
+  "type": "exercise",
+  "content": "## Active Users by Signup Month\\n\\nReturn every active user's email and signup month, sorted by signup date ascending. Month format: YYYY-MM.",
+  "metadata": {
+    "language": "sql",
+    "starterCode": "CREATE TABLE users (id INTEGER, email TEXT, active INTEGER, signup_date TEXT);\\nINSERT INTO users VALUES (1, 'alice@example.com', 1, '2026-01-15');\\nINSERT INTO users VALUES (2, 'bob@example.com',   0, '2026-01-22');\\nINSERT INTO users VALUES (3, 'carol@example.com', 1, '2026-02-03');\\nINSERT INTO users VALUES (4, 'dan@example.com',   1, '2026-02-18');\\n\\n-- Your query here\\nSELECT email, /* month expression */ AS signup_month\\nFROM users\\nWHERE /* ... */\\nORDER BY /* ... */;",
+    "expectedOutput": "alice@example.com|2026-01\\ncarol@example.com|2026-02\\ndan@example.com|2026-02"
+  },
+  "order": 5.5
+}
+
 Good non-code exercise block (humanities/business):
 {
   "id": "exercise-1",
@@ -377,3 +446,15 @@ Good STEM thought exercise (calculus — note: math is in LaTeX, metadata is nul
 }
 
 Return ONLY the quiz and exercise blocks.`;
+
+export const buildInteractiveSystemPrompt = ({ domain }: { domain: CourseDomain | null }): string => {
+  const key = domain ?? 'null';
+  const cached = interactiveSystemPromptCache.get(key);
+  if (cached) return cached;
+  const assembled = `${INTERACTIVE_SYSTEM_PROMPT_PREFIX}
+${buildInteractiveDomainSection({ domain })}
+
+${INTERACTIVE_SYSTEM_PROMPT_SUFFIX}`;
+  interactiveSystemPromptCache.set(key, assembled);
+  return assembled;
+};

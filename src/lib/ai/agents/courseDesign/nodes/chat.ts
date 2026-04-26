@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { AIMessage } from '@langchain/core/messages';
 import { ANTHROPIC_API_KEY } from '@conf/env';
 import { MODEL_IDS } from '@lib/langchain';
+import { logCacheUsage, usageFromAnthropic } from '@lib/ai/cacheLogger';
 import { COURSE_DESIGN_SYSTEM_PROMPT } from '../prompts';
 import { NodeFunction } from '../types';
 import { EventEmitter } from 'events';
@@ -168,14 +169,7 @@ export const chat: NodeFunction = async (state, config) => {
 
   const response = await stream.finalMessage();
 
-  // Log cache usage
-  const usage = response.usage as unknown as Record<string, number>;
-  if (usage.cache_read_input_tokens || usage.cache_creation_input_tokens) {
-    console.log(
-      `[agent:chat] Cache: read=${usage.cache_read_input_tokens ?? 0}, write=${usage.cache_creation_input_tokens ?? 0}, uncached=${usage.input_tokens}`
-        .yellow,
-    );
-  }
+  logCacheUsage({ label: 'course:chat', usage: usageFromAnthropic(response), model: MODEL_IDS.SONNET });
 
   // Convert Anthropic response to LangChain AIMessage
   let textContent = '';

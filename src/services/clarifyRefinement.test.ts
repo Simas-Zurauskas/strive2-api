@@ -8,16 +8,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { clarifyOutputSchema, isThinFreeText } from './clarifyValidation';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
-console.log('clarify refinement + isThinFreeText');
 
 // ── Schema refinement (0 vs ≥1 text question) ────────────────
 
@@ -152,4 +146,3 @@ test('handles a 3-token answer as thin (boundary case)', () => {
   assert.equal(isThinFreeText('build fintech dashboard'), true);
 });
 
-console.log(`\n\u2713 clarify refinement + isThinFreeText: ${passed} test(s) passed`);

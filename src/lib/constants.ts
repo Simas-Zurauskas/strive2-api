@@ -21,7 +21,7 @@ export type CourseDomain = (typeof COURSE_DOMAINS)[number];
 
 // ── Jobs ──────────────────────────────────────────────────
 
-export const JOB_TYPES = ['clarify', 'generate_structure', 'refine_structure', 'generate_lesson', 'generate_depth_previews', 'generate_module_quiz'] as const;
+export const JOB_TYPES = ['clarify', 'generate_structure', 'refine_structure', 'generate_lesson', 'generate_depth_previews', 'generate_module_quiz', 'regenerate_hero', 'regenerate_links', 'lesson_narration'] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 export const JOB_STATUSES = ['pending', 'processing', 'completed', 'failed'] as const;

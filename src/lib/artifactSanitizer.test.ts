@@ -1,23 +1,14 @@
 /**
- * Self-executing test file for `artifactSanitizer`. Runs under `ts-node`
- * with no test framework (matches the zero-dep philosophy of lib/metrics).
+ * Tests for `artifactSanitizer`.
  *
- * Run: yarn test:sanitizer
- *
- * Exits 0 on success; assertion failures throw and exit non-zero.
+ * Run: yarn test artifactSanitizer
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { sanitizeArtifacts, ARTIFACT_PATTERNS } from './artifactSanitizer';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
-console.log('artifactSanitizer');
 
 // ── No-op + type-guard behaviour ──────────────────────────────
 
@@ -215,4 +206,3 @@ test('every ARTIFACT_PATTERN has a named id and global flag', () => {
   }
 });
 
-console.log(`\n\u2713 artifactSanitizer: ${passed} test(s) passed`);

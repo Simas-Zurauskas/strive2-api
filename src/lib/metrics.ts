@@ -20,22 +20,22 @@ import { monitorEventLoopDelay } from 'perf_hooks';
 /** Rate-limit handler fired — one increment per 429 emitted. */
 export let rateLimitHits = 0;
 
-/** Server-Sent Events lesson streams started. */
-export let sseStreamsStarted = 0;
-
-/** SSE lesson streams that ended (success OR error). */
-export let sseStreamsEnded = 0;
-
 export const bumpRateLimitHit = () => {
   rateLimitHits += 1;
 };
 
-export const bumpSseStreamStarted = () => {
-  sseStreamsStarted += 1;
-};
+/**
+ * One bump per `debitActualSpend` call that exhausted its 3-retry compare-
+ * and-swap loop without a successful debit. The user got free work; the
+ * UsageEvent row still captures the real spend for analytics, but no credits
+ * were deducted. Rare in practice (concurrent debits on the same user are
+ * uncommon), but the rate climbing signals a load-pattern regression — a
+ * reconciliation sweep is then warranted.
+ */
+export let creditDebitExhausted = 0;
 
-export const bumpSseStreamEnded = () => {
-  sseStreamsEnded += 1;
+export const bumpCreditDebitExhausted = () => {
+  creditDebitExhausted += 1;
 };
 
 // ── Insight queue / fresh-pool diagnostics ─────────────────
@@ -236,6 +236,109 @@ export const bumpArtifactScrubGutted = () => {
   artifactScrubGutted += 1;
 };
 
+// ── Quiz distractor-lint retry loop ────────────────────────
+//
+// Both quiz-generation nodes (inline interactive in lesson-gen and
+// module-quiz) run every MCQ through `lintDistractors` and re-invoke the
+// LLM with violation feedback if any rule trips. Retry-on-lint-fail is
+// capped; the final attempt ships even if still violating (shipping a
+// mediocre quiz beats shipping none).
+//
+// - `_retry_total` — attempts beyond the first, regardless of final outcome.
+//   A climbing value means the prompt is drifting or the rules need a
+//   worked example in the system prompt.
+// - `_hard_fail_total` — retries exhausted, violations persisted, and the
+//   lesson shipped with a flagged quiz. This is the signal to strengthen
+//   the retry budget, the prompt, or the rules themselves.
+// - `_repaired_total` — residual violations after the final retry were
+//   cleared mechanically by `repairDistractors` (hedge absolute qualifiers
+//   / trim correct-answer tail) so the block shipped lint-clean. A high
+//   repaired count paired with a low hard-fail count means the mechanical
+//   pass is carrying load the LLM feedback loop couldn't; a high
+//   hard-fail count means the repair escape hatches don't cover the
+//   observed failure modes and the prompt or rules need work.
+
+export let quizDistractorLintRetry = 0;
+export let quizDistractorLintHardFail = 0;
+export let quizDistractorLintRepaired = 0;
+export let quizDistractorLintLengthOnlyShipped = 0;
+
+export const bumpQuizDistractorLintRetry = () => {
+  quizDistractorLintRetry += 1;
+};
+
+export const bumpQuizDistractorLintHardFail = () => {
+  quizDistractorLintHardFail += 1;
+};
+
+export const bumpQuizDistractorLintRepaired = () => {
+  quizDistractorLintRepaired += 1;
+};
+
+// One bump per block/question that shipped with only `length-uniformity`
+// violations (no `correct-is-longest`, no `distractor-absolute-qualifier`).
+// The feedback loop used to retry + hard-fail these, burning LLM calls on
+// a low-signal rule whose skim-gaming defense is already covered by
+// `correct-not-longest`. Counting them separately keeps visibility without
+// polluting the hard-fail dashboard.
+export const bumpQuizDistractorLintLengthOnlyShipped = () => {
+  quizDistractorLintLengthOnlyShipped += 1;
+};
+
+// ── Interactive + quiz model-tier escalation ──
+// Inline-quiz + exercise generation (`interactiveGeneration`) and module-
+// quiz synthesis (`quizGeneration`) both attempt Haiku first, then escalate
+// to Sonnet on schema / count-floor failure OR on distractor-lint residuals
+// that survive the deterministic repair pass. Ratio
+// (escalations / attempts) is the signal: if >~10%, Haiku isn't carrying
+// the task and we should revert the downshift.
+export let interactiveHaikuAttempts = 0;
+export let interactiveSonnetEscalations = 0;
+export let quizHaikuAttempts = 0;
+export let quizSonnetEscalations = 0;
+
+export const bumpInteractiveHaikuAttempt = () => {
+  interactiveHaikuAttempts += 1;
+};
+export const bumpInteractiveSonnetEscalation = () => {
+  interactiveSonnetEscalations += 1;
+};
+export const bumpQuizHaikuAttempt = () => {
+  quizHaikuAttempts += 1;
+};
+export const bumpQuizSonnetEscalation = () => {
+  quizSonnetEscalations += 1;
+};
+
+// ── Tavily cross-lesson search dedup ──
+// Course-scoped cache in `links/searchCache.ts` short-circuits Tavily calls
+// when a sibling lesson already searched the same normalized query within
+// the TTL window. Each hit saves one `tavily_search_advanced` unit at
+// $0.016. Divide by total Tavily call count (recorded via recordUsage) to
+// get the hit ratio.
+export let tavilySearchDedupHits = 0;
+
+export const bumpTavilySearchDedupHit = () => {
+  tavilySearchDedupHits += 1;
+};
+
+// ── Content-validation repair fallback (Haiku → Sonnet) ──
+// `contentValidation` fires structural-repair when a lesson comes back
+// missing intro/summary/sections. Haiku runs first (5× cheaper); a schema
+// mismatch or empty response triggers a Sonnet retry. Ratio of attempts vs
+// fallbacks is the signal: if fallbacks climb past ~5% Haiku isn't carrying
+// the task and we should revert the downshift.
+export let contentValidationRepairHaikuAttempts = 0;
+export let contentValidationRepairHaikuFallbacks = 0;
+
+export const bumpContentValidationRepairHaikuAttempt = () => {
+  contentValidationRepairHaikuAttempts += 1;
+};
+
+export const bumpContentValidationRepairHaikuFallback = () => {
+  contentValidationRepairHaikuFallbacks += 1;
+};
+
 // ── Clarify-generation refinement + thin-answer detection ──
 //
 // `clarifyOutputSchema` requires ≥1 free-text question via a Zod `.refine()`.
@@ -263,18 +366,16 @@ export const bumpStructureThinFreeTextInput = () => {
   structureThinFreeTextInputs += 1;
 };
 
-// ── Structure cap validation + depth override gate ─────────
+// ── Structure cap observation + depth override gate ────────
 //
-// `generateCourseStructure` counts total lessons post-generation and
-// regenerates once if the LLM exceeded the cap (set by `getLessonCountHint`
-// based on depth + softness). Two counters:
-//   • `structure_cap_exceeded_retries_total` — first-attempt-over cases that
-//     triggered the corrective regeneration. Rising values are not bad per
-//     se (the retry usually fixes it) but signal the base prompt isn't
-//     respecting the cap.
-//   • `structure_cap_violations_unresolved_total` — second-attempt-also-over
-//     cases. Must stay near zero; non-zero indicates a genuine prompt or
-//     schema bug.
+// `generateCourseStructure` exposes the LLM's lesson-count-cap adherence
+// as a pure observation counter (no action taken on miss — see the
+// function's comment for the "suggestion, not hard rule" rationale):
+//   • `structure_cap_exceeded_total` — times the LLM produced more
+//     lessons than the (depth, soft)-derived `capMax`. Dashboards can
+//     alert on rate rather than absolute count; a non-trivial rate is
+//     informational feedback that the prompt could be tightened, not a
+//     failure signal.
 //
 // `depth_override_gate_fired_total` counts 409 responses from updateCourse
 // when a SOFT=YES learner tries to upgrade depth without an explicit
@@ -282,17 +383,12 @@ export const bumpStructureThinFreeTextInput = () => {
 // success path so dashboards can compare first-attempt-blocked vs. final-
 // accepted to gauge how often the gate is hit vs. bounced.
 
-export let structureCapExceededRetries = 0;
-export let structureCapViolationsUnresolved = 0;
+export let structureCapExceeded = 0;
 export let depthOverrideGateFired = 0;
 export let depthOverrideAcknowledged = 0;
 
-export const bumpStructureCapExceededRetry = () => {
-  structureCapExceededRetries += 1;
-};
-
-export const bumpStructureCapViolationUnresolved = () => {
-  structureCapViolationsUnresolved += 1;
+export const bumpStructureCapExceeded = () => {
+  structureCapExceeded += 1;
 };
 
 export const bumpDepthOverrideGateFired = () => {
@@ -301,6 +397,47 @@ export const bumpDepthOverrideGateFired = () => {
 
 export const bumpDepthOverrideAcknowledged = () => {
   depthOverrideAcknowledged += 1;
+};
+
+// ── LLM cache + token usage (per-label) ─────────────────────
+// Every Claude model in `lib/langchain.ts` is configured with ephemeral
+// prompt caching, but until now we had no aggregate visibility into hit
+// rates. These per-label maps mirror the `insightQueueFreshReason` pattern:
+// one logical metric, broken down by a `label` (e.g. `lesson:content`,
+// `quiz:generate`) so dashboards can pivot per-call-site without breaking
+// the zero-dep stance.
+//
+// Bumped from `lib/ai/cacheLogger.ts` on every LLM call (LangChain via
+// callback handler, Vercel AI + raw Anthropic via direct call).
+//
+// Cache hit ratio in Grafana:
+//   rate(llm_cache_read_tokens_total[5m])
+//     / (rate(llm_cache_read_tokens_total[5m])
+//         + rate(llm_cache_write_tokens_total[5m])
+//         + rate(llm_uncached_input_tokens_total[5m]))
+
+export const llmCallTotal: Record<string, number> = {};
+export const llmCacheReadTokensTotal: Record<string, number> = {};
+export const llmCacheWriteTokensTotal: Record<string, number> = {};
+export const llmUncachedInputTokensTotal: Record<string, number> = {};
+export const llmOutputTokensTotal: Record<string, number> = {};
+
+const bumpKey = (store: Record<string, number>, key: string, delta: number): void => {
+  store[key] = (store[key] ?? 0) + delta;
+};
+
+export const bumpLlmCallMetrics = ({
+  label,
+  usage,
+}: {
+  label: string;
+  usage: { cacheRead: number; cacheCreation: number; uncached: number; output: number };
+}): void => {
+  bumpKey(llmCallTotal, label, 1);
+  bumpKey(llmCacheReadTokensTotal, label, usage.cacheRead);
+  bumpKey(llmCacheWriteTokensTotal, label, usage.cacheCreation);
+  bumpKey(llmUncachedInputTokensTotal, label, usage.uncached);
+  bumpKey(llmOutputTokensTotal, label, usage.output);
 };
 
 // ── Event loop lag monitor ──────────────────────────────────
@@ -344,8 +481,6 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
   const mem = process.memoryUsage();
   const uptime = process.uptime();
 
-  const activeStreams = Math.max(0, sseStreamsStarted - sseStreamsEnded);
-
   const lines: string[] = [];
 
   const metric = (
@@ -360,10 +495,12 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
   };
 
   metric('rate_limit_hits_total', 'Rate limiter 429 responses since process start', 'counter', rateLimitHits);
-  metric('sse_streams_started_total', 'Lesson SSE streams opened since process start', 'counter', sseStreamsStarted);
-  metric('sse_streams_ended_total', 'Lesson SSE streams closed (any reason) since process start', 'counter', sseStreamsEnded);
-
-  metric('sse_streams_active', 'Lesson SSE streams currently in flight', 'gauge', activeStreams);
+  metric(
+    'credit_debit_exhausted_total',
+    'debitActualSpend calls that lost all 3 retries of the atomic compare-and-swap — the job completed but no credits were deducted',
+    'counter',
+    creditDebitExhausted,
+  );
   metric('job_runner_active', 'Jobs currently executing in jobRunner pLimit', 'gauge', activeJobs);
   metric('job_runner_pending', 'Jobs queued behind pLimit (waiting to start)', 'gauge', pendingJobs);
   metric('socket_connections', 'Currently connected Socket.io clients', 'gauge', socketConnections);
@@ -478,6 +615,80 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
     artifactScrubGutted,
   );
 
+  // ── Quiz distractor-lint retry loop ──────────────────────
+  metric(
+    'quiz_distractor_lint_retry_total',
+    'Retry invocations fired by the interactive / module-quiz nodes after a distractor-lint violation on a prior attempt (counts retries, not attempts)',
+    'counter',
+    quizDistractorLintRetry,
+  );
+  metric(
+    'quiz_distractor_lint_hard_fail_total',
+    'Lessons / modules that exhausted the retry budget with violations still present and shipped anyway',
+    'counter',
+    quizDistractorLintHardFail,
+  );
+  metric(
+    'quiz_distractor_lint_repaired_total',
+    'Blocks where mechanical repair (hedge absolute qualifiers, trim correct-answer tail) cleared residual violations after the retry budget exhausted — converted a would-be hard-fail into a clean ship',
+    'counter',
+    quizDistractorLintRepaired,
+  );
+  metric(
+    'quiz_distractor_lint_length_only_shipped_total',
+    'Blocks that shipped with only length-uniformity violations (no correct-is-longest, no absolute-qualifier). Retry is skipped for these — the skim-gaming defense is already covered by correct-not-longest',
+    'counter',
+    quizDistractorLintLengthOnlyShipped,
+  );
+
+  // ── Tavily cross-lesson search dedup ────────────────────
+  metric(
+    'tavily_search_dedup_hits_total',
+    'Tavily queries served from the course-scoped cache instead of hitting the API. Each hit saves $0.016 of search spend',
+    'counter',
+    tavilySearchDedupHits,
+  );
+
+  // ── Interactive + quiz model-tier escalation ──────────
+  metric(
+    'interactive_haiku_attempts_total',
+    'Inline-quiz + exercise generations that tried Haiku first (cost-down from Sonnet)',
+    'counter',
+    interactiveHaikuAttempts,
+  );
+  metric(
+    'interactive_sonnet_escalations_total',
+    'Inline-quiz + exercise generations where Haiku failed (schema / count-floor / distractor-lint residual) and the code escalated to Sonnet — ratio >~10% means revert the downshift',
+    'counter',
+    interactiveSonnetEscalations,
+  );
+  metric(
+    'quiz_haiku_attempts_total',
+    'Module-quiz synthesis calls that tried Haiku first (cost-down from Sonnet)',
+    'counter',
+    quizHaikuAttempts,
+  );
+  metric(
+    'quiz_sonnet_escalations_total',
+    'Module-quiz synthesis calls that escalated to Sonnet after Haiku failure (schema / distractor-lint residual) — ratio >~10% means revert the downshift',
+    'counter',
+    quizSonnetEscalations,
+  );
+
+  // ── Content-validation repair model tier ─────────────────
+  metric(
+    'content_validation_repair_haiku_attempts_total',
+    'Content-validation repair calls that tried Haiku first (cost-down from Sonnet)',
+    'counter',
+    contentValidationRepairHaikuAttempts,
+  );
+  metric(
+    'content_validation_repair_haiku_fallbacks_total',
+    'Content-validation repair calls where Haiku failed (schema / empty response) and the code fell back to Sonnet — ratio >~5% means revert the downshift',
+    'counter',
+    contentValidationRepairHaikuFallbacks,
+  );
+
   // ── Clarify refinement + thin-answer detection ───────────
   metric(
     'clarify_refinement_retries_total',
@@ -494,16 +705,10 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
 
   // ── Structure cap + depth override gate ──────────────────
   metric(
-    'structure_cap_exceeded_retries_total',
-    'Times generateCourseStructure had to regenerate because the first attempt exceeded the lesson-count cap',
+    'structure_cap_exceeded_total',
+    'Times the structure generator produced more lessons than the (depth, soft)-derived capMax. Observation-only: cap is a prompt suggestion, not a hard rule',
     'counter',
-    structureCapExceededRetries,
-  );
-  metric(
-    'structure_cap_violations_unresolved_total',
-    'Times the structure regeneration also exceeded the cap — should stay near zero; non-zero signals prompt drift',
-    'counter',
-    structureCapViolationsUnresolved,
+    structureCapExceeded,
   );
   metric(
     'depth_override_gate_fired_total',
@@ -517,6 +722,60 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
     'counter',
     depthOverrideAcknowledged,
   );
+
+  // ── LLM cache + token usage (per-label) ──────────────────
+  // One row per (metric, label) pair. Labels are emitted in insertion
+  // order, which is also approximately call-site discovery order — fine
+  // for Prometheus, which doesn't care about ordering.
+  const labels = Array.from(
+    new Set([
+      ...Object.keys(llmCallTotal),
+      ...Object.keys(llmCacheReadTokensTotal),
+      ...Object.keys(llmCacheWriteTokensTotal),
+      ...Object.keys(llmUncachedInputTokensTotal),
+      ...Object.keys(llmOutputTokensTotal),
+    ]),
+  );
+
+  const llmMetricGroup = (
+    name: string,
+    help: string,
+    store: Record<string, number>,
+  ) => {
+    lines.push(`# HELP ${name} ${help}`);
+    lines.push(`# TYPE ${name} counter`);
+    for (const label of labels) {
+      lines.push(`${name}{label="${label}"} ${store[label] ?? 0}`);
+    }
+  };
+
+  if (labels.length > 0) {
+    llmMetricGroup(
+      'llm_call_total',
+      'LLM .invoke / .stream / streamObject completions, broken down by call-site label (e.g. lesson:content, quiz:generate)',
+      llmCallTotal,
+    );
+    llmMetricGroup(
+      'llm_cache_read_tokens_total',
+      'Anthropic prompt-cache read tokens (cache hits) summed per label',
+      llmCacheReadTokensTotal,
+    );
+    llmMetricGroup(
+      'llm_cache_write_tokens_total',
+      'Anthropic prompt-cache creation tokens (cache misses that wrote a new entry) summed per label',
+      llmCacheWriteTokensTotal,
+    );
+    llmMetricGroup(
+      'llm_uncached_input_tokens_total',
+      'Input tokens that bypassed the cache (post-breakpoint or below model min-cache size) summed per label',
+      llmUncachedInputTokensTotal,
+    );
+    llmMetricGroup(
+      'llm_output_tokens_total',
+      'LLM output tokens summed per label',
+      llmOutputTokensTotal,
+    );
+  }
 
   return lines.join('\n') + '\n';
 };

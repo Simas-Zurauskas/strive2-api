@@ -1,6 +1,8 @@
 import asyncHandler from 'express-async-handler';
 import { z } from 'zod';
 import { JUDGE0_API_KEY, JUDGE0_API_URL } from '@conf/env';
+import { priceFlatUnit } from '@lib/pricing';
+import { recordUsage } from '@services/usageService';
 
 // ── Judge0 language IDs ────────────────────────────────
 // Full list: https://github.com/judge0/judge0#supported-languages
@@ -156,6 +158,19 @@ export const executeCodeController = asyncHandler(async (req, res) => {
   }
 
   const result = await response.json();
+
+  recordUsage({
+    service: 'judge0',
+    action: 'code:exec',
+    costMicroCents: priceFlatUnit({ sku: 'judge0_rapidapi' }),
+    metadata: {
+      language,
+      languageId,
+      codeLength: code.length,
+      status: result.status?.description ?? 'Unknown',
+      time: result.time ?? null,
+    },
+  });
 
   // Decode base64 outputs and clamp to a sane upper bound. A program that
   // logs megabytes would otherwise be decoded in full and buffered into the

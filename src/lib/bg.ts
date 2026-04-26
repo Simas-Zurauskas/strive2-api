@@ -1,6 +1,22 @@
 import * as Sentry from '@sentry/node';
 
 /**
+ * Log-color convention across api/src (uses the `colors` package's
+ * String.prototype extensions):
+ *   .red    — genuine terminal error: thrown, 5xx, process exit, or a
+ *             fire-and-forget failure captured to Sentry. Paired with
+ *             `console.error` or `bgError(...)`.
+ *   .yellow — recoverable warning: retry fired, soft-fail, degraded output
+ *             shipped, feature disabled, cap exceeded but proceeding.
+ *             Paired with `console.warn`.
+ *
+ * If a caller catches and continues (ships partial/fallback output), the
+ * log is yellow even when it describes a failure. Red is reserved for
+ * paths the system cannot recover from — it should track 1:1 with things
+ * Sentry cares about.
+ */
+
+/**
  * Canonical error handler for fire-and-forget background operations.
  *
  * Many side-effects in the codebase are intentionally detached from the

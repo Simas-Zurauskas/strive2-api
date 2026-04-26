@@ -9,7 +9,7 @@ import { bgError } from '@lib/bg';
 
 import { MONGO_URI } from './env';
 
-const cleanupOrphanedJobs = async () => {
+export const cleanupOrphanedJobs = async () => {
   try {
     // Step 1: fail every in-flight job in one sweep.
     //
@@ -30,15 +30,15 @@ const cleanupOrphanedJobs = async () => {
       console.log(`[Startup] Failed ${failed.modifiedCount} in-flight job(s) from previous run`.cyan);
     }
 
-    // Step 2: clear every course.activeJobId. No in-flight job exists
-    // anywhere after Step 1, so any remaining pointer is stale. Single
-    // sweep is O(1) queries vs the previous per-course N+1 loop.
+    // Step 2: clear every course.activeJobId + activeLesson. No in-flight
+    // job exists anywhere after Step 1, so any remaining pointer is stale.
+    // Single sweep is O(1) queries vs the previous per-course N+1 loop.
     const cleared = await CourseModel.updateMany(
-      { activeJobId: { $ne: null } },
-      { $set: { activeJobId: null } },
+      { $or: [{ activeJobId: { $ne: null } }, { activeLesson: { $ne: null } }] },
+      { $set: { activeJobId: null, activeLesson: null } },
     );
     if (cleared.modifiedCount > 0) {
-      console.log(`[Startup] Cleared activeJobId on ${cleared.modifiedCount} course(s)`.cyan);
+      console.log(`[Startup] Cleared activeJobId + activeLesson on ${cleared.modifiedCount} course(s)`.cyan);
     }
 
     // Delete partial content left by interrupted generations. Enumerate first so

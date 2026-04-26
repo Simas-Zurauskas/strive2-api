@@ -4,6 +4,12 @@ import { anthropic } from '@ai-sdk/anthropic';
 import { z } from 'zod';
 import { MODEL_IDS } from '@lib/langchain';
 import { sanitizeLatex } from '@lib/latexSanitizer';
+import { logCacheUsage, usageFromVercelAi } from '@lib/ai/cacheLogger';
+import {
+  bumpContentValidationRepairHaikuAttempt,
+  bumpContentValidationRepairHaikuFallback,
+} from '@lib/metrics';
+import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { LessonState } from '../state';
 import { lessonBlockSchema } from '../prompts';
 
@@ -146,7 +152,7 @@ async function repairStructuralGaps({
 }: {
   blocks: LessonState['contentBlocks'];
   gaps: StructuralGaps;
-  writer?: (event: Record<string, unknown>) => void;
+  writer?: LessonProgressWriter;
 }): Promise<LessonState['contentBlocks']> {
   const missing: string[] = [];
   if (gaps.missingIntro) missing.push('1 "intro" block (2-4 sentence compelling opening)');
@@ -169,23 +175,61 @@ async function repairStructuralGaps({
   if (gaps.missingSummary) allowedTypes.add('summary');
   if (gaps.needMoreSections > 0) allowedTypes.add('section');
 
-  try {
-    const { object } = await generateObject({
-      model: anthropic(MODEL_IDS.SONNET),
+  // Repair is pure structured extraction with a clear schema — Haiku handles
+  // this reliably at temperature 0. We try Haiku first (5× cheaper than
+  // Sonnet per token); on NoObjectGeneratedError or empty output, fall back
+  // to Sonnet so a rare Haiku parse miss never costs the lesson its
+  // structural blocks. Both calls stream through `logCacheUsage` for
+  // cost attribution — the prior implementation was uninstrumented.
+  const systemPrompt = `You are repairing an incomplete lesson. The lesson generation produced content blocks but is missing required structural blocks. Generate ONLY the missing blocks listed below. Match the style, depth, and topic of the existing content.\n\nRules:\n- Use the id format "type-repair-N" (e.g., "intro-repair-1", "summary-repair-1", "section-repair-1")\n- For intro blocks: order should be -1 (will be placed at the start)\n- For section blocks: order should increment from ${nextSectionOrder}\n- For summary blocks: order should be ${summaryOrder} (always last)\n- Content must be consistent with the existing blocks below`;
+  const userPrompt = `## Existing blocks\n\n${existingBlocksSummary}\n\n## Missing blocks to generate\n\n${missing.map((m) => `- ${m}`).join('\n')}\n\nGenerate ONLY the missing blocks. Do not duplicate existing content.`;
+
+  const runRepair = async ({ modelId, label }: { modelId: string; label: string }) => {
+    const result = await generateObject({
+      model: anthropic(modelId),
       schema: z.object({ blocks: z.array(lessonBlockSchema) }),
       temperature: 0.3,
       messages: [
-        {
-          role: 'system' as const,
-          content: `You are repairing an incomplete lesson. The lesson generation produced content blocks but is missing required structural blocks. Generate ONLY the missing blocks listed below. Match the style, depth, and topic of the existing content.\n\nRules:\n- Use the id format "type-repair-N" (e.g., "intro-repair-1", "summary-repair-1", "section-repair-1")\n- For intro blocks: order should be -1 (will be placed at the start)\n- For section blocks: order should increment from ${nextSectionOrder}\n- For summary blocks: order should be ${summaryOrder} (always last)\n- Content must be consistent with the existing blocks below`,
-        },
-        {
-          role: 'user' as const,
-          content: `## Existing blocks\n\n${existingBlocksSummary}\n\n## Missing blocks to generate\n\n${missing.map((m) => `- ${m}`).join('\n')}\n\nGenerate ONLY the missing blocks. Do not duplicate existing content.`,
-        },
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const, content: userPrompt },
       ],
     });
+    logCacheUsage({
+      label,
+      usage: usageFromVercelAi({
+        providerMetadata: result.providerMetadata,
+        usage: result.usage,
+      }),
+      model: modelId,
+    });
+    return result.object;
+  };
 
+  let object: { blocks: LessonState['contentBlocks'] };
+  try {
+    bumpContentValidationRepairHaikuAttempt();
+    object = await runRepair({ modelId: MODEL_IDS.HAIKU, label: 'lesson:validation-repair.haiku' });
+    if (object.blocks.filter((b) => allowedTypes.has(b.type)).length === 0) {
+      // Haiku returned but nothing matched the allowed-types gate — treat as
+      // a soft failure and escalate to Sonnet rather than shipping the
+      // original (broken) blocks unchanged.
+      throw new Error('Haiku produced zero usable blocks after allowed-types filter');
+    }
+  } catch (haikuError) {
+    const haikuMsg = haikuError instanceof Error ? haikuError.message : String(haikuError);
+    console.warn(`[contentValidation] ⚠ Haiku repair fell through (${haikuMsg}) — retrying with Sonnet`.yellow);
+    bumpContentValidationRepairHaikuFallback();
+    try {
+      object = await runRepair({ modelId: MODEL_IDS.SONNET, label: 'lesson:validation-repair.sonnet' });
+    } catch (sonnetError) {
+      const reason = sonnetError instanceof Error ? sonnetError.message : String(sonnetError);
+      console.error(`[contentValidation] ✗ Repair failed on both Haiku and Sonnet: ${reason}`.red);
+      logNoObjectDetails('contentValidation.repair', sonnetError);
+      return blocks;
+    }
+  }
+
+  try {
     // Discard any blocks the LLM generated with unexpected types
     const repairedBlocks = object.blocks.filter((b) => allowedTypes.has(b.type));
 
@@ -224,7 +268,7 @@ async function repairStructuralGaps({
 export const contentValidation = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
   let blocks = state.contentBlocks;
   const warnings: string[] = [];
-  const writer = config?.configurable?.writer as ((event: Record<string, unknown>) => void) | undefined;
+  const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
   // Check required block types
   const introBlocks = blocks.filter((b) => b.type === 'intro');
@@ -246,7 +290,22 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
   // Check mermaid blocks start with a valid diagram type
   const mermaidBlocks = blocks.filter((b) => b.type === 'mermaid');
   const validDiagramStarts = ['flowchart', 'sequenceDiagram', 'classDiagram', 'stateDiagram-v2', 'erDiagram', 'mindmap', 'graph'];
+  let sanitizedMermaidLabels = 0;
   for (const block of mermaidBlocks) {
+    // Inside double-quoted node/edge labels, the LLM sometimes emits the
+    // 2-char sequence `\n` (JSON-escape thinking) where mermaid wants
+    // `<br/>`. Mermaid renders literal `\n` as text, which breaks the
+    // diagram. Substitute only within quoted spans so structural newlines
+    // between statements are preserved.
+    const normalized = block.content.replace(/"([^"]*)"/g, (_match, inner: string) => {
+      if (!inner.includes('\\n')) return `"${inner}"`;
+      sanitizedMermaidLabels += 1;
+      return `"${inner.replace(/\\n/g, '<br/>')}"`;
+    });
+    if (normalized !== block.content) {
+      block.content = normalized;
+    }
+
     const firstLine = block.content.trim().split('\n')[0].trim();
     const startsValid = validDiagramStarts.some((prefix) => firstLine.startsWith(prefix));
     if (!startsValid) {
@@ -255,6 +314,9 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     if (!block.metadata?.diagramType) {
       warnings.push(`Mermaid block ${block.id} missing metadata.diagramType`);
     }
+  }
+  if (sanitizedMermaidLabels > 0) {
+    console.log(`[contentValidation] normalized ${sanitizedMermaidLabels} mermaid label(s): \\n → <br/>`.cyan);
   }
 
   // Check callout blocks have variant set

@@ -20,9 +20,10 @@
       "@middleware/*": ["src/middleware/*"],
       "@conf/*": ["src/conf/*"],
       "@models/*": ["src/models/*"],
-      "@src/*": ["src/*"]
+      "@src/*": ["src/*"],
+      "stripe": ["node_modules/stripe/esm/stripe.esm.node"]
     }
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  "include": ["src/**/*", "test-helpers/**/*", "test-setup.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "build"]
 }

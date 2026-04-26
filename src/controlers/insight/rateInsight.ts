@@ -30,9 +30,7 @@ import { parseInsightIdParam, rateInsightSchema } from './validation';
  *             required: [rating]
  *             properties:
  *               rating:
- *                 type: integer
- *                 enum: [1, 2, 3, 4]
- *                 description: '1=Again, 2=Hard, 3=Good, 4=Easy'
+ *                 $ref: '#/components/schemas/InsightRating'
  *               typedMatch:
  *                 type: number
  *                 minimum: 0

@@ -4,16 +4,10 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { createPrng } from './prng';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
-console.log('prng');
 
 test('same seed → same sequence (determinism)', () => {
   const a = createPrng('seed-one');
@@ -102,4 +96,3 @@ test('seeded PRNG is stateful within an instance', () => {
   assert.notEqual(first, second, 'consecutive calls should not return identical values');
 });
 
-console.log(`\n\u2713 prng: ${passed} test(s) passed`);

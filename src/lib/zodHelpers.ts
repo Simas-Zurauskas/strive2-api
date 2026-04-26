@@ -3,17 +3,55 @@ import { jsonrepair } from 'jsonrepair';
 import * as Sentry from '@sentry/node';
 
 /**
+ * Check whether a comma at `fromPos` is structural JSON punctuation (separator
+ * between array elements or object key-value pairs) rather than prose
+ * punctuation inside a string value. Used to disambiguate `"` + `,` patterns
+ * when escaping unescaped inner quotes.
+ *
+ * Two positive signals:
+ *   - Pretty-printed JSON: newline between `,` and the next token → structural.
+ *   - Compact JSON: next token is `{` / `[` (array element) or matches
+ *     `"<key>":` (object key) → structural.
+ * Anything else (e.g. more prose text after the comma) is treated as non-
+ * structural so the surrounding `"` is escaped rather than treated as a
+ * closing quote.
+ */
+const isStructuralAfterComma = (s: string, fromPos: number): boolean => {
+  let k = fromPos;
+  while (k < s.length && (s[k] === ' ' || s[k] === '\t')) k++;
+  if (s[k] === '\n' || s[k] === '\r') return true;
+  while (k < s.length && /\s/.test(s[k])) k++;
+  if (k >= s.length) return false;
+  if (s[k] === '{' || s[k] === '[') return true;
+  if (s[k] === '"') {
+    // Peek past the next string literal to see if a `:` follows (object key).
+    let m = k + 1;
+    while (m < s.length && s[m] !== '"') {
+      if (s[m] === '\\') m += 2;
+      else m++;
+    }
+    if (m >= s.length) return false;
+    m++;
+    while (m < s.length && /\s/.test(s[m])) m++;
+    return s[m] === ':';
+  }
+  return false;
+};
+
+/**
  * Escape `"` characters that appear inside a JSON string value but weren't
  * escaped by the emitter. Anthropic sometimes stringifies a nested array and
  * botches the escape when content contains quoted phrases like
- * `"Yellow: −45"` — the inner quotes terminate the outer string early and
- * strict `JSON.parse` fails. jsonrepair can't disambiguate either because
- * the pattern `…")…` looks like it could be legal structural JSON.
+ * `"Yellow: −45"` or `"Open", "Merged", "Closed"` — the inner quotes
+ * terminate the outer string early and strict `JSON.parse` fails. jsonrepair
+ * can't disambiguate either.
  *
  * Walk the string as a state machine: when inside a string and we hit `"`,
- * peek at the next non-whitespace char. If it's `,` / `:` / `]` / `}` / EOF,
- * it's a closing quote; otherwise it's an unescaped inner quote and we
- * prefix it with a backslash.
+ * classify whether this is the closing quote or an unescaped inner quote.
+ * A `"` is closing iff its next non-whitespace neighbor is `:` / `]` / `}` /
+ * EOF, OR it's followed by a comma that `isStructuralAfterComma` accepts.
+ * Otherwise it's prose punctuation inside the value and we prefix it with
+ * a backslash.
  */
 const escapeInnerQuotes = (s: string): string => {
   const out: string[] = [];
@@ -27,7 +65,6 @@ const escapeInnerQuotes = (s: string): string => {
       i++;
       continue;
     }
-    // Inside a string.
     if (c === '\\' && i + 1 < s.length) {
       out.push(c, s[i + 1]);
       i += 2;
@@ -37,12 +74,19 @@ const escapeInnerQuotes = (s: string): string => {
       let j = i + 1;
       while (j < s.length && /\s/.test(s[j])) j++;
       const next = j < s.length ? s[j] : null;
-      if (next === null || next === ':' || next === ',' || next === ']' || next === '}') {
+      if (next === null || next === ':' || next === ']' || next === '}') {
         out.push(c);
         inString = false;
-      } else {
-        out.push('\\', '"');
+        i++;
+        continue;
       }
+      if (next === ',' && isStructuralAfterComma(s, j + 1)) {
+        out.push(c);
+        inString = false;
+        i++;
+        continue;
+      }
+      out.push('\\', '"');
       i++;
       continue;
     }
@@ -72,6 +116,17 @@ const escapeInnerQuotes = (s: string): string => {
  * Anthropic sees `anyOf: [arraySchema, arraySchema]` and targets the correct
  * structure; the transform only fires at parse time to salvage the string
  * case.
+ *
+ * ⚠ DO NOT wrap the TOP-LEVEL field of a `withStructuredOutput` schema in
+ * `jsonish`. The resulting `anyOf` at the tool's root `input_schema`
+ * correlates with a rare Anthropic tool-calling failure mode where the
+ * model emits an empty `{}` tool input — see the incident documented in
+ * `quizGeneration/prompts.ts:quizOutputSchema` (2026-04-20 orchestrator
+ * run). Tool inputs arrive as structured JSON objects by API contract;
+ * the string-recovery branch cannot fire at the root anyway, so wrapping
+ * there is both harmful (anyOf noise) and useless (never matches the
+ * string branch). Reserve `jsonish` for NESTED array/object fields where
+ * stringification is genuinely observed.
  *
  * Three-stage parse on the string branch: strict `JSON.parse` first (fast
  * path), then `escapeInnerQuotes` + strict parse (recovers from unescaped

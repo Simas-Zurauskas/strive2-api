@@ -34,6 +34,14 @@ const TRACKING_PARAM_EXACT = new Set([
   'yclid',
   'igshid',
   's_cid',
+  // 2026-04-21 assessment additions — trackers that were surviving canonicalization
+  // and then defeating URL-exact dedup because the same page visited from two
+  // referrers produced two different "canonical" URLs.
+  'srsltid', // Google Shopping referrer link (observed on Sarah's tamron link)
+  'mkt_tok', // Marketo
+  'si',      // YouTube / various session-id marketing param
+  '_hsenc',  // HubSpot
+  '_hsmi',   // HubSpot
 ]);
 
 // Hostname prefixes that route to the same content as the apex (or `www.`)
@@ -209,9 +217,30 @@ export const dedupeCandidates = ({
     const prev = byFingerprint.get(fp);
     if (!prev || c.score > prev.score) byFingerprint.set(fp, c);
   }
-  const deduped = [...byFingerprint.values(), ...noFingerprint];
+  const afterFingerprint = [...byFingerprint.values(), ...noFingerprint];
 
-  // Fourth pass: sort by score desc, apply hostname cap + overall cap.
+  // Fourth pass: cross-host title-exact dedup. The fingerprint pass keys on
+  // `slug::firstPathSegment`, so the same paper mirrored on arxiv.org (under
+  // `/html/...`) and mdpi.com (under a journal-coded path) still survives as
+  // two rows. Group by the slug alone for slugs long enough to be discriminating
+  // (≥12 chars). Keeps the higher-scored survivor; shorter / indiscriminate
+  // titles fall through untouched. Observed on Emily's run 2026-04-21, where
+  // the same cholesterol-MD paper appeared twice.
+  const MIN_CROSS_HOST_SLUG = 12;
+  const bySlug = new Map<string, SearchCandidate>();
+  const passThrough: SearchCandidate[] = [];
+  for (const c of afterFingerprint) {
+    const slug = slugifyTitle(c.title);
+    if (!slug || slug.length < MIN_CROSS_HOST_SLUG) {
+      passThrough.push(c);
+      continue;
+    }
+    const prev = bySlug.get(slug);
+    if (!prev || c.score > prev.score) bySlug.set(slug, c);
+  }
+  const deduped = [...bySlug.values(), ...passThrough];
+
+  // Fifth pass: sort by score desc, apply hostname cap + overall cap.
   const sorted = deduped.sort((a, b) => b.score - a.score);
   const perHost = new Map<string, number>();
   const out: SearchCandidate[] = [];

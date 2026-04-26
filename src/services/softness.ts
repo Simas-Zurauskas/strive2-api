@@ -111,6 +111,53 @@ export interface SoftnessHint {
   cues: string[];
 }
 
+/**
+ * Finish-pressure phrases — time-bound commitments that say "I have limited
+ * bandwidth before this matters" without necessarily meaning "I have
+ * low-commitment intent". Kept as a SEPARATE signal from softness so that
+ * downstream prompts which currently size courses by `isSoft` don't silently
+ * broaden and start producing tiny courses for finish-pressured experienced
+ * learners (Mike's "upcoming project at work" is the canonical case).
+ *
+ * 2026-04-21 assessment — added after Mike (Match: No, finish-pressure but
+ * not SOFT) slipped past the depth-override gate.
+ *
+ * FP-check for every phrase: phrasing is specific enough that it rarely
+ * appears in topic-describing text. "deadline-driven culture" is descriptive
+ * and lacks self-referential framing; "deadline" alone captures "I have a
+ * deadline" only in context with the learner's answer structure.
+ */
+const FINISH_PRESSURE_PHRASES: readonly string[] = [
+  'upcoming project',
+  'upcoming work project',
+  'project at work',
+  'deadline',
+  'due next',
+  'due by',
+  'by next',
+  'before the end of',
+  'end of quarter',
+  'end of the month',
+  'end of month',
+  'this quarter',
+  'next sprint',
+  'tight timeline',
+  'tight deadline',
+  'quick turnaround',
+  'in a hurry',
+  "can't finish",
+  "won't finish",
+  'need to ship',
+  'need to deliver',
+];
+
+export interface FinishPressureHint {
+  /** True when at least one finish-pressure phrase matched any answer. */
+  isFinishPressure: boolean;
+  /** Canonical phrases matched. Same injection safety as SoftnessHint.cues. */
+  cues: string[];
+}
+
 interface DetectInput {
   answers: { questionId: string; answer: string }[];
 }
@@ -172,4 +219,54 @@ interface CapInput {
 export const getLessonCountHint = ({ depth, isSoft }: CapInput): [number, number] => {
   const band = LESSON_COUNT_HINTS[depth];
   return isSoft ? band.soft : band.normal;
+};
+
+/**
+ * Detect finish-pressure signals in stored answers — a PARALLEL signal to
+ * softness. See FINISH_PRESSURE_PHRASES for scope and FP-check rationale.
+ *
+ * Gate semantics (in updateCourse): the depth-override confirmation fires
+ * when an expansion signal (upgrade past rec / first-time above rec /
+ * large-course Match=Yes) AND a cost signal (soft OR finish-pressure) both
+ * hold. Keeping the two signals separate means the course-sizing prompts
+ * keep consuming only `isSoft` — we don't silently shrink Mike's Rust
+ * course just because he mentioned an "upcoming project".
+ */
+export const detectFinishPressure = ({ answers }: DetectInput): FinishPressureHint => {
+  if (!answers || answers.length === 0) return { isFinishPressure: false, cues: [] };
+
+  const matched = new Set<string>();
+  for (const { answer } of answers) {
+    if (typeof answer !== 'string' || !answer) continue;
+    const lower = answer.toLowerCase();
+    for (const phrase of FINISH_PRESSURE_PHRASES) {
+      if (lower.includes(phrase)) matched.add(phrase);
+    }
+  }
+
+  if (matched.size === 0) return { isFinishPressure: false, cues: [] };
+  const cues = Array.from(matched).map((p) => `learner answer contained "${p}"`);
+  return { isFinishPressure: true, cues };
+};
+
+/**
+ * Minutes-per-lesson estimate used to convert lesson-count hints into
+ * course-magnitude hours. Observed orchestrator output averages 20-30 min
+ * of learner-facing content per lesson across depths — 25 splits the
+ * difference conservatively. Used only for confirmation-modal display;
+ * does not influence generation.
+ */
+const MINUTES_PER_LESSON_ESTIMATE = 25;
+
+/**
+ * Derive an estimated total-hours range from a (depth, isSoft) pair. Used
+ * by the depth-override 409 gate to surface scope magnitude to the learner
+ * before they commit. Both ends ceil to avoid under-promising; a 4-lesson
+ * soft-overview becomes ~2 hours minimum even though 4 × 25min = 1.67h.
+ */
+export const getEstimatedHoursRange = ({ depth, isSoft }: CapInput): [number, number] => {
+  const [minLessons, maxLessons] = getLessonCountHint({ depth, isSoft });
+  const minHours = Math.max(1, Math.ceil((minLessons * MINUTES_PER_LESSON_ESTIMATE) / 60));
+  const maxHours = Math.max(1, Math.ceil((maxLessons * MINUTES_PER_LESSON_ESTIMATE) / 60));
+  return [minHours, maxHours];
 };

@@ -2,7 +2,9 @@ import UserModel from '@models/UserModel';
 import { AuthProvider } from '@lib/constants';
 import asyncHandler from 'express-async-handler';
 import { generateAuthToken, hashPassword, generateVerificationToken, VERIFICATION_TOKEN_EXPIRY_MS } from '@lib/auth';
+import { FREE_PERIOD_DAYS } from '@lib/creditPricing';
 import { sendVerificationEmailAsync } from '@services/emailService';
+import { resolveSignupAllowance } from '@services/abuseLogService';
 import { signUpSchema } from './validation';
 
 /**
@@ -52,12 +54,27 @@ export const signUpController = asyncHandler(async (req, res) => {
 
   const { plainToken, hashedToken } = generateVerificationToken();
 
+  // Abuse-log check: if this canonical email was seen + deleted within the
+  // retention window, create the account with zero credits so the user can
+  // still sign up + subscribe but can't harvest free-tier credits again.
+  // Silent from the client's perspective — no "blocked" error, just no grant.
+  const { allowanceBalance, allowanceGranted } = await resolveSignupAllowance(email);
+  const periodStart = new Date();
+  const periodEnd = new Date(periodStart.getTime() + FREE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+
   const user = await UserModel.create({
     email,
     password: hashedPassword,
     emailVerificationToken: hashedToken,
     emailVerificationExpiry: new Date(Date.now() + VERIFICATION_TOKEN_EXPIRY_MS),
     authProviders: [{ provider: AuthProvider.CREDENTIALS }],
+    credits: {
+      allowanceBalance,
+      allowanceGranted,
+      periodStart,
+      periodEnd,
+      bonusBalance: 0,
+    },
   });
 
   // Fire-and-forget: signup returns to the client before the Mailjet round

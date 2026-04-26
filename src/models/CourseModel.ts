@@ -39,6 +39,12 @@ export interface ICourse {
   pendingFeedback: string | null;
   currentStep: number;
   activeJobId: Types.ObjectId | null;
+  // Set whenever a `generate_lesson` job is submitted and cleared when the
+  // job ends. Lets the client know — synchronously, the moment `getCourse`
+  // returns — exactly which lesson (if any) is being generated, so a
+  // reloaded tab can render the generating UI without waiting for a live
+  // socket event or for partial content to land in Mongo.
+  activeLesson: { moduleIndex: number; lessonIndex: number } | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -112,6 +118,16 @@ const schema = new Schema<ICourse>(
     activeJobId: {
       type: Schema.Types.ObjectId,
       ref: 'Job',
+      default: null,
+    },
+    activeLesson: {
+      type: new Schema(
+        {
+          moduleIndex: { type: Number, required: true },
+          lessonIndex: { type: Number, required: true },
+        },
+        { _id: false },
+      ),
       default: null,
     },
   },

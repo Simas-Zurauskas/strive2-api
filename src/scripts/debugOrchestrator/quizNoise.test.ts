@@ -4,16 +4,11 @@
  */
 
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { createPrng } from './prng';
 import { applyQuizNoise, computeSimulatedThinkTimeMs } from './quizNoise';
 import type { QuizStyleFlags } from './types';
 
-let passed = 0;
-const test = (name: string, fn: () => void) => {
-  fn();
-  passed += 1;
-  console.log(`  \u2713 ${name}`);
-};
 
 const noFlags: QuizStyleFlags = {
   rushes: false,
@@ -25,7 +20,6 @@ const noFlags: QuizStyleFlags = {
 const longStem = 'x'.repeat(250); // > LONG_STEM_THRESHOLD
 const shortStem = 'x'.repeat(50);
 
-console.log('quizNoise');
 
 // ── No-op / baseline ──────────────────────────────────────────
 
@@ -341,4 +335,3 @@ test('think-time deterministic given same seed', () => {
   assert.equal(a, b);
 });
 
-console.log(`\n\u2713 quizNoise: ${passed} test(s) passed`);
