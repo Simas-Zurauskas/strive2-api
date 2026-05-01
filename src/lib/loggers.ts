@@ -80,4 +80,28 @@ export const createLogger = ({
  * Does NOT cover per-token usage accounting — that's `UsageEventModel` +
  * the `llm_*_total` metrics in `lib/metrics.ts`.
  */
-export const monetization = createLogger({ tag: 'monetization', color: 'magenta' });
+export const monetization = createLogger({ tag: 'monetization', color: 'magenta', enabled: true });
+
+/**
+ * The 3 chat surfaces that share an Anthropic + LangGraph spine: the
+ * lesson mentor, the course mentor, and the course-design wizard. Use
+ * one tag (`chat`) and discriminate inside the message body so a single
+ * `grep '[chat]'` shows the whole turn lifecycle across all three.
+ *
+ * Message convention:
+ *   `<scope>:<phase> <event> [k=v …]`
+ *   - scope ∈ { lesson | course | design }
+ *   - phase ∈ { turn | compress | save | route | tool | stream | fallback }
+ *
+ * Examples:
+ *   [chat] lesson:turn start course=… module=0 lesson=2 messages=12 hasSummary=false
+ *   [chat] lesson:compress passthrough — no summary needed yet (3/10)
+ *   [chat] lesson:tool start name=search_lesson_content args={"query":"…"}
+ *   [chat] lesson:tool done name=search_lesson_content ms=420 ok=true
+ *   [chat] lesson:turn done ms=3210 text=842c tools=1
+ *
+ * Token-spend / cache-hit telemetry stays in `cacheLogger.ts`
+ * (`[llm:…]`) — that's a different domain (cost accounting) with its
+ * own audience and shouldn't be filtered together with chat flow logs.
+ */
+export const chat = createLogger({ tag: 'chat', color: 'cyan', enabled: true });

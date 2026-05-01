@@ -32,6 +32,13 @@ stub('AWS_ACCESS_KEY_ID', 'test');
 stub('AWS_SECRET_ACCESS_KEY', 'test');
 stub('STRIPE_SECRET_KEY', 'sk_test_stub');
 stub('STRIPE_WEBHOOK_SECRET', 'whsec_stub');
+// Newer required env vars — added to env.ts after this file's
+// original draft. Without stubs, importing any module that
+// transitively imports `@conf/env` blows up at file-load time
+// before any test can run.
+stub('OPENAI_API_KEY', 'test');
+stub('PINECONE_API_KEY', 'test');
+stub('PINECONE_INDEX_NAME', 'test-index');
 
 // Subscription Stripe price IDs — only used by stripeService tests, but
 // stubbed here so any module that pulls them in at load time also sees them.

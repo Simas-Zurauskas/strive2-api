@@ -38,6 +38,22 @@ export const bumpCreditDebitExhausted = () => {
   creditDebitExhausted += 1;
 };
 
+// ── withRetry storms (per-label) ──────────────────────────
+//
+// `withRetry` (lib/retry.ts) accepts an optional `label` so each call
+// site can be attributed in metrics. When set, every retry attempt
+// bumps `withRetryTotal[label]`. Used to identify which structured-
+// output / network calls are flaky enough to be regularly retrying
+// (e.g. a Zod schema that the LLM keeps drifting from). Unlabelled
+// retries are intentionally NOT counted — the metric is opt-in
+// observability, not a global retry counter.
+
+export const withRetryTotal: Record<string, number> = {};
+
+export const bumpWithRetry = (label: string) => {
+  withRetryTotal[label] = (withRetryTotal[label] ?? 0) + 1;
+};
+
 // ── Insight queue / fresh-pool diagnostics ─────────────────
 //
 // The GET /api/insight/queue endpoint sometimes returns 0 fresh despite the
@@ -501,6 +517,25 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
     'counter',
     creditDebitExhausted,
   );
+
+  // ── withRetry attempts (per-label) ─────────────────────────
+  // One counter per labelled call site. Bumped once per retry attempt
+  // (not per call), so a high value for a label means that call site is
+  // chronically retrying — typical cause is LLM structured-output drift
+  // against a strict Zod schema. Cardinality is bounded by the number
+  // of unique labels passed to `withRetry`.
+  if (Object.keys(withRetryTotal).length > 0) {
+    lines.push('# HELP with_retry_total Retry attempts inside lib/retry.ts withRetry, keyed by caller-supplied label');
+    lines.push('# TYPE with_retry_total counter');
+    for (const [label, count] of Object.entries(withRetryTotal)) {
+      // Escape any double-quotes / backslashes the caller-supplied label
+      // might contain. Labels are static strings in practice, but
+      // defensive escaping keeps the Prometheus exposition format valid.
+      const escaped = label.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      lines.push(`with_retry_total{label="${escaped}"} ${count}`);
+    }
+  }
+
   metric('job_runner_active', 'Jobs currently executing in jobRunner pLimit', 'gauge', activeJobs);
   metric('job_runner_pending', 'Jobs queued behind pLimit (waiting to start)', 'gauge', pendingJobs);
   metric('socket_connections', 'Currently connected Socket.io clients', 'gauge', socketConnections);

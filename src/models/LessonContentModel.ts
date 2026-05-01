@@ -30,6 +30,14 @@ export interface ILessonContent {
   audioGeneratedAt: Date | null;
   summary: string | null;
   completed: boolean;
+  /**
+   * Lesson-specific opening prompts surfaced in the mentor panel's empty
+   * state. Generated once per lesson via a Haiku call alongside content
+   * indexing — see `generateMentorPrompts`. Optional + capped at 3 so a
+   * generation failure or a pre-feature lesson falls back gracefully to
+   * the generic defaults in `getLessonChatHistory`.
+   */
+  suggestedMentorPrompts: string[];
   version: number;
   createdAt: Date;
   updatedAt: Date;
@@ -74,6 +82,10 @@ const schema = new Schema<ILessonContent>(
     audioGeneratedAt: { type: Date, default: null },
     summary: { type: String, default: null },
     completed: { type: Boolean, default: false },
+    suggestedMentorPrompts: {
+      type: [{ type: String, maxlength: 200 }],
+      default: [],
+    },
     version: { type: Number, default: 1 },
   },
   {

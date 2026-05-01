@@ -1,3 +1,28 @@
+/**
+ * NOTE — split lines for the next maintainer.
+ *
+ * This file is ~720 LOC and dispatches across 5+ Stripe webhook event
+ * types in one giant switch statement. The next change here should
+ * extract along this seam:
+ *
+ *   - This file → `stripeWebhookDispatch.ts`: signature verify,
+ *     deduplication via `stripeEventId`, event-type dispatch.
+ *   - `stripeWebhookHandlers/` directory:
+ *       `subscriptionUpdated.ts`
+ *       `subscriptionDeleted.ts`
+ *       `chargeSucceeded.ts`
+ *       `chargeRefunded.ts`
+ *       `paymentIntentSucceeded.ts`
+ *       `invoicePaid.ts`  (etc.)
+ *
+ * Each handler should accept `(event, opts)` and own its own ledger /
+ * E11000-idempotency logic. The dispatch file just routes to the
+ * right handler based on `event.type`.
+ *
+ * Tests: keep `stripeWebhookService.test.ts` pinned to the public
+ * surface of the dispatch file. Per-handler tests can be added later
+ * once handlers are extracted.
+ */
 import * as Sentry from '@sentry/node';
 import mongoose from 'mongoose';
 import UserModel from '@models/UserModel';

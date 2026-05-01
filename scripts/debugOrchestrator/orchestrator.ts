@@ -33,6 +33,7 @@ export async function runAll({
   console.log(`Lessons: ${config.maxLessons === 0 ? 'skipped'.yellow : String(config.maxLessons)}`.gray);
   console.log(`Quizzes: ${config.enableQuiz ? 'enabled'.green : 'disabled'.yellow}`.gray);
   console.log(`Insights: ${config.enableInsights ? 'enabled (review all returned)'.green : 'disabled'.yellow}`.gray);
+  console.log(`Mentor probes: ${config.enableMentor ? 'enabled (course + lesson)'.green : 'disabled'.yellow}`.gray);
   console.log(`Output: ${config.outputDir}`.gray);
   console.log(`${'='.repeat(60).dim}\n`);
 

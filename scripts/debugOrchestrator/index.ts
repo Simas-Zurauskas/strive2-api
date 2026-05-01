@@ -5,7 +5,7 @@ import path from 'path';
 // Load the API's .env BEFORE importing anything that touches `@conf/env`.
 // `@conf/env` reads `process.env` at module-import time, so if we import
 // `MONGO_URI` above this line it latches onto unset env vars and throws.
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 import mongoose from 'mongoose';
 import { MONGO_URI } from '@conf/env';
@@ -24,7 +24,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
   // a value for these, otherwise `--insights --chat` would parse `--chat` as
   // the value of `--insights`. Listed explicitly so typos in value flags
   // surface as missing-required errors instead of silent bool coercions.
-  const knownBoolFlags = new Set(['chat', 'quizzes', 'insights']);
+  const knownBoolFlags = new Set(['chat', 'quizzes', 'insights', 'mentor']);
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -74,6 +74,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     console.error('  --chat                Include structure review chat step');
     console.error('  --quizzes             Generate + submit module quizzes after lessons');
     console.error('  --insights            Review every insight the queue returns (off by default)');
+    console.error('  --mentor              Probe course-design + lesson mentor chats (1 turn each)');
     console.error('');
     console.error('Each persona runs against its own auto-provisioned db user (debug-*@strive-debug.test),');
     console.error('verified in Mongo at provision time and deleted via /api/auth/delete-account on teardown.');
@@ -89,6 +90,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     enableChatReview: boolFlags.has('chat'),
     enableQuiz: boolFlags.has('quizzes'),
     enableInsights: boolFlags.has('insights'),
+    enableMentor: boolFlags.has('mentor'),
   };
 }
 

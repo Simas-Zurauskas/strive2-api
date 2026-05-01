@@ -17,7 +17,11 @@ const mailjet = new Mailjet({
  */
 export const sendVerificationEmail = async (params: { to: string; token: string }): Promise<void> => {
   const { to, token } = params;
-  const verificationUrl = `${FRONTEND_URL}/verify-email?token=${token}&email=${encodeURIComponent(to)}`;
+  // The verification URL only needs the token — the server looks the
+  // user up by the hashed token directly, so the email address adds no
+  // information and removes a small leakage surface (URL stored in
+  // browser history, referer headers, downstream mail-relay logs).
+  const verificationUrl = `${FRONTEND_URL}/verify-email?token=${token}`;
 
   await mailjet.post('send', { version: 'v3.1' }).request({
     Messages: [

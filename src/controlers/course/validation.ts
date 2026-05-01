@@ -33,6 +33,16 @@ export const chatStreamSchema = z.object({
       }),
     )
     .min(1),
+  /**
+   * Mentor-only: ids of attachments to associate with the new user
+   * turn. The actual content lives on `LessonMentorChatModel.attachments`
+   * (already validated and capped at attach time). This array is just
+   * the per-turn pointer set. Capped at 1 per turn — server-side
+   * enforcement of the "one paperclip per send" UX. Optional + max
+   * keeps the existing course-design chat (which doesn't use this
+   * field) trivially valid.
+   */
+  attachmentIds: z.array(z.string()).max(1).optional(),
 });
 
 export const refineStructureSchema = z.object({

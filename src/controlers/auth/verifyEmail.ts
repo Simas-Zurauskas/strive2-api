@@ -17,13 +17,15 @@ import { verifyEmailSchema } from './validation';
  *         application/json:
  *           schema:
  *             type: object
- *             required: [token, email]
+ *             required: [token]
  *             properties:
  *               token:
  *                 type: string
- *               email:
- *                 type: string
- *                 format: email
+ *                 description: >
+ *                   The verification token from the user's email link.
+ *                   Hashed server-side and looked up directly against
+ *                   `User.emailVerificationToken`. No `email` field is
+ *                   required — the hash is the sole identifier.
  *     responses:
  *       200:
  *         content:
@@ -49,13 +51,24 @@ import { verifyEmailSchema } from './validation';
  *               $ref: '#/components/schemas/ApiError'
  */
 export const verifyEmailController = asyncHandler(async (req, res) => {
-  const { token, email } = verifyEmailSchema.parse(req.body);
+  const { token } = verifyEmailSchema.parse(req.body);
 
-  const user = await UserModel.findOne({ email }).select(
+  // Look the user up directly by the hashed token. The hash is unique
+  // per user (32-byte random source) so this is a single-row lookup.
+  // No `email` is required from the client — the hash is the identifier.
+  const hashedToken = hashVerificationToken(token);
+
+  const user = await UserModel.findOne({ emailVerificationToken: hashedToken }).select(
     '+emailVerificationToken +emailVerificationExpiry',
   );
 
   if (!user) {
+    // Either the token was never issued, was already consumed (the
+    // controller clears the field on success), or the user was deleted.
+    // The "already verified" branch below distinguishes the consumed-
+    // token case for users who click an old link after success — but
+    // only when the lookup matches. Once we clear the field, any reuse
+    // returns INVALID rather than ALREADY_VERIFIED.
     res.status(400);
     throw new AppError('Invalid verification link', { errorCode: 'EMAIL_VERIFICATION_INVALID' });
   }
@@ -65,7 +78,7 @@ export const verifyEmailController = asyncHandler(async (req, res) => {
     throw new AppError('Email is already verified', { errorCode: 'EMAIL_ALREADY_VERIFIED' });
   }
 
-  if (!user.emailVerificationToken || !user.emailVerificationExpiry) {
+  if (!user.emailVerificationExpiry) {
     res.status(400);
     throw new AppError('Invalid verification link', { errorCode: 'EMAIL_VERIFICATION_INVALID' });
   }
@@ -75,13 +88,6 @@ export const verifyEmailController = asyncHandler(async (req, res) => {
     throw new AppError('Verification link has expired. Please request a new one.', {
       errorCode: 'EMAIL_VERIFICATION_EXPIRED',
     });
-  }
-
-  const hashedToken = hashVerificationToken(token);
-
-  if (hashedToken !== user.emailVerificationToken) {
-    res.status(400);
-    throw new AppError('Invalid verification link', { errorCode: 'EMAIL_VERIFICATION_INVALID' });
   }
 
   user.emailVerified = true;

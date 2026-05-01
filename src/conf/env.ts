@@ -22,6 +22,9 @@ export const TAVILY_API_KEY = getEnv('TAVILY_API_KEY');
 export const JINA_API_KEY = getEnv('JINA_API_KEY');
 export const JUDGE0_API_KEY = getEnv('JUDGE0_API_KEY');
 export const JUDGE0_API_URL = getEnv('JUDGE0_API_URL');
+export const OPENAI_API_KEY = getEnv('OPENAI_API_KEY');
+export const PINECONE_API_KEY = getEnv('PINECONE_API_KEY');
+export const PINECONE_INDEX_NAME = getEnv('PINECONE_INDEX_NAME');
 
 export const AWS_S3_BUCKET = getEnv('AWS_S3_BUCKET');
 export const AWS_S3_REGION = getEnv('AWS_S3_REGION');

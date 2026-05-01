@@ -25,6 +25,9 @@ import type {
   ModuleQuizAttemptRecord,
   QuizNoiseTrace,
   InsightReviewResult,
+  CourseMentorRecord,
+  LessonMentorRecord,
+  MentorTurn,
 } from './types';
 import type { GetInsightQueueResult, QueueInsightItem, InsightStats } from '@services/insightQueueService';
 import type { InsightMode, InsightRating } from '@lib/insightConstants';
@@ -586,6 +589,409 @@ function shouldSkipInsight({
   return item.isNew && item.box === 0;
 }
 
+// ── Mentor-chat probe generators ─────────────────────────
+//
+// Each probe is a multi-turn conversation (up to MAX_MENTOR_TURNS)
+// driven by an AI-as-persona loop:
+//   T1: opening question (persona-context only, no prior turns)
+//   T2..N: follow-up decision based on the prior reply (continue or stop)
+// The server (chatStream / lessonChat) keeps chat history itself, so per
+// turn we only send the new user message and the controller stitches
+// prior context. Total cost per probe: 3 mentor calls + 3 persona LLM
+// calls (worst case); persona usually stops at 2.
+
+const MAX_MENTOR_TURNS = 3;
+const MAX_OPENING_QUESTION_LEN = 400;
+
+interface MentorTurnInput {
+  question: string;
+  reasoning: string;
+}
+
+const openingQuestionSchema = z.object({
+  question: z
+    .string()
+    .min(1)
+    .max(MAX_OPENING_QUESTION_LEN)
+    .describe('A natural opening question the persona would type into the chat.'),
+  reasoning: z.string().describe('Why a learner like this persona would ask this specific question right now.'),
+});
+
+const followUpDecisionSchema = z.object({
+  decision: z
+    .enum(['continue', 'stop'])
+    .describe(
+      "'continue' if the persona has a meaningful follow-up after the mentor's last reply; 'stop' if their needs are satisfied OR the conversation has stalled.",
+    ),
+  question: z
+    .string()
+    .max(MAX_OPENING_QUESTION_LEN)
+    .optional()
+    .describe('Required when decision=continue. Must reference what the mentor just said.'),
+  reasoning: z
+    .string()
+    .describe('One sentence: why continuing or stopping, and what the persona is hoping to get from this turn (or why they are done).'),
+});
+
+function formatPriorTurns(turns: MentorTurnInput[], replies: string[]): string {
+  // Render the conversation up to (and including) the most recent mentor
+  // reply for the persona-LLM to read. `turns[i]` is what the persona
+  // asked; `replies[i]` is what the mentor said in response.
+  if (turns.length === 0) return '(no prior turns)';
+  const lines: string[] = [];
+  for (let i = 0; i < turns.length; i++) {
+    lines.push(`Turn ${i + 1} — You: ${turns[i].question}`);
+    if (replies[i]) lines.push(`Turn ${i + 1} — Mentor: ${replies[i]}`);
+  }
+  return lines.join('\n\n');
+}
+
+async function openingCourseMentorQuestion({
+  persona,
+  course,
+}: {
+  persona: Persona;
+  course: CourseData;
+}): Promise<MentorTurnInput> {
+  const moduleSummary = (course.structure?.modules ?? [])
+    .slice(0, 6)
+    .map((m, i) => `${i + 1}. ${m.name}${m.description ? ` — ${m.description}` : ''}`)
+    .join('\n');
+
+  const userPrompt = `You're about to start the course below. The course-design chat is open — you can ask questions
+before diving in. Pick a SPECIFIC opening question YOUR persona would actually type. Bias toward
+orientation/clarification rather than structure modification:
+  - "What should I read or set up before module 1?"
+  - "How long will this realistically take given my constraints?"
+  - "Why does module 2 come before module 4 in this order?"
+  - "What level of [domain skill] should I have before starting?"
+Avoid:
+  - generic prompts like "tell me about this course"
+  - heavy structure-feedback like "rewrite all of module 3" (that's a different feature)
+
+COURSE
+- Name: ${course.name ?? '(unnamed)'}
+- Goal: ${persona.goal}
+- Domain: ${course.domain ?? 'unspecified'}
+- Selected depth: ${course.depth ?? 'unspecified'}
+
+MODULES (first 6):
+${moduleSummary || '(none)'}
+
+Return your opening question:`;
+
+  const { result } = await aiJsonCall({
+    systemPrompt: personaContext(persona),
+    userPrompt,
+    schema: openingQuestionSchema,
+    label: 'orchestrator:courseMentor:opening',
+  });
+  return result;
+}
+
+async function followUpCourseMentor({
+  persona,
+  priorTurns,
+  priorReplies,
+  turnNumber,
+}: {
+  persona: Persona;
+  priorTurns: MentorTurnInput[];
+  priorReplies: string[];
+  turnNumber: number;
+}): Promise<{ decision: 'continue' | 'stop'; question?: string; reasoning: string }> {
+  const userPrompt = `You're in turn ${turnNumber} of a conversation with the course-design mentor (max ${MAX_MENTOR_TURNS} turns).
+
+CONVERSATION SO FAR:
+${formatPriorTurns(priorTurns, priorReplies)}
+
+Decide whether to ask one more question or stop. Real learners stop when their needs are met — don't
+continue just for the sake of it. If continuing, the next question must reference something the mentor
+just said (no topic-jumping).`;
+
+  const { result } = await aiJsonCall({
+    systemPrompt: personaContext(persona),
+    userPrompt,
+    schema: followUpDecisionSchema,
+    label: 'orchestrator:courseMentor:followUp',
+  });
+  return result;
+}
+
+async function openingLessonMentorQuestion({
+  persona,
+  moduleName,
+  lessonName,
+  lessonContent,
+}: {
+  persona: Persona;
+  moduleName: string;
+  lessonName: string;
+  lessonContent: ILessonContent;
+}): Promise<MentorTurnInput> {
+  const lessonBody = (lessonContent.blocks ?? [])
+    .filter((b) => ['intro', 'section', 'callout', 'summary'].includes(b.type))
+    .sort((a, b) => a.order - b.order)
+    .map((b) => b.content)
+    .join('\n\n')
+    .slice(0, 6_000);
+
+  const userPrompt = `You just read the lesson below. The lesson mentor (Socratic AI tutor) is open in a side panel.
+Ask ONE opening question this persona would naturally type after reading. Valid shapes:
+  - "I'm not sure I get [specific concept] — can you explain it differently?"
+  - "How would [lesson concept] apply to [your stated artifact/project]?"
+  - "Why does [X] work that way and not [Y]?"
+  - "Quiz me on this." (if your persona quizzes themselves)
+Avoid:
+  - lazy prompts like "summarize this lesson" (the lesson is already in front of you)
+  - asking for the answer to the inline quiz/exercise
+
+LESSON
+- Module: ${moduleName}
+- Lesson: ${lessonName}
+
+CONTENT (truncated):
+${lessonBody || '(no body)'}
+
+Return your opening question:`;
+
+  const { result } = await aiJsonCall({
+    systemPrompt: personaContext(persona),
+    userPrompt,
+    schema: openingQuestionSchema,
+    label: 'orchestrator:lessonMentor:opening',
+  });
+  return result;
+}
+
+async function followUpLessonMentor({
+  persona,
+  moduleName,
+  lessonName,
+  priorTurns,
+  priorReplies,
+  turnNumber,
+}: {
+  persona: Persona;
+  moduleName: string;
+  lessonName: string;
+  priorTurns: MentorTurnInput[];
+  priorReplies: string[];
+  turnNumber: number;
+}): Promise<{ decision: 'continue' | 'stop'; question?: string; reasoning: string }> {
+  const userPrompt = `You're in turn ${turnNumber} of a conversation with the lesson mentor for "${moduleName} → ${lessonName}" (max ${MAX_MENTOR_TURNS} turns).
+
+CONVERSATION SO FAR:
+${formatPriorTurns(priorTurns, priorReplies)}
+
+Decide whether to ask one more question or stop. Real learners stop when they get the clarification they
+were after. If continuing, your follow-up must reference what the mentor just said (no topic-jumping)
+and stay in scope of THIS lesson.`;
+
+  const { result } = await aiJsonCall({
+    systemPrompt: personaContext(persona),
+    userPrompt,
+    schema: followUpDecisionSchema,
+    label: 'orchestrator:lessonMentor:followUp',
+  });
+  return result;
+}
+
+// ── Multi-turn mentor conversation drivers ──────────────
+//
+// Both drivers follow the same loop:
+//   1. Generate the opening question via the persona-LLM.
+//   2. Send it to the mentor; capture the SSE reply.
+//   3. Ask the persona-LLM whether to continue or stop based on the
+//      conversation so far. If continue, repeat from step 2 with the
+//      new question. If stop (or cap reached), end.
+// Failures inside any turn are recorded on that turn (`error` field) and
+// terminate the conversation early — the assessor still sees what we got.
+
+async function runCourseMentorConversation({
+  persona,
+  course,
+  client,
+  courseId,
+  logDetail,
+}: {
+  persona: Persona;
+  course: CourseData;
+  client: ApiClient;
+  courseId: string;
+  logDetail: (msg: string) => void;
+}): Promise<CourseMentorRecord> {
+  const turns: MentorTurn[] = [];
+  const recordedQuestions: MentorTurnInput[] = [];
+  const recordedReplies: string[] = [];
+  let endedReason = `hit ${MAX_MENTOR_TURNS}-turn cap`;
+  const overallStart = Date.now();
+
+  for (let turnNumber = 1; turnNumber <= MAX_MENTOR_TURNS; turnNumber++) {
+    let questionInput: MentorTurnInput;
+    try {
+      if (turnNumber === 1) {
+        questionInput = await openingCourseMentorQuestion({ persona, course });
+      } else {
+        const decision = await followUpCourseMentor({
+          persona,
+          priorTurns: recordedQuestions,
+          priorReplies: recordedReplies,
+          turnNumber,
+        });
+        if (decision.decision === 'stop' || !decision.question) {
+          endedReason = `persona stopped after turn ${turnNumber - 1}: ${decision.reasoning}`;
+          break;
+        }
+        questionInput = { question: decision.question, reasoning: decision.reasoning };
+      }
+    } catch (e) {
+      endedReason = `persona-LLM failed at turn ${turnNumber}: ${e instanceof Error ? e.message : String(e)}`;
+      break;
+    }
+
+    logDetail(
+      `  course-mentor T${turnNumber}: "${questionInput.question.slice(0, 80)}${questionInput.question.length > 80 ? '…' : ''}"`,
+    );
+    const turnStart = Date.now();
+    try {
+      const response = await client.chatWithCourseMentor({ courseId, message: questionInput.question });
+      turns.push({
+        turnNumber,
+        question: questionInput.question,
+        questionRationale: questionInput.reasoning,
+        response,
+        durationMs: Date.now() - turnStart,
+      });
+      recordedQuestions.push(questionInput);
+      recordedReplies.push(response);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      turns.push({
+        turnNumber,
+        question: questionInput.question,
+        questionRationale: questionInput.reasoning,
+        response: '',
+        durationMs: Date.now() - turnStart,
+        error: msg,
+      });
+      endedReason = `mentor error at turn ${turnNumber}: ${msg}`;
+      break;
+    }
+  }
+
+  return {
+    scope: 'course',
+    turns,
+    endedReason,
+    totalDurationMs: Date.now() - overallStart,
+  };
+}
+
+async function runLessonMentorConversation({
+  persona,
+  moduleIndex,
+  lessonIndex,
+  moduleName,
+  lessonName,
+  lessonContent,
+  client,
+  courseId,
+  logDetail,
+}: {
+  persona: Persona;
+  moduleIndex: number;
+  lessonIndex: number;
+  moduleName: string;
+  lessonName: string;
+  lessonContent: ILessonContent;
+  client: ApiClient;
+  courseId: string;
+  logDetail: (msg: string) => void;
+}): Promise<LessonMentorRecord> {
+  const turns: MentorTurn[] = [];
+  const recordedQuestions: MentorTurnInput[] = [];
+  const recordedReplies: string[] = [];
+  let endedReason = `hit ${MAX_MENTOR_TURNS}-turn cap`;
+  const overallStart = Date.now();
+
+  for (let turnNumber = 1; turnNumber <= MAX_MENTOR_TURNS; turnNumber++) {
+    let questionInput: MentorTurnInput;
+    try {
+      if (turnNumber === 1) {
+        questionInput = await openingLessonMentorQuestion({
+          persona,
+          moduleName,
+          lessonName,
+          lessonContent,
+        });
+      } else {
+        const decision = await followUpLessonMentor({
+          persona,
+          moduleName,
+          lessonName,
+          priorTurns: recordedQuestions,
+          priorReplies: recordedReplies,
+          turnNumber,
+        });
+        if (decision.decision === 'stop' || !decision.question) {
+          endedReason = `persona stopped after turn ${turnNumber - 1}: ${decision.reasoning}`;
+          break;
+        }
+        questionInput = { question: decision.question, reasoning: decision.reasoning };
+      }
+    } catch (e) {
+      endedReason = `persona-LLM failed at turn ${turnNumber}: ${e instanceof Error ? e.message : String(e)}`;
+      break;
+    }
+
+    logDetail(
+      `  lesson-mentor T${turnNumber}: "${questionInput.question.slice(0, 80)}${questionInput.question.length > 80 ? '…' : ''}"`,
+    );
+    const turnStart = Date.now();
+    try {
+      const response = await client.chatWithLessonMentor({
+        courseId,
+        moduleIndex,
+        lessonIndex,
+        message: questionInput.question,
+      });
+      turns.push({
+        turnNumber,
+        question: questionInput.question,
+        questionRationale: questionInput.reasoning,
+        response,
+        durationMs: Date.now() - turnStart,
+      });
+      recordedQuestions.push(questionInput);
+      recordedReplies.push(response);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      turns.push({
+        turnNumber,
+        question: questionInput.question,
+        questionRationale: questionInput.reasoning,
+        response: '',
+        durationMs: Date.now() - turnStart,
+        error: msg,
+      });
+      endedReason = `mentor error at turn ${turnNumber}: ${msg}`;
+      break;
+    }
+  }
+
+  return {
+    scope: 'lesson',
+    moduleIndex,
+    lessonIndex,
+    moduleName,
+    lessonName,
+    turns,
+    endedReason,
+    totalDurationMs: Date.now() - overallStart,
+  };
+}
+
 // ── Main Pipeline ────────────────────────────────────────
 
 export async function runPersonaFlow({
@@ -786,6 +1192,29 @@ export async function runPersonaFlow({
     recorder.addStep8_Accept(r8);
     logDone('Step 8 done → course accepted');
 
+    // ── Step 8b: Course Mentor Probe ────────────────────
+    //
+    // Multi-turn conversation (up to MAX_MENTOR_TURNS) against the
+    // course-design chat. This isn't a structure-refinement attempt
+    // (Step 7 owns that path); it's a "would the chat help me orient
+    // before I dive in?" probe. Each turn is captured for the assessor.
+    let courseMentor: CourseMentorRecord | null = null;
+    if (config.enableMentor) {
+      log('Step 8b: Probing course mentor (multi-turn)...');
+      const s8b = beginStep({ step: 8, name: 'Course Mentor Probe' });
+      courseMentor = await runCourseMentorConversation({
+        persona,
+        course,
+        client,
+        courseId,
+        logDetail,
+      });
+      const totalChars = courseMentor.turns.reduce((sum, t) => sum + t.response.length, 0);
+      steps.push(s8b.finish(`${courseMentor.turns.length} turns, ${totalChars} chars`));
+      recorder.addStep8b_CourseMentorProbe(courseMentor);
+      logDone(`Step 8b done → ${courseMentor.turns.length} turns, ${courseMentor.endedReason}`);
+    }
+
     // ── Steps 9+10: Generate & Complete Lessons ─────────
     let lessonsGenerated = 0;
     const lessonContents: {
@@ -796,6 +1225,7 @@ export async function runPersonaFlow({
       content: ILessonContent;
       generationMs: number;
       stats: LessonContentStats | null;
+      mentorProbe: LessonMentorRecord | null;
     }[] = [];
 
     if (config.maxLessons > 0 && course.structure?.modules) {
@@ -842,6 +1272,31 @@ export async function runPersonaFlow({
           const r9 = s9.finish(`${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s`);
           steps.push(r9);
 
+          // ── Step 9b: Lesson Mentor Probe ────────
+          //
+          // Multi-turn conversation (up to MAX_MENTOR_TURNS) against the
+          // lesson mentor, posed *after* reading but *before* marking
+          // the lesson complete. The mentor gets the lesson content via
+          // the system prompt in the controller; persona's questions
+          // reference what they actually read.
+          let mentorProbe: LessonMentorRecord | null = null;
+          if (config.enableMentor) {
+            const sLM = beginStep({ step: 9, name: `Lesson Mentor ${mi}/${li}` });
+            mentorProbe = await runLessonMentorConversation({
+              persona,
+              moduleIndex: mi,
+              lessonIndex: li,
+              moduleName: mod.name,
+              lessonName: lesson.name,
+              lessonContent: content,
+              client,
+              courseId,
+              logDetail,
+            });
+            const totalChars = mentorProbe.turns.reduce((sum, t) => sum + t.response.length, 0);
+            steps.push(sLM.finish(`${mentorProbe.turns.length} turns, ${totalChars} chars`));
+          }
+
           lessonContents.push({
             moduleIndex: mi,
             lessonIndex: li,
@@ -850,6 +1305,7 @@ export async function runPersonaFlow({
             content,
             generationMs,
             stats,
+            mentorProbe,
           });
 
           logDone(`Generated lesson ${lessonLabel} (${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s)`);

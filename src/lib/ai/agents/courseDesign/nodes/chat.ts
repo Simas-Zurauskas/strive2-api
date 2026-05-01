@@ -3,7 +3,9 @@ import { AIMessage } from '@langchain/core/messages';
 import { ANTHROPIC_API_KEY } from '@conf/env';
 import { MODEL_IDS } from '@lib/langchain';
 import { logCacheUsage, usageFromAnthropic } from '@lib/ai/cacheLogger';
+import { chat as chatLog } from '@lib/loggers';
 import { COURSE_DESIGN_SYSTEM_PROMPT } from '../prompts';
+import { toAnthropicMessages } from '../../shared/toAnthropicMessages';
 import { NodeFunction } from '../types';
 import { EventEmitter } from 'events';
 
@@ -70,61 +72,9 @@ const buildStructureSummary = (state: {
   return `\n\n## Current Course Context\n- Goal: ${state.goal ?? 'N/A'}\n- Depth: ${state.depth ?? 'N/A'}\n- Modules: ${modules.length}\n- Total lessons: ${totalLessons}${answersText}\n\n${structureText}`;
 };
 
-/** Convert LangChain messages to Anthropic format, handling tool calls and results. */
-const toAnthropicMessages = (
-  messages: {
-    _getType: () => string;
-    content: unknown;
-    tool_calls?: { id: string; name: string; args: Record<string, unknown> }[];
-    tool_call_id?: string;
-    name?: string;
-  }[],
-): Anthropic.Messages.MessageParam[] => {
-  const result: Anthropic.Messages.MessageParam[] = [];
-
-  for (const m of messages) {
-    const type = m._getType();
-
-    if (type === 'human') {
-      result.push({
-        role: 'user',
-        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-      });
-    } else if (type === 'ai') {
-      const blocks: Anthropic.Messages.ContentBlockParam[] = [];
-      const textContent = typeof m.content === 'string' ? m.content : '';
-      if (textContent) {
-        blocks.push({ type: 'text', text: textContent });
-      }
-      if (m.tool_calls?.length) {
-        for (const tc of m.tool_calls) {
-          blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.args });
-        }
-      }
-      if (blocks.length > 0) {
-        result.push({ role: 'assistant', content: blocks });
-      }
-    } else if (type === 'tool') {
-      // Tool results must be user messages with tool_result blocks
-      result.push({
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: m.tool_call_id as string,
-            content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-          },
-        ],
-      });
-    }
-  }
-
-  return result;
-};
-
 export const chat: NodeFunction = async (state, config) => {
-  console.log('[agent:chat] ── Invoking Anthropic (raw streaming) ──'.cyan);
-  console.log(`[agent:chat] Message count: ${state.messages.length}`.gray);
+  const invokeStart = Date.now();
+  chatLog.info(`design:chat invoke model=${MODEL_IDS.SONNET} stateMessages=${state.messages.length}`);
 
   const structureSummary = buildStructureSummary(state);
   const anthropicMessages = toAnthropicMessages(state.messages);
@@ -197,7 +147,9 @@ export const chat: NodeFunction = async (state, config) => {
     })),
   });
 
-  console.log(`[agent:chat] ✓ Response: content="${textContent.slice(0, 120)}" tool_calls=${toolCalls.length}`.green);
+  chatLog.info(
+    `design:chat response ms=${Date.now() - invokeStart} text=${textContent.length}c tool_calls=${toolCalls.length}${toolCalls.length > 0 ? ` tools=[${toolCalls.map((tc) => tc.name).join(',')}]` : ''}`,
+  );
 
   return { messages: [aiMessage] };
 };

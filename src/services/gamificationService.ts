@@ -1,3 +1,25 @@
+/**
+ * NOTE — split lines for the next maintainer.
+ *
+ * This file is ~860 LOC and mixes five concerns: XP/leveling, badges
+ * (achievements), streaks, leaderboards, and profile reads. The next
+ * change here should extract along this seam:
+ *
+ *   - `gamificationCoreService.ts` — XP, levels, badges, streaks
+ *     (everything that MUTATES UserGamification on user actions).
+ *   - `gamificationProfileService.ts` — profile reads + leaderboard
+ *     queries (everything READ-ONLY for display).
+ *
+ * Keep XP / badge / streak shared types here or move to
+ * `lib/gamificationConstants.ts`. The two services don't currently
+ * share state beyond the model itself, so the split is mechanical —
+ * no cyclic-import hazard.
+ *
+ * Don't split unless you're already touching the file for an unrelated
+ * reason. Breaking up a stable file just for size is churn for no
+ * value; the marker exists to make the seam obvious when the next
+ * feature lands.
+ */
 import mongoose from 'mongoose';
 import UserGamificationModel, { IUserGamification } from '@models/UserGamificationModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';

@@ -9,17 +9,22 @@ import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import { TAVILY_API_KEY } from '@conf/env';
 import { CourseDepth, CourseDomain } from '@lib/constants';
 import { generateUniqueSlug } from '@lib/slugify';
+import { chat as chatLog } from '@lib/loggers';
 
 // ── modify_structure ──────────────────────────────────────
 
 export const modifyStructure = tool(
   async (input, config) => {
-    console.log('[tool:modify_structure] ── Called ──'.cyan);
-    console.log(`[tool:modify_structure] instruction: ${input.instruction.slice(0, 120)}`.gray);
+    const toolStart = Date.now();
+    chatLog.info(
+      `design:tool start name=modify_structure instruction=${JSON.stringify(input.instruction.slice(0, 120))}`,
+    );
     const { courseId, goal, answers, depth, currentStructure } = config?.configurable ?? {};
 
     if (!goal || !currentStructure || !courseId) {
-      console.error('[tool:modify_structure] ✗ Missing course context'.red);
+      chatLog.error(
+        `design:tool done name=modify_structure ms=${Date.now() - toolStart} ok=false err=missing-context`,
+      );
       return JSON.stringify({ success: false, error: 'Missing course context' });
     }
 
@@ -66,7 +71,9 @@ export const modifyStructure = tool(
         config.configurable.currentStructure = { reasoning: result.reasoning, modules: result.modules };
       }
 
-      console.log(`[tool:modify_structure] ✓ Done — ${result.modules.length} modules${hasExistingContent ? ' (content cleared)' : ''}`.green);
+      chatLog.info(
+        `design:tool done name=modify_structure ms=${Date.now() - toolStart} ok=true modules=${result.modules.length}${hasExistingContent ? ' contentCleared=true' : ''}`,
+      );
       return JSON.stringify({
         success: true,
         courseName: result.courseName,
@@ -76,7 +83,9 @@ export const modifyStructure = tool(
       });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[tool:modify_structure] ✗ Error: ${message}`.red);
+      chatLog.error(
+        `design:tool done name=modify_structure ms=${Date.now() - toolStart} ok=false err=${message}`,
+      );
       return JSON.stringify({ success: false, error: message });
     }
   },

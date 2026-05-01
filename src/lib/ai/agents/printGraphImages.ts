@@ -5,6 +5,9 @@ import { CompiledGraph } from '@langchain/langgraph';
 import { ENVIRONMENT } from '@conf/env';
 import { courseDesignAgent } from './courseDesign';
 import { lessonGenerationAgent } from './lessonGeneration';
+import { quizGenerationAgent } from './quizGeneration';
+import { lessonMentorAgent } from './lessonMentor';
+import { courseMentorAgent } from './courseMentor';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../../../graphs');
 
@@ -32,5 +35,8 @@ export const printGraphImages = async () => {
   await Promise.all([
     saveGraphImage({ graph: courseDesignAgent, name: 'courseDesignAgent' }),
     saveGraphImage({ graph: lessonGenerationAgent, name: 'lessonGenerationAgent' }),
+    saveGraphImage({ graph: quizGenerationAgent, name: 'quizGenerationAgent' }),
+    saveGraphImage({ graph: lessonMentorAgent, name: 'lessonMentorAgent' }),
+    saveGraphImage({ graph: courseMentorAgent, name: 'courseMentorAgent' }),
   ]);
 };

@@ -2,7 +2,14 @@ import 'colors';
 import crypto from 'crypto';
 import UserModel from '@models/UserModel';
 import { decodeAuthToken } from '@lib/auth';
+import { TOPUP_CREDITS_PER_USD } from '@lib/creditPricing';
 import { signup, type ApiClient } from './apiClient';
+
+// Match a $20 top-up so a persona can run a full chat + multi-lesson + mentor
+// flow without hitting `requireCredits` mid-run. Granted as `bonusBalance` to
+// mirror the real Stripe top-up path (stripeWebhookService.handleTopupSuccess).
+const SEED_TOPUP_USD = 20;
+const SEED_TOPUP_CREDITS = SEED_TOPUP_USD * TOPUP_CREDITS_PER_USD;
 
 export interface TestUser {
   userId: string;
@@ -49,6 +56,7 @@ export const createVerifiedTestUser = async ({
     {
       $set: { emailVerified: true },
       $unset: { emailVerificationToken: 1, emailVerificationExpiry: 1 },
+      $inc: { 'credits.bonusBalance': SEED_TOPUP_CREDITS },
     },
   );
 

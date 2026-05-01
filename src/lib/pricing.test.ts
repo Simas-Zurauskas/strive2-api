@@ -204,10 +204,13 @@ test('applyStaticMarkup doubles cost for every marked service', () => {
   }
 });
 
-test('applyStaticMarkup covers exactly judge0, tavily, jina, bfl, tts', () => {
+test('applyStaticMarkup covers exactly the expected services', () => {
   // Pin the list — adding a service to the markup set is a deliberate billing
   // change and should require updating this assertion.
-  assert.deepEqual([...STATIC_MARKUP_SERVICES].sort(), ['bfl', 'jina', 'judge0', 'tavily', 'tts']);
+  assert.deepEqual(
+    [...STATIC_MARKUP_SERVICES].sort(),
+    ['bfl', 'jina', 'judge0', 'openai', 'pinecone', 'tavily', 'tts'],
+  );
 });
 
 test('applyStaticMarkup leaves anthropic untouched', () => {

@@ -21,8 +21,8 @@ yarn debug:orchestrator --concurrency 1 --personas 1 --lessons 0
 # Wizard + lessons + insight review
 yarn debug:orchestrator --concurrency 3 --personas 5 --chat --lessons 2 --insights
 
-# Full end-to-end: wizard + lessons + quizzes + insight review
-yarn debug:orchestrator --concurrency 5 --personas 5 --chat --lessons 4 --quizzes --insights
+# Full end-to-end: wizard + lessons + quizzes + insight review + mentor probes
+yarn debug:orchestrator --concurrency 5 --personas 5 --chat --lessons 4 --quizzes --insights --mentor
 ```
 
 No user credentials are passed — the orchestrator creates and tears down a separate account per persona.
@@ -38,6 +38,7 @@ No user credentials are passed — the orchestrator creates and tears down a sep
 | `--chat`        | optional | Include structure review chat step (off by default)             |
 | `--quizzes`     | optional | Generate + submit module quizzes after lessons (off by default) |
 | `--insights`    | optional | Review every insight the queue returns (off by default)         |
+| `--mentor`      | optional | Probe course-design + lesson mentor chats with up to 3 persona-driven turns each (off by default) |
 
 `--email` and `--password` are accepted (for shell-history backward compatibility) but ignored — a warning is printed if either is passed.
 
@@ -48,7 +49,7 @@ Each persona is a real, isolated db user for the duration of its run. The lifecy
 1. **Signup** — `POST /api/auth/signup` with a random email `debug-<runId>-<personaSlug>-<rand>@strive-debug.test` and a random password. The response JWT is used throughout the persona flow.
 2. **Verify in Mongo** — `UserModel.updateOne({ _id }, { $set: { emailVerified: true }, $unset: { emailVerificationToken, emailVerificationExpiry } })`. Skips the Mailjet round-trip. `requireVerified` middleware live-reads from DB per request, so the change takes effect immediately with the signup-issued token.
 3. **Run persona flow** — normal orchestrator steps 1–14 with the persona's own token.
-4. **Teardown** — `DELETE /api/auth/delete-account` (wrapped in `try/finally`). Cascades through `Course`, `LessonContent`, `UserLessonProgress`, `ModuleQuizContent`, `UserModuleQuizProgress`, `Insight`, `UserInsightProgress`, `CourseDesignChat`, `UserGamification`, `User`, and per-course S3 assets (`lessons/{courseId}/`) — see [`services/courseCleanupService.ts`](../../services/courseCleanupService.ts) for the shared primitive.
+4. **Teardown** — `DELETE /api/auth/delete-account` (wrapped in `try/finally`). Cascades through `Course`, `LessonContent`, `UserLessonProgress`, `ModuleQuizContent`, `UserModuleQuizProgress`, `Insight`, `UserInsightProgress`, `CourseDesignChat`, `LessonMentorChat`, `LessonChunk` (+ matching Pinecone vectors when RAG is configured), `UserGamification`, `User`, and per-course S3 assets (`lessons/{courseId}/`) — see [`services/courseCleanupService.ts`](../../services/courseCleanupService.ts) for the shared primitive.
 
 Emails use the RFC-6761 reserved `.test` TLD so they never collide with real inboxes. The `runId` is a per-invocation timestamp (`Date.now().toString(36)`) so two concurrent orchestrator processes don't clash.
 
@@ -66,7 +67,9 @@ For each AI-generated persona, the orchestrator runs the full learner journey:
 6. **Generate Structure** — triggers course structure generation, polls until complete
 7. **Review Structure** — AI reviews and optionally sends one refinement via chat (SSE)
 8. **Accept Course** — sets course status to `ready`
+8b. **Course Mentor Probe** — _(only with `--mentor`)_ multi-turn conversation against the course-design chat (`POST /api/course/:courseId/chat`). Persona-LLM emits an opening question, then after each mentor reply decides to continue or stop. Up to 3 turns; persona usually settles at 2. Each turn captured with question + rationale + full SSE reply for the rubric's domain I evaluation. The server keeps chat history itself, so per turn the orchestrator sends only the new user message.
 9. **Generate Lessons** — sequentially generates up to `--lessons` lessons via the job pipeline, fetches full content (blocks, quizzes, exercises, diagrams), and logs everything _(skipped if `--lessons 0`)_
+9b. **Lesson Mentor Probe** — _(only with `--mentor`)_ for each generated lesson, runs the same multi-turn loop against the lesson mentor (`POST /api/course/:courseId/lesson/:m/:l/mentor/chat`). Up to 3 turns. The opening question is grounded in the lesson body the persona just read; follow-ups must reference what the mentor said. Recorded inline under each lesson as a collapsible block.
 10. **Complete Lessons** — marks each generated lesson as completed via the progress API
 11. **Generate Module Quizzes** — for every module whose lessons were all generated in this run, triggers `POST /module-quiz/:m/generate` and fetches the quiz _(skipped unless `--quizzes`)_
 12. **Submit Quiz Attempts** — AI answers each quiz as the persona (Claude Sonnet 4.6, multiple-choice only) and posts to `/submit`; records score, mastery tier, question-by-question correctness, and next review date
@@ -77,7 +80,7 @@ Because each persona has a fresh db user, Step 13 on a new run starts with `Lear
 
 ## Output
 
-Reports are written to `api/src/scripts/debugOrchestrator/output/` (gitignored).
+Reports are written to `api/scripts/debugOrchestrator/output/` (gitignored).
 
 Each persona gets a markdown file like:
 

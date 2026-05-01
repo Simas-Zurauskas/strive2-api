@@ -1,6 +1,7 @@
 import { HumanMessage, AIMessage, AIMessageChunk } from '@langchain/core/messages';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import CourseModel from '@models/CourseModel';
+import { chat as chatLog } from '@lib/loggers';
 import { NodeFunction } from '../types';
 
 /** Extract plain text from a message content field (string or Anthropic content blocks). */
@@ -18,8 +19,9 @@ const extractText = (content: unknown): string => {
 export const saveMessages: NodeFunction = async (state) => {
   const { courseId, userId, messages, structureModified, currentStructure } = state;
 
-  console.log('[agent:saveMessages] ── Saving messages ──'.cyan);
-  console.log(`[agent:saveMessages] Total messages in state: ${messages.length}, structureModified: ${structureModified}`.gray);
+  chatLog.info(
+    `design:save start stateMessages=${messages.length} structureModified=${structureModified}`,
+  );
 
   // Extract user and assistant messages from this turn
   const newMessages: { role: 'user' | 'assistant'; content: string }[] = [];
@@ -42,24 +44,30 @@ export const saveMessages: NodeFunction = async (state) => {
 
   const toSave = [userMsg, assistantMsg].filter(Boolean) as { role: 'user' | 'assistant'; content: string }[];
 
-  console.log(`[agent:saveMessages] Saving ${toSave.length} messages to DB`.gray);
-  toSave.forEach((m) => console.log(`[agent:saveMessages]   ${m.role}: ${m.content.slice(0, 80)}`.gray));
-
   if (toSave.length > 0) {
+    const persistStart = Date.now();
     await CourseDesignChatModel.findOneAndUpdate(
       { courseId, userId },
       { $push: { messages: { $each: toSave } } },
       { upsert: true, returnDocument: 'after' },
     );
-    console.log('[agent:saveMessages] ✓ Messages persisted to ChatSession'.green);
+    const assistantSaved = toSave.find((m) => m.role === 'assistant');
+    chatLog.info(
+      `design:save done ms=${Date.now() - persistStart} saved=${toSave.length}${assistantSaved ? ` text=${assistantSaved.content.length}c` : ' assistant=none'}`,
+    );
+  } else {
+    chatLog.warn('design:save nothing to persist (no user/assistant messages found)');
   }
 
   // If structure was modified, persist to Course document
   if (structureModified && currentStructure) {
+    const courseUpdateStart = Date.now();
     await CourseModel.findByIdAndUpdate(courseId, {
       structure: currentStructure,
     });
-    console.log(`[agent:saveMessages] ✓ Structure updated and persisted for course: ${courseId}`.green);
+    chatLog.info(
+      `design:save structure-update done ms=${Date.now() - courseUpdateStart} course=${courseId}`,
+    );
   }
 
   return {};

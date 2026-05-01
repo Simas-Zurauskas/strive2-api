@@ -13,6 +13,8 @@ import type {
   ModuleQuizForLearner,
   ModuleQuizAttemptRecord,
   InsightReviewResult,
+  CourseMentorRecord,
+  LessonMentorRecord,
 } from './types';
 import type { GetInsightQueueResult, InsightStats } from '@services/insightQueueService';
 
@@ -198,6 +200,7 @@ ${modulesList}
       content: ILessonContent;
       generationMs: number;
       stats: LessonContentStats | null;
+      mentorProbe?: LessonMentorRecord | null;
     }[],
   ): void {
     if (lessons.length === 0) return;
@@ -205,7 +208,7 @@ ${modulesList}
     let md = `---\n\n## Steps 9-10: Lesson Generation (${lessons.length} lessons)\n\n`;
 
     for (const lesson of lessons) {
-      const { moduleIndex, lessonIndex, moduleName, lessonName, content, generationMs, stats } = lesson;
+      const { moduleIndex, lessonIndex, moduleName, lessonName, content, generationMs, stats, mentorProbe } = lesson;
       const blocks = content.blocks;
 
       // Prefer server-side counts when available (they include blocks that were
@@ -232,8 +235,25 @@ ${modulesList}
         md += formatBlock(block);
       }
       md += `</details>\n\n`;
+
+      if (mentorProbe) {
+        md += formatLessonMentorProbe(mentorProbe);
+      }
     }
 
+    this.sections.push(md);
+  }
+
+  addStep8b_CourseMentorProbe(probe: CourseMentorRecord): void {
+    let md = `---\n\n## Step 8b: Course Mentor Probe — ${probe.turns.length} turn(s) (${fmtDuration(probe.totalDurationMs)})\n\n`;
+    md += `**Ended:** ${probe.endedReason}\n\n`;
+    if (probe.turns.length === 0) {
+      md += `_No turns recorded — see ended reason above._\n`;
+    } else {
+      for (const t of probe.turns) {
+        md += formatMentorTurn(t);
+      }
+    }
     this.sections.push(md);
   }
 
@@ -467,6 +487,43 @@ function truncate({ str, maxLen }: { str: string; maxLen: number }): string {
 function escapeCell(str: string): string {
   // Replace markdown-table-breaking chars with safe equivalents.
   return str.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+function formatMentorTurn(turn: {
+  turnNumber: number;
+  question: string;
+  questionRationale: string;
+  response: string;
+  durationMs: number;
+  error?: string;
+}): string {
+  let md = `**Turn ${turn.turnNumber}** — ${fmtDuration(turn.durationMs)}\n\n`;
+  if (turn.error) {
+    md += `_Error:_ \`${turn.error}\`\n\n`;
+    return md;
+  }
+  md += `**Persona:**\n> ${turn.question.replace(/\n/g, '\n> ')}\n\n`;
+  md += `_Why this question:_ ${turn.questionRationale}\n\n`;
+  md += `**Mentor (${turn.response.length} chars):**\n\n`;
+  md += `${turn.response.split('\n').map((l) => `> ${l}`).join('\n')}\n\n`;
+  return md;
+}
+
+function formatLessonMentorProbe(probe: LessonMentorRecord): string {
+  // Inlined under each lesson (rather than a separate section) so the
+  // assessor reads the conversation right next to the lesson it's about.
+  // `<details>` collapsed by default — keeps the report scannable.
+  let md = `<details>\n<summary>🎓 Lesson Mentor probe — ${probe.turns.length} turn(s) (${fmtDuration(probe.totalDurationMs)})</summary>\n\n`;
+  md += `_Ended: ${probe.endedReason}_\n\n`;
+  if (probe.turns.length === 0) {
+    md += `_No turns recorded — see ended reason above._\n\n`;
+  } else {
+    for (const t of probe.turns) {
+      md += formatMentorTurn(t);
+    }
+  }
+  md += `</details>\n\n`;
+  return md;
 }
 
 function formatBlock(block: ILessonBlock): string {

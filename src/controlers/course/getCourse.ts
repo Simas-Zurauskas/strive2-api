@@ -1,5 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourseLean } from '@services/courseDbService';
+import { ensureDepthPreviewsScope } from '@services/courseService';
 
 /**
  * @swagger
@@ -30,5 +31,9 @@ import { getUserCourseLean } from '@services/courseDbService';
 export const getCourseController = asyncHandler(async (req, res) => {
   const course = await getUserCourseLean({ userId: req.userId!, courseId: req.params.id as string });
 
-  res.status(200).json({ data: course });
+  // Backfill per-tier scope ranges on `depthPreviews` for courses persisted
+  // before that field was added. No-op on already-enriched documents.
+  const enriched = ensureDepthPreviewsScope(course);
+
+  res.status(200).json({ data: enriched });
 });

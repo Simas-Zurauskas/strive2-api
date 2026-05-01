@@ -71,6 +71,13 @@ export interface OrchestratorConfig {
   enableChatReview: boolean;
   enableQuiz: boolean;
   enableInsights: boolean;
+  /**
+   * When true, persona asks one open-ended question against the
+   * course-design chat after accepting the structure (Step 8b) AND one
+   * question against the lesson mentor for each generated lesson
+   * (Step 9b). Off by default — adds ~3-5 s + a Haiku call per lesson.
+   */
+  enableMentor: boolean;
   maxLessons: number;
 }
 
@@ -215,6 +222,57 @@ export interface ModuleQuizAttemptRecord {
   aiReasoning: string;
   /** One entry per quiz question, in order. Empty when noise injection is disabled. */
   noiseTrace: QuizNoiseTrace[];
+}
+
+// ── Mentor-chat probes (orchestrator-only) ───────────────
+//
+// Multi-turn record. Each probe is a real conversation (up to 3 turns,
+// persona stops early when satisfied). The server keeps chat history
+// itself (LessonMentorChat / CourseDesignChat), so per turn we send
+// only the new user message and the server stitches prior context.
+// The assessor reads `turns` as the raw signal for domain
+// "I. Mentor experience" in the rubric.
+
+export interface MentorTurn {
+  /** 1-indexed; matches the order in which turns were exchanged. */
+  turnNumber: number;
+  /** What the persona typed. */
+  question: string;
+  /** AI-as-persona reasoning for why this question fits the persona right now. */
+  questionRationale: string;
+  /** Full assistant text concatenated from SSE deltas. */
+  response: string;
+  /** Wall-clock time for this single turn (request start → last SSE chunk). */
+  durationMs: number;
+  /** Mentor-side error if the SSE stream surfaced one (credit gate, agent crash, etc.). */
+  error?: string;
+}
+
+export interface MentorChatProbeRecord {
+  /** All turns recorded in order. Empty when the very first probe call failed. */
+  turns: MentorTurn[];
+  /**
+   * AI-as-persona narration for why the conversation ended where it did
+   * — "satisfied after turn 2", "ran out of useful follow-ups", "hit
+   * 3-turn cap". Surfaces the persona's signal-to-noise ratio for the
+   * assessor.
+   */
+  endedReason: string;
+  /** Sum of every turn's durationMs. */
+  totalDurationMs: number;
+}
+
+export interface CourseMentorRecord extends MentorChatProbeRecord {
+  /** Path: course-design chat, scoped to the whole course (no lesson coords). */
+  scope: 'course';
+}
+
+export interface LessonMentorRecord extends MentorChatProbeRecord {
+  scope: 'lesson';
+  moduleIndex: number;
+  lessonIndex: number;
+  moduleName: string;
+  lessonName: string;
 }
 
 // ── Insight review (orchestrator-only) ───────────────────

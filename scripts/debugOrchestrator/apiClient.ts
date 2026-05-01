@@ -312,6 +312,37 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
       return data;
     },
 
+    // ── Mentor chat probes (debug orchestrator) ─────────
+    //
+    // Both endpoints stream Vercel-AI-SDK v1 SSE chunks. We collect the
+    // text-delta payloads into a single string for the markdown report;
+    // tool-use events (web_search, search_lesson_content, fetch_url) are
+    // ignored on the wire — the orchestrator just captures the final
+    // user-visible response. See `chatStream.ts` and `lessonChat.ts`.
+    async chatWithCourseMentor({ courseId, message }: { courseId: string; message: string }): Promise<string> {
+      return postSSE({
+        path: `/api/course/${courseId}/chat`,
+        body: { messages: [{ role: 'user', content: message }] },
+      });
+    },
+
+    async chatWithLessonMentor({
+      courseId,
+      moduleIndex,
+      lessonIndex,
+      message,
+    }: {
+      courseId: string;
+      moduleIndex: number;
+      lessonIndex: number;
+      message: string;
+    }): Promise<string> {
+      return postSSE({
+        path: `/api/course/${courseId}/lesson/${moduleIndex}/${lessonIndex}/mentor/chat`,
+        body: { messages: [{ role: 'user', content: message }] },
+      });
+    },
+
     // ── Auth (account teardown) ─────────────────────────
     async deleteAccount({ password }: { password: string }): Promise<void> {
       await request({

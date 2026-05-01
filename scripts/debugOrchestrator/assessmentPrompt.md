@@ -1,14 +1,16 @@
 # Strive — Content-Quality Assessment Prompt
 
-Feed this to a dispatcher agent with read + Agent-spawn access in `api/src/scripts/debugOrchestrator/output/`. The dispatcher fans out one sub-agent per persona file **in parallel** (all tool calls in a single message), then synthesizes the scorecards into `_ASSESSMENT_<timestamp>.md`.
+Feed this to a dispatcher agent with read + Agent-spawn access in `api/scripts/debugOrchestrator/output/`. The dispatcher fans out one sub-agent per persona file **in parallel** (all tool calls in a single message), then synthesizes the scorecards into `_ASSESSMENT_<timestamp>.md`.
 
-Rubric version: **v5**. Echo it in every scorecard.
+Rubric version: **v6**. Echo it in every scorecard.
 
 ## Harness context (read this first)
 
 The debug orchestrator is a **testbed**. Each run produces the first K lessons (typically 4–5), one Module-1 quiz + one attempt, and a small insight queue (~4–5 cards, ~3–5 reviews). The Run Summary's `Total Lessons` is what the product *would* ship end-to-end — it is **not** a target the harness tries to reach.
 
 → A run with `Lessons Generated: 4` of `Total Lessons: 50` is **complete**, not truncated. Score what the harness emitted; don't penalize absence of later-module material.
+
+**Mentor probes (optional, --mentor flag):** Step 8b is a **multi-turn** probe (up to 3 turns) of the course-design chat after structure acceptance. Each generated lesson under Step 9 may carry an inline `🎓 Lesson Mentor probe` collapsible block — also multi-turn (up to 3). Each block lists every turn (`Turn 1`, `Turn 2`, …) with persona question + rationale + mentor's full response, plus an `Ended:` line explaining why the conversation stopped. Score across the whole exchange — not just the opening turn. A persona that stopped at turn 1 is also informative ("nothing was worth asking again"). **If neither block appears, all I-domain criteria are `n/a` ("mentor probes not enabled in this run") — not a failure.**
 
 **Only flag status `failed` if:** explicit `## Run Failure` block, OR a section the harness intended to produce is entirely missing with nothing after it, OR Step 11/12 AND Step 13/14 all absent. Otherwise: `completed`.
 
@@ -30,9 +32,9 @@ Decide — grounded in quotes — whether the generated artifacts would keep a r
 - **Stamp** every scorecard with `run_id` (file basename) and `judge_model` (exact snapshot string).
 - **Trust structural signals** (alignment, correctness, domain fit, MCQ quality, persona grounding). **Treat behavioral signals as hypothesis** (would-continue, satisfaction, quiz scores — synthetic personas over-perform). **Don't grade infrastructure** (latency, block counts, plumbing).
 
-## Rubric — 35 criteria across 8 domains
+## Rubric — 39 criteria across 9 domains
 
-Maps to Strive's pillars: course generation [A, B, C], lessons [E], assessment mastery [F, H], spaced review [G, H]. Domain averages exclude `n/a` rows.
+Maps to Strive's pillars: course generation [A, B, C], lessons [E], assessment mastery [F, H], spaced review [G, H], conversational support [I]. Domain averages exclude `n/a` rows.
 
 ### A. Constructive alignment (3)
 1. **Outcome verbs are measurable.** Module objectives use Bloom verbs with a behavioral anchor. "Understand / learn / be aware" fails.
@@ -94,6 +96,17 @@ Tests app contracts — what happens after interaction (Leitner v0 today, FSRS P
 34. **Mastery tier promotion calibrated.** Score + attempt count that produced the transition is principled. 100/100 first-attempt → mastered is defensible; 50/100 first-attempt → mastered is a bug. Score 2 on any inversion. `n/a` if no transition.
 35. **Insight scheduling responds to ratings.** After Again/Hard → box resets or steps down; after Good/Easy → advances. Score 4 if both directions correct across ≥2 ratings; 2 if either stalls; `n/a` if <2 ratings or no before/after state.
 
+### I. Mentor experience (4)
+
+Run only if either Step 8b (Course Mentor Probe) or any `🎓 Lesson Mentor probe` block under Step 9 is present. **If neither: all four rows `n/a` — "mentor probes not enabled".** Do NOT score these from inferred behavior; need a real exchange to evaluate.
+
+Both probes are **multi-turn**. Score across all turns of every probe; cite the worst representative behavior. A two-turn conversation that hallucinates on turn 2 is a hallucination, even if turn 1 was clean.
+
+36. **Scope discipline.** Course mentor declines to leave course-design topics; lesson mentor declines off-lesson questions and refuses to give quiz/exercise answers (must guide via questions, not state the answer). A mentor that answers a "tell me about your training data" question from the persona context, or freely volunteers an exercise's correct answer when asked, fails. Cap at 2 if any boundary is crossed in any turn. Quote the breach.
+37. **Grounded in source.** Lesson mentor's reply references concepts that actually appear in the lesson body (don't fabricate citations to sections that don't exist; don't introduce concepts not in the lesson without flagging them as outside material). Course mentor's reply is consistent with the structure / depth / persona context already established. Hallucination on any turn — naming a module/lesson/concept that isn't there — caps at 1.
+38. **Pedagogical posture.** Lesson mentor follows its own brief: ≤3 sentences by default, asks before telling, acknowledges partial correctness when relevant, avoids tool-use narration ("Let me search…", "I'll look that up…"). Long lecture in response to a short question, or "I'll search the web for that" in the visible reply, caps at 2. Multi-turn caveat: if a single turn is appropriately long (e.g. learner explicitly asks for elaboration), don't penalize length — judge brief-following on the default-question case.
+39. **Persona usefulness.** Reading the conversation in full, would *this* persona find the exchange actionable for their stated goal/artifact? Generic on-topic prose (correct but persona-blind) is 3; persona-anchored replies that name the artifact / goal / declared constraint are 4; off-topic or evasive is ≤2. Use the worst single turn across both scopes; quote the strongest hook (or its absence). The persona's `Ended:` reason is signal — "satisfied at turn 2" is good, "ran out of useful follow-ups at turn 1" is a soft negative.
+
 ## Satisfaction verdict
 
 After the rubric, answer three questions with quotes: **(1)** Would they continue after lesson 1? **(2)** After 5 lessons + a module quiz, is the product working for *their* goal? Cite highest + lowest moments. **(3)** Would they recommend it? If not, the single most fixable blocker?
@@ -118,6 +131,8 @@ Summarize as:
 - Grading inversion (harsh on partial, lenient on near-miss).
 - Mastery-tier inversion.
 - Scheduler stall.
+- Mentor scope breach (lesson mentor giving away quiz/exercise answers; either mentor responding to off-topic personal questions on the persona prompt).
+- Mentor hallucination (cites a section / module / concept that doesn't exist in the report).
 
 ## Dispatcher flow
 
@@ -155,6 +170,7 @@ Summarize as:
 | Assessment (F) | | | | |
 | Retention / insights (G) | | | | |
 | Mastery & scheduling (H) | | | | |
+| Mentor experience (I) | | | | |
 | **Overall** (all non-n/a rows, criterion-weighted) | | | | — |
 
 Scale: 10.0 excellent / 7.5 at bar / 5.0 below bar / ≤5.0 blocking. High aggregates can mask severity — cross-check the Main weakness column and red flags.
@@ -203,7 +219,7 @@ Steps:
 2. Apply the §Harness-context true-failure check. Do not flag lesson caps as failure.
 3. E-band sampling: first / middle / last of the generated set. Note single-module collapse in provenance.
 4. Score all 35 criteria. Each row: `{score 1–4, one-sentence rationale, quote-or-n/a, severity, frequency}`. No row skipped — `n/a` with explanation is valid.
-5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state. Not a "reliability silence" red flag unless §Harness-context true-failure fires.
+5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state; **I36–I39 all `n/a` if no mentor probes (no Step 8b AND no `🎓 Lesson Mentor probe` blocks).** Not a "reliability silence" red flag unless §Harness-context true-failure fires.
 6. Leniency self-check: if >70% of non-n/a ≥3, re-examine lowest items.
 7. Self-preference adjustment (medium risk, same family): E17/E18/E19=4 on polish alone drops to 3.
 8. Answer §Satisfaction with quotes.
@@ -260,8 +276,12 @@ Steps:
 | G33 | Grading fairness | | | | | |
 | H34 | Mastery tier calibrated | | | | | |
 | H35 | Scheduler responds to ratings | | | | | |
+| I36 | Mentor scope discipline | | | | | |
+| I37 | Mentor grounded in source | | | | | |
+| I38 | Mentor pedagogical posture | | | | | |
+| I39 | Mentor persona usefulness | | | | | |
 
-**Domain averages (exclude n/a):** A | B | C | D | E | F | G | H
+**Domain averages (exclude n/a):** A | B | C | D | E | F | G | H | I
 
 #### Satisfaction
 

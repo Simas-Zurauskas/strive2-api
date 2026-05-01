@@ -7,6 +7,7 @@ import {
   getLessonCountHint,
   getEstimatedHoursRange,
 } from '@services/softness';
+import { OVERCOMMIT_RISK_LEVELS } from '@services/courseService';
 import { COURSE_DEPTHS, CourseDepth } from '@lib/constants';
 import { bumpDepthOverrideGateFired, bumpDepthOverrideAcknowledged } from '@lib/metrics';
 
@@ -136,6 +137,22 @@ const formatAnswersForSoftness = (
  *                   type: array
  *                   items:
  *                     type: string
+ *                 overcommitRisk:
+ *                   type: string
+ *                   enum: [low, moderate, high]
+ *                   description: >
+ *                     Optional. The LLM-emitted overcommit-risk level
+ *                     read from the course's depth-previews. Present when
+ *                     the gate fires on a course generated after this
+ *                     field was added; absent on legacy courses where the
+ *                     gate triggered on phrase-regex cost signals alone.
+ *                 overcommitRationale:
+ *                   type: string
+ *                   description: >
+ *                     Optional. One-sentence rationale for `overcommitRisk`,
+ *                     surfaced in the dialog so the learner can see the
+ *                     model's reasoning rather than only allowlist-matched
+ *                     phrases. Absent when `overcommitRisk` is absent.
  */
 export const updateCourseController = asyncHandler(async (req, res) => {
   const updates = updateCourseSchema.parse(req.body);
@@ -153,25 +170,26 @@ export const updateCourseController = asyncHandler(async (req, res) => {
 
   // Gate: surface course magnitude before the learner commits to a depth
   // that is either (a) larger than recommended OR (b) a 15+-lesson course
-  // with finish-pressure / softness signals in their answers.
+  // when a cost signal is present.
   //
-  // 2026-04-21 assessment follow-up:
-  //   - Mike (comprehensive over overview, "upcoming project at work")
-  //     needed the gate but finish-pressure language wasn't in the softness
-  //     dict, so it never fired. Fix: add detectFinishPressure as a parallel
-  //     cost signal.
-  //   - Alex (deep_dive = recommended, 55 lessons, "cover a lot of ground"
-  //     + finish-pressure) needed the gate but Match=Yes, so the
-  //     upgrade-beyond-rec trigger couldn't fire. Fix: add a large-course
-  //     expansion trigger that fires on Match=Yes when the lesson-hint max
-  //     exceeds 15.
+  // Cost signal (in priority order):
+  //   - LLM-emitted `overcommitRisk === 'high'` from depth-previews. The
+  //     LLM reads the answers semantically, so it catches paraphrase the
+  //     phrase regex below misses ("MVP by Friday", "I'm slammed",
+  //     "low-key learning this on the side"). This is the primary signal
+  //     on courses generated after this field was added.
+  //   - Phrase regex `isSoft` / `isFinishPressure` — kept as fallback for
+  //     legacy courses (persisted before `overcommitRisk` existed) and as
+  //     defence-in-depth: whichever signal fires first wins.
   //
-  // Rule:
-  //   - expansionSignal = upgradeBeyondRec OR firstTimeAboveRec OR largeCourse
-  //   - costSignal = isSoft OR isFinishPressure
-  //   - gate fires iff expansionSignal AND costSignal AND !ack
+  // Expansion signal (any of):
+  //   - upgradeBeyondRec — picking deeper than current AND deeper than rec
+  //   - firstTimeAboveRec — first depth pick is above the recommendation
+  //   - largeCourse — selected depth's lesson-count hint max > 15 lessons
+  //
+  // Gate fires iff `hasExpansionSignal AND hasCostSignal AND !ack`.
   // Downgrades, first-time at-or-below rec, and small-course no-signal
-  // cases all pass silently (matches prior behaviour for those paths).
+  // cases all pass silently.
   if (updates.depth && updates.depth !== resolved.depth) {
     const recommended = resolved.depthPreviews?.recommended as CourseDepth | undefined;
     const newRank = depthRank(updates.depth);
@@ -186,15 +204,25 @@ export const updateCourseController = asyncHandler(async (req, res) => {
     const formattedAnswers = formatAnswersForSoftness(resolved.answers);
     const softness = detectSoftnessHint({ answers: formattedAnswers });
     const finishPressure = detectFinishPressure({ answers: formattedAnswers });
-    const hasCostSignal = softness.isSoft || finishPressure.isFinishPressure;
 
-    // Large-course check uses the (depth, isSoft) lesson-count hint. If either
-    // cost signal is present AND the hint's max exceeds the 15-lesson threshold
-    // from the rubric C11 branch (b), this counts as an expansion signal on its
-    // own — covers Alex's Match=Yes / 55-lesson deep_dive case.
+    // LLM signal — present on courses with depth-previews generated after
+    // `overcommitRisk` was added. Read defensively: an unexpected value
+    // (e.g. an older client model that didn't follow the schema closely)
+    // simply doesn't trigger and the regex fallback below carries the gate.
+    const overcommitRisk = (resolved.depthPreviews as { overcommitRisk?: unknown } | null)?.overcommitRisk;
+    const isHighOvercommitRisk = overcommitRisk === 'high';
+
+    const hasCostSignal =
+      isHighOvercommitRisk || softness.isSoft || finishPressure.isFinishPressure;
+
+    // Large-course check uses the soft band whenever ANY cost signal is
+    // present (LLM risk OR phrase regex). Soft-band ceiling is what the
+    // learner would actually be served, so the threshold check should
+    // reflect that.
+    const useSoftBand = softness.isSoft || isHighOvercommitRisk;
     const [, lessonsMax] = getLessonCountHint({
       depth: updates.depth,
-      isSoft: softness.isSoft,
+      isSoft: useSoftBand,
     });
     const isLargeCourse = lessonsMax > 15;
 
@@ -205,13 +233,28 @@ export const updateCourseController = asyncHandler(async (req, res) => {
       if (updates.depthOverrideAcknowledged !== true) {
         const [minLessons, maxLessons] = getLessonCountHint({
           depth: updates.depth,
-          isSoft: softness.isSoft,
+          isSoft: useSoftBand,
         });
         const [minHours, maxHours] = getEstimatedHoursRange({
           depth: updates.depth,
-          isSoft: softness.isSoft,
+          isSoft: useSoftBand,
         });
+        const overcommitRationale = (resolved.depthPreviews as { overcommitRationale?: unknown } | null)
+          ?.overcommitRationale;
         bumpDepthOverrideGateFired();
+        // Structured fire log — the metric counter is in-process and
+        // resets on restart, so this is the durable record of why the
+        // gate triggered. Useful both for product analytics ("how often
+        // does this happen?") and for reproducing edge cases reported
+        // by users ("the gate fired on me — what did it match?").
+        console.log(
+          `[depth-gate] FIRED courseId=${courseId} userId=${userId} ` +
+            `picked=${updates.depth} prev=${resolved.depth ?? 'none'} ` +
+            `recommended=${recommended ?? 'none'} ` +
+            `expansion=[upgrade=${isUpgradeBeyondRecommendation},firstAboveRec=${isFirstTimeAboveRecommendation},largeCourse=${isLargeCourse}] ` +
+            `cost=[llmRisk=${overcommitRisk ?? 'none'},soft=${softness.isSoft},finishPressure=${finishPressure.isFinishPressure}] ` +
+            `cues=${JSON.stringify([...softness.cues, ...finishPressure.cues])}`.yellow,
+        );
         res.status(409).json({
           code: 'DEPTH_OVERRIDE_REQUIRES_ACK',
           message:
@@ -225,10 +268,47 @@ export const updateCourseController = asyncHandler(async (req, res) => {
           estimatedHoursRange: [minHours, maxHours],
           softnessCues: softness.cues,
           finishPressureCues: finishPressure.cues,
+          // Surface the LLM signal alongside the regex cues so the dialog
+          // can show the actual reason ("we flagged a high overcommit
+          // risk because: <rationale>") rather than only quoting matched
+          // allowlist phrases. Both fields are optional — older courses
+          // without `overcommitRisk` simply omit them.
+          ...(typeof overcommitRisk === 'string' &&
+          (OVERCOMMIT_RISK_LEVELS as readonly string[]).includes(overcommitRisk)
+            ? { overcommitRisk }
+            : {}),
+          ...(typeof overcommitRationale === 'string' && overcommitRationale.length > 0
+            ? { overcommitRationale }
+            : {}),
         });
         return;
       }
       bumpDepthOverrideAcknowledged();
+      console.log(
+        `[depth-gate] ACKNOWLEDGED courseId=${courseId} userId=${userId} ` +
+          `picked=${updates.depth} recommended=${recommended ?? 'none'} ` +
+          `llmRisk=${overcommitRisk ?? 'none'}`.gray,
+      );
+    } else if (hasExpansionSignal !== hasCostSignal && (hasExpansionSignal || hasCostSignal)) {
+      // Near-miss: one half of the predicate matched but not the other.
+      // The two cases distinguish two qualitatively different failure
+      // modes for the gate's calibration:
+      //   - expansion-only: learner over-picked (deeper than recommended
+      //     or large-course threshold) but used neutral language. Signals
+      //     the cost-signal allowlist is too narrow — the regex didn't
+      //     match phrasing that an LLM-emitted overcommit risk would
+      //     plausibly catch. Watch for these to grow once Phase C lands.
+      //   - cost-only: learner had soft / finish-pressure cues but stayed
+      //     at-or-below the recommended tier. Already self-corrected — the
+      //     gate didn't need to fire. Useful as a denominator: lots of
+      //     these means the recommender is doing its job.
+      const reason = hasExpansionSignal ? 'expansion-only' : 'cost-only';
+      console.log(
+        `[depth-gate] NEAR-MISS reason=${reason} courseId=${courseId} userId=${userId} ` +
+          `picked=${updates.depth} recommended=${recommended ?? 'none'} ` +
+          `expansion=[upgrade=${isUpgradeBeyondRecommendation},firstAboveRec=${isFirstTimeAboveRecommendation},largeCourse=${isLargeCourse}] ` +
+          `cost=[llmRisk=${overcommitRisk ?? 'none'},soft=${softness.isSoft},finishPressure=${finishPressure.isFinishPressure}]`.gray,
+      );
     }
   }
 

@@ -38,12 +38,23 @@ import {
   generateLessonNarrationController,
   deleteLessonNarrationController,
   getNarrationVoicesController,
+  lessonChatController,
+  getLessonChatHistoryController,
+  clearLessonChatController,
+  lessonAttachController,
+  courseMentorChatController,
+  getCourseMentorHistoryController,
+  clearCourseMentorController,
 } from '@controlers/course';
 import { ENVIRONMENT } from '@conf/env';
 import { protect, requireVerified } from '@middleware/authMiddleware';
 import { usageContextMiddleware } from '@middleware/usageContext';
 import { requireCredits } from '@middleware/requireCredits';
 import { validateObjectId } from '@middleware/validateObjectId';
+import {
+  attachmentUpload,
+  handleAttachmentUploadErrors,
+} from '@middleware/attachmentUpload';
 
 const router = Router();
 
@@ -80,6 +91,40 @@ router.get('/:courseId/edit-impact', getEditImpactController);
 // Chat (course design agent)
 router.post('/:courseId/chat', requireCredits(), chatStreamController);
 router.get('/:courseId/chat/history', getChatHistoryController);
+
+// Mentor chat (lesson-scoped AI tutor)
+router.post(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/mentor/chat',
+  requireCredits(),
+  lessonChatController,
+);
+router.get(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/mentor/chat/history',
+  getLessonChatHistoryController,
+);
+router.delete(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/mentor/chat',
+  clearLessonChatController,
+);
+
+// Mentor-chat attachment upload. Multer runs first to parse multipart;
+// the 4-arg error handler translates LIMIT_FILE_SIZE / file-filter
+// rejections into clean JSON. Express skips the error handler on the
+// success path because it has 4 args.
+router.post(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/mentor/attachment',
+  attachmentUpload,
+  handleAttachmentUploadErrors,
+  lessonAttachController,
+);
+
+// Course-scoped mentor (compass) — sits on the course-overview surface
+// and helps with between-lessons decisions, cross-module synthesis, and
+// orientation. Distinct from the lesson-scoped mentor above; one chat
+// session per (userId, courseId).
+router.post('/:courseId/mentor/chat', requireCredits(), courseMentorChatController);
+router.get('/:courseId/mentor/chat/history', getCourseMentorHistoryController);
+router.delete('/:courseId/mentor/chat', clearCourseMentorController);
 
 // AI generation (scoped to a course).
 //

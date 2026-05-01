@@ -10,7 +10,7 @@ import { ANTHROPIC_API_KEY } from '@conf/env';
 import { COURSE_DEPTHS, COURSE_DOMAINS, CourseDepth, CourseDomain, QUESTION_TYPES } from '@lib/constants';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { bumpClarifyRefinementRetry, bumpStructureCapExceeded } from '@lib/metrics';
-import { detectSoftnessHint, getLessonCountHint, SoftnessHint } from './softness';
+import { detectSoftnessHint, getLessonCountHint, getEstimatedHoursRange, SoftnessHint } from './softness';
 import {
   clarifyOutputSchema,
   ClarifyOutput,
@@ -172,6 +172,23 @@ const formatSoftnessSection = (softness: SoftnessHint): string => {
 
 // ── Depth previews ──────────────────────────────────────
 
+/**
+ * `overcommitRisk` is the LLM's holistic judgment of how likely THIS
+ * learner is to over-commit if they select a depth above the recommended
+ * tier. It supersedes the phrase-regex `isSoft` / `isFinishPressure`
+ * signals as the primary input to the depth-override gate — the regex
+ * stays only as a fallback for legacy courses persisted before this
+ * field existed and as defence-in-depth (whichever signal trips fires
+ * the gate).
+ *
+ * Why a structured field rather than free text: gate logic needs an
+ * exact comparison (`risk === 'high'`), not a parse. The rationale is
+ * still surfaced verbatim because the dialog and analytics need a
+ * citation, but the trigger is the enum.
+ */
+export const OVERCOMMIT_RISK_LEVELS = ['low', 'moderate', 'high'] as const;
+export type OvercommitRisk = (typeof OVERCOMMIT_RISK_LEVELS)[number];
+
 const depthPreviewsOutputSchema = z.object({
   overview: z.object({
     summary: z.string(),
@@ -187,9 +204,81 @@ const depthPreviewsOutputSchema = z.object({
   }),
   recommended: z.enum(COURSE_DEPTHS),
   recommendationReason: z.string(),
+  // Best-effort LLM signal — `.optional()` is load-bearing. Haiku
+  // occasionally drops these fields under structured-output pressure
+  // (especially when the schema grows and the prompt gets longer).
+  // Marking them required would invalidate an otherwise-correct
+  // depth-previews response and force a retry storm. Instead, missing
+  // values fall through to the phrase-regex cost signal in the gate
+  // — same behaviour as for legacy courses persisted before this
+  // field existed. The LLM signal is upgrade-only; the regex is the
+  // floor.
+  overcommitRisk: z.enum(OVERCOMMIT_RISK_LEVELS).optional(),
+  overcommitRationale: z.string().optional(),
 });
 
-type DepthPreviewsOutput = z.infer<typeof depthPreviewsOutputSchema>;
+type DepthPreviewsLLMOutput = z.infer<typeof depthPreviewsOutputSchema>;
+
+/**
+ * Persisted shape: per-tier preview augmented with deterministic scope
+ * ranges (lesson count + estimated hours), computed server-side from the
+ * softness signal and the (depth, isSoft) → LESSON_COUNT_HINTS table.
+ *
+ * The LLM does NOT emit these — they're rule-based and identical for every
+ * learner with the same softness signal. Computing here means:
+ *   - Cards always show concrete scope, not just bullets ("~18-28 lessons,
+ *     ~8-12 hours" lets the learner judge BEFORE clicking, not via a
+ *     post-hoc 409 dialog).
+ *   - The numbers stay in lockstep with `getLessonCountHint` /
+ *     `getEstimatedHoursRange` — change the bands once, both card scope
+ *     and gate dialog update together.
+ */
+type DepthPreviewsOutput = DepthPreviewsLLMOutput & {
+  overview: DepthPreviewsLLMOutput['overview'] & {
+    lessonCountRange: [number, number];
+    estimatedHoursRange: [number, number];
+  };
+  comprehensive: DepthPreviewsLLMOutput['comprehensive'] & {
+    lessonCountRange: [number, number];
+    estimatedHoursRange: [number, number];
+  };
+  deep_dive: DepthPreviewsLLMOutput['deep_dive'] & {
+    lessonCountRange: [number, number];
+    estimatedHoursRange: [number, number];
+  };
+};
+
+/**
+ * Enrich the LLM output with per-tier `lessonCountRange` and
+ * `estimatedHoursRange`. Pure function — same input always gives the same
+ * output, so it's deterministic and unit-testable.
+ *
+ * Soft-band selection: a learner gets the tighter "soft" lesson-count
+ * band when EITHER the phrase regex flagged softness OR the LLM emitted
+ * `overcommitRisk: 'high'`. This is intentional defence-in-depth — the
+ * regex catches only narrow English-formal phrasing while the LLM
+ * understands paraphrase. Whichever fires first wins.
+ *
+ * Legacy courses (persisted before `overcommitRisk` was added) lack the
+ * field, in which case `useSoftBand` collapses to the regex signal alone
+ * — same behaviour as before this change.
+ */
+const enrichDepthPreviewsWithScope = (
+  llmOutput: DepthPreviewsLLMOutput,
+  { isSoft }: { isSoft: boolean },
+): DepthPreviewsOutput => {
+  const useSoftBand = isSoft || llmOutput.overcommitRisk === 'high';
+  const tier = (depth: CourseDepth) => ({
+    lessonCountRange: getLessonCountHint({ depth, isSoft: useSoftBand }),
+    estimatedHoursRange: getEstimatedHoursRange({ depth, isSoft: useSoftBand }),
+  });
+  return {
+    ...llmOutput,
+    overview: { ...llmOutput.overview, ...tier('overview') },
+    comprehensive: { ...llmOutput.comprehensive, ...tier('comprehensive') },
+    deep_dive: { ...llmOutput.deep_dive, ...tier('deep_dive') },
+  };
+};
 
 const DEPTH_PREVIEWS_SYSTEM_PROMPT = `You are a world-class curriculum designer. Given a learning goal and the learner's answers to clarifying questions, generate a personalized preview for each of the three course depth levels.
 
@@ -216,7 +305,14 @@ The human message may include a "Heuristic softness check" section listing phras
 - Never override to Deep Dive on a SOFT signal. If you must go beyond Overview, Comprehensive is the ceiling.
 - Quote at least one of the detected cues verbatim in \`recommendationReason\` so the learner sees why we trimmed (e.g. "Since you said 'just want to learn more', Overview gets you the mental model without a 30-lesson commitment.").
 
-When SOFT=NO, recommend whichever depth the answers actually call for — do not bias toward Overview.`;
+When SOFT=NO, recommend whichever depth the answers actually call for — do not bias toward Overview.
+
+Also emit two optional fields: \`overcommitRisk\` ("low" | "moderate" | "high") and \`overcommitRationale\` (one short sentence). These rate how likely the learner is to over-commit if they pick a depth ABOVE your recommendation:
+- "low" — confident, professionally-driven, or otherwise high-bandwidth answers.
+- "moderate" — some hedging, hobbyist framing, or competing commitments.
+- "high" — explicit softness, deadline pressure, or commitment uncertainty (paraphrase counts; the regex misses many cases).
+
+The rationale should reference specific answer content (no invented quotes). Skip both fields if you're unsure rather than guessing.`;
 
 interface DepthPreviewsInput {
   goal: string;
@@ -242,14 +338,63 @@ ${formatSoftnessSection(softness)}
 
 Generate personalized depth previews for each tier.`;
 
-  const response = await withRetry(() =>
-    structuredModel.invoke(
-      [cachedSystemMessage({ text: DEPTH_PREVIEWS_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
-      { metadata: { llmLabel: 'clarify:depth-previews' } },
-    ),
+  // Labelled retries: `clarify:depth-previews` is a known structured-
+  // output drift point (the LLM occasionally drops the optional
+  // `overcommitRisk` / `overcommitRationale` fields). Tagging here so
+  // the `with_retry_total{label=...}` metric surfaces drift-rate
+  // per call site.
+  const response = await withRetry(
+    () =>
+      structuredModel.invoke(
+        [cachedSystemMessage({ text: DEPTH_PREVIEWS_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
+        { metadata: { llmLabel: 'clarify:depth-previews' } },
+      ),
+    { label: 'clarify:depth-previews' },
   );
 
-  return response;
+  return enrichDepthPreviewsWithScope(response, { isSoft: softness.isSoft });
+};
+
+/**
+ * Read-time backfill for `course.depthPreviews`. Existing courses persisted
+ * before per-tier `lessonCountRange` / `estimatedHoursRange` were added are
+ * still in the DB without those fields; without a backfill, returning
+ * learners would see no scope on their cards. This helper:
+ *
+ *   1. Returns the input unchanged if `depthPreviews` is null OR if the
+ *      first tier already carries scope (idempotent — write-time
+ *      enrichment is a no-op on a second pass).
+ *   2. Otherwise, recomputes the softness signal from `answers` and
+ *      runs the same `enrichDepthPreviewsWithScope` augmentation, so the
+ *      numbers a returning learner sees are identical to what a brand-new
+ *      learner with the same answers would see.
+ *
+ * Defensive: if `depthPreviews` is malformed (e.g. missing one of the
+ * three tiers), we leave it alone — a half-enriched object would break
+ * client rendering, and bad shapes are extremely unlikely in practice
+ * because the Zod schema gates the write.
+ */
+export const ensureDepthPreviewsScope = <T extends { answers?: unknown; depthPreviews?: unknown }>(
+  course: T,
+): T => {
+  const dp = course.depthPreviews as
+    | (DepthPreviewsLLMOutput & { overview?: { lessonCountRange?: unknown } })
+    | null
+    | undefined;
+  if (!dp) return course;
+  if (dp.overview?.lessonCountRange) return course;
+  if (!dp.overview || !dp.comprehensive || !dp.deep_dive) return course;
+
+  const answersRecord = (course.answers ?? null) as Record<string, unknown> | null;
+  const formattedAnswers = answersRecord
+    ? Object.entries(answersRecord).map(([id, a]) => ({
+        questionId: id,
+        answer: Array.isArray(a) ? a.join(', ') : String(a),
+      }))
+    : [];
+  const softness = detectSoftnessHint({ answers: formattedAnswers });
+  const enriched = enrichDepthPreviewsWithScope(dp as DepthPreviewsLLMOutput, { isSoft: softness.isSoft });
+  return { ...course, depthPreviews: enriched };
 };
 
 // ── Generate course structure ───────────────────────────

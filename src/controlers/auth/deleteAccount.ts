@@ -4,6 +4,7 @@ import CourseModel from '@models/CourseModel';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import JobModel from '@models/JobModel';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
+import LessonMentorChatModel from '@models/LessonMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import UserInsightProgressModel from '@models/UserInsightProgressModel';
@@ -90,6 +91,11 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
     UserModuleQuizProgressModel.deleteMany({ userId: user._id }),
     UserInsightProgressModel.deleteMany({ userId: user._id }),
     CourseDesignChatModel.deleteMany({ userId: user._id }),
+    // Defense-in-depth user-scoped wipe — `cleanupCourseContent` above
+    // already handles mentor chats per owned course, but a stray row left
+    // by a foreign-key drift would persist indefinitely without this.
+    // Mirrors the `CourseDesignChatModel` pattern.
+    LessonMentorChatModel.deleteMany({ userId: user._id }),
     UserGamificationModel.deleteMany({ userId: user._id }),
     // Strip these courses from any OTHER user's favorites — `CourseModel.deleteMany`
     // below doesn't trigger the $pull that single-course deletion does.

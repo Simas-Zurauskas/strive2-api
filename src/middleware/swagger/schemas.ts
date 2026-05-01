@@ -385,6 +385,22 @@ export const schemas: SchemaMap = {
     properties: {
       summary: { type: 'string' },
       bullets: { type: 'array', items: { type: 'string' } },
+      lessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description:
+          'Optional. [min, max] estimated total lesson count for this tier, derived from the (depth, isSoft) lesson-count hints. Computed server-side at depth-previews generation time, or backfilled at read time on legacy courses. Absent on courses persisted before this field was added.',
+      },
+      estimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description:
+          'Optional. [min, max] estimated total learner-facing hours for this tier. Derived from lessonCountRange × ~25 minutes per lesson, rounded up, with a floor of 1 hour. Absent on legacy courses.',
+      },
     },
   },
 
@@ -397,6 +413,17 @@ export const schemas: SchemaMap = {
       deep_dive: { $ref: '#/components/schemas/DepthPreview' },
       recommended: { $ref: '#/components/schemas/CourseDepth' },
       recommendationReason: { type: 'string' },
+      overcommitRisk: {
+        type: 'string',
+        enum: ['low', 'moderate', 'high'],
+        description:
+          'Optional. LLM-emitted holistic judgment of how likely the learner is to over-commit if they pick a depth above `recommended`. Drives the depth-override gate as the primary cost signal — `high` triggers a confirmation dialog when combined with an expansion signal. Absent on courses persisted before this field was added; the gate falls back to phrase-regex softness/finish-pressure detection in that case.',
+      },
+      overcommitRationale: {
+        type: 'string',
+        description:
+          'Optional. One-sentence rationale for `overcommitRisk`, referencing specific answer content (e.g. "Mentioned \'just want to learn the basics\'"). Surfaced verbatim in the 409 confirmation dialog and gate-fire logs. Absent when `overcommitRisk` is absent.',
+      },
     },
   },
 
@@ -1374,6 +1401,166 @@ export const schemas: SchemaMap = {
       byService: {
         type: 'array',
         items: { $ref: '#/components/schemas/UsageServiceTotal' },
+      },
+    },
+  },
+
+  // ── Generic ack response ─────────────────────────────────
+
+  OkResponse: {
+    type: 'object',
+    required: ['ok'],
+    properties: {
+      ok: { type: 'boolean' },
+    },
+  },
+
+  // ── Usage sort enums ─────────────────────────────────────
+  // Surfaced as named schemas so the client can derive these
+  // string-literal unions from `@/api/types` instead of
+  // redeclaring them locally (CLAUDE.md "no local enum types"
+  // rule).
+
+  UsageSortField: {
+    type: 'string',
+    enum: ['timestamp', 'costMicroCents', 'chargedMicroCents', 'service'],
+  },
+
+  UsageSortDir: {
+    type: 'string',
+    enum: ['asc', 'desc'],
+  },
+
+  // ── Lesson-mentor chat ───────────────────────────────────
+
+  LessonChatHistoryAttachmentRef: {
+    type: 'object',
+    required: ['attachmentId'],
+    properties: {
+      attachmentId: { type: 'string' },
+    },
+  },
+
+  MentorChatHandoff: {
+    type: 'object',
+    required: ['target', 'label'],
+    properties: {
+      target: { type: 'string', enum: ['quiz', 'insights', 'lesson'] },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+      label: { type: 'string' },
+    },
+    description:
+      'A successful emit_handoff result persisted alongside the assistant message that produced it. Used by the client to re-render the inline button on history reload.',
+  },
+
+  LessonChatHistoryMessage: {
+    type: 'object',
+    required: ['role', 'content'],
+    properties: {
+      role: { type: 'string' },
+      content: { type: 'string' },
+      createdAt: { type: 'string', format: 'date-time' },
+      attachments: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/LessonChatHistoryAttachmentRef' },
+      },
+      handoffs: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/MentorChatHandoff' },
+      },
+    },
+  },
+
+  LessonChatAttachmentMeta: {
+    type: 'object',
+    required: ['id', 'filename', 'kind', 'approxTokens'],
+    properties: {
+      id: { type: 'string' },
+      filename: { type: 'string' },
+      kind: { type: 'string', enum: ['pdf', 'text'] },
+      approxTokens: { type: 'integer' },
+    },
+  },
+
+  LessonChatHistoryResponse: {
+    type: 'object',
+    required: ['messages', 'attachmentsById', 'suggestedPrompts', 'lessonGenerated'],
+    properties: {
+      messages: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/LessonChatHistoryMessage' },
+      },
+      attachmentsById: {
+        type: 'object',
+        additionalProperties: { $ref: '#/components/schemas/LessonChatAttachmentMeta' },
+        description:
+          'Lookup by attachment id. The full extracted text is server-only — only metadata reaches the client.',
+      },
+      suggestedPrompts: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+      lessonGenerated: {
+        type: 'boolean',
+        description: 'True once the lesson content has been generated and persisted.',
+      },
+    },
+  },
+
+  // ── Course-mentor chat (compass) ─────────────────────────
+
+  CourseMentorHistoryMessage: {
+    type: 'object',
+    required: ['role', 'content'],
+    properties: {
+      role: { type: 'string' },
+      content: { type: 'string' },
+      createdAt: { type: 'string', format: 'date-time' },
+      handoffs: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/MentorChatHandoff' },
+      },
+    },
+  },
+
+  CourseMentorHistoryResponse: {
+    type: 'object',
+    required: ['messages', 'suggestedPrompts', 'courseGenerated', 'hasAnyLessonContent'],
+    properties: {
+      messages: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/CourseMentorHistoryMessage' },
+      },
+      suggestedPrompts: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+      courseGenerated: {
+        type: 'boolean',
+        description:
+          "True once the course structure exists and is in 'ready' status. Drives the panel's empty state.",
+      },
+      hasAnyLessonContent: {
+        type: 'boolean',
+        description: 'True if at least one lesson in the course has had its content generated.',
+      },
+    },
+  },
+
+  // ── Mentor attachment ────────────────────────────────────
+
+  MentorAttachmentResponse: {
+    type: 'object',
+    required: ['id', 'filename', 'kind', 'approxTokens', 'dedupedFromExisting'],
+    properties: {
+      id: { type: 'string' },
+      filename: { type: 'string' },
+      kind: { type: 'string', enum: ['pdf', 'text'] },
+      approxTokens: { type: 'integer' },
+      dedupedFromExisting: {
+        type: 'boolean',
+        description: 'True when this exact file (sha256 match) was already on the session.',
       },
     },
   },

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { Types } from 'mongoose';
 import asyncHandler from 'express-async-handler';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { chatStreamSchema } from './validation';
@@ -6,6 +7,9 @@ import { getUserCourseLean } from '@services/courseDbService';
 import { courseDesignAgent } from '@src/lib/ai/agents/courseDesign';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { getUtilityModel } from '@lib/langchain';
+import { debitActualSpend } from '@services/creditService';
+import { bgError } from '@lib/bg';
+import { chat } from '@lib/loggers';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 
 const formatAnswersFromCourse = (answers: Record<string, unknown> | null) =>
@@ -47,14 +51,18 @@ const compressHistory = async (
     );
 
     const summary = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
-    console.log(`[chatStream] Compressed ${olderMessages.length} older messages into summary`.gray);
+    chat.info(
+      `design:compress one-shot summary built — folded ${olderMessages.length} older messages into ${summary.length}c`,
+    );
 
     return [
       { role: 'assistant', content: `[Summary of earlier conversation]\n${summary}` },
       ...recentMessages,
     ];
   } catch (e) {
-    console.warn(`[chatStream] History compression failed, using full history: ${e instanceof Error ? e.message : e}`);
+    chat.warn(
+      `design:compress summariser failed, using full history err=${e instanceof Error ? e.message : e}`,
+    );
     return history;
   }
 };
@@ -107,6 +115,32 @@ export const chatStreamController = asyncHandler(async (req, res) => {
           .map((p: { text: string }) => p.text)
           .join('');
       }
+    }
+
+    // The AI SDK keeps the full conversation in `useChat` state and sends
+    // every past message back on each turn. If any past assistant message
+    // has `parts` with no text-part (a turn that emitted tool calls without
+    // a final text reply, or one the SDK serialized in a way that left no
+    // text), the normaliser above produces `content: ''`. The schema
+    // (`content: z.string().min(1)`) then 400s the whole request, blocking
+    // the new user message from reaching the agent and silently breaking
+    // every subsequent turn.
+    //
+    // The controller uses only `rawMessages[rawMessages.length - 1]` — the
+    // history is discarded (server reads its own persisted history from
+    // CourseDesignChatModel). So an empty entry in the prior turns is
+    // pure noise; drop it. We always preserve the LAST entry so an
+    // accidental empty current-turn submission still 400s.
+    const original = req.body.messages;
+    const filtered = original.filter((m: { content?: unknown }, i: number) => {
+      if (i === original.length - 1) return true;
+      return typeof m.content === 'string' && m.content.length > 0;
+    });
+    if (filtered.length !== original.length) {
+      chat.info(
+        `design:turn dropped ${original.length - filtered.length} empty history message(s) before validation`,
+      );
+      req.body.messages = filtered;
     }
   }
 
@@ -170,11 +204,18 @@ export const chatStreamController = asyncHandler(async (req, res) => {
   // ── Abort controller for cleanup on client disconnect ────
   const abortController = new AbortController();
   let clientConnected = true;
+  const turnStartedAt = Date.now();
+
+  chat.info(
+    `design:turn start course=${courseId} historyMessages=${messages.length} structureSet=${course.structure ? 'yes' : 'no'}`,
+  );
 
   res.on('close', () => {
+    if (!clientConnected) return;
     clientConnected = false;
     abortController.abort();
     if (tokenEmitter) tokenEmitter.removeAllListeners();
+    chat.warn(`design:stream client disconnect ms=${Date.now() - turnStartedAt}`);
   });
 
   // ── Token streaming via EventEmitter ─────────────────────
@@ -218,11 +259,20 @@ export const chatStreamController = asyncHandler(async (req, res) => {
       { configurable: { ...courseContext, tokenEmitter, abortSignal: abortController.signal } },
     );
   } catch (err) {
-    if (!clientConnected) return; // Client disconnected — nothing to send
+    if (!clientConnected) {
+      chat.warn(`design:turn aborted post-disconnect ms=${Date.now() - turnStartedAt}`);
+      return;
+    }
+    chat.error(
+      `design:turn agent error ms=${Date.now() - turnStartedAt} err=${err instanceof Error ? err.message : String(err)}`,
+    );
     throw err;
   }
 
-  if (!clientConnected) return;
+  if (!clientConnected) {
+    chat.warn(`design:turn done-but-client-gone ms=${Date.now() - turnStartedAt}`);
+    return;
+  }
 
   // Finalize SSE stream — flush any pending tool calls that weren't followed by text
   for (const tc of pendingToolCalls) {
@@ -235,4 +285,16 @@ export const chatStreamController = asyncHandler(async (req, res) => {
   }
   res.write('data: [DONE]\n\n');
   res.end();
+
+  chat.info(`design:turn done ok=true ms=${Date.now() - turnStartedAt}`);
+
+  // Debit credit spend accumulated during this chat turn. Mirrors
+  // lessonChat.ts — without this the course-design chat is effectively
+  // free, since the usageContextMiddleware records spend but nothing
+  // hands it to debitActualSpend.
+  await debitActualSpend({
+    userId,
+    jobId: new Types.ObjectId(),
+    jobType: 'design_chat',
+  }).catch(bgError('chatStream.debitOnSuccess'));
 });

@@ -5,7 +5,10 @@ export default defineConfig({
     tsconfigPaths: true,
   },
   test: {
-    include: ['src/**/*.test.ts', 'test-helpers/**/*.test.ts'],
+    // `scripts/**/*` is dev-only tooling (debugOrchestrator) outside the
+    // shipped api/src/. Its co-located tests still need to run; include
+    // them here so vitest picks them up after the move from src/scripts/.
+    include: ['src/**/*.test.ts', 'test-helpers/**/*.test.ts', 'scripts/**/*.test.ts'],
     environment: 'node',
     reporters: ['default'],
     setupFiles: ['./test-setup.ts'],

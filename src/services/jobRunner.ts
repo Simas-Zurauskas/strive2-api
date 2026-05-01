@@ -1,8 +1,36 @@
+/**
+ * NOTE — split lines for the next maintainer.
+ *
+ * This file is ~780 LOC and mixes the job lifecycle (submit / process /
+ * complete / fail) with type-specific logic (a 9-branch switch over
+ * `executeJob`). The next change here should extract along this seam:
+ *
+ *   - This file (kept) — `submitJob`, `processJob`, the pLimit
+ *     concurrency cap, the `activeJobId` mutex, status transitions.
+ *   - `jobTypes/` directory — one file per job type:
+ *       `clarifyJob.ts`
+ *       `generateStructureJob.ts`
+ *       `refineStructureJob.ts`
+ *       `generateDepthPreviewsJob.ts`
+ *       `generateLessonJob.ts`
+ *       `regenerateHeroJob.ts`
+ *       `regenerateLinksJob.ts`
+ *       `generateModuleQuizJob.ts`
+ *       `lessonNarrationJob.ts`
+ *
+ * Each file exports `executeXxxJob({ jobId, userId, courseId, metadata, course })`
+ * and `executeJob` becomes a thin dispatch table. The shared course
+ * fetch + `cleanupCourseContent` calls stay in the dispatcher.
+ *
+ * Add bounds-checking on `metadata.moduleIndex` / `metadata.lessonIndex`
+ * to the dispatcher (audit P2 finding: client-supplied indices are
+ * currently used directly as array accessors with no validation).
+ */
 import mongoose from 'mongoose';
 import pLimit from 'p-limit';
 import * as Sentry from '@sentry/node';
 import JobModel from '@models/JobModel';
-import CourseModel, { CourseDocument } from '@models/CourseModel';
+import CourseModel, { ICourse } from '@models/CourseModel';
 import LessonContentModel, { ILessonBlock } from '@models/LessonContentModel';
 import InsightModel from '@models/InsightModel';
 import { JobType, CourseDepth } from '@lib/constants';
@@ -31,6 +59,8 @@ import {
 import { generateUniqueSlug } from '@lib/slugify';
 import { runWithUsageContext } from '@lib/usageContext';
 import { runLessonNarration } from './lessonNarrationService';
+import { indexLessonContent } from './lessonRagService';
+import { generateMentorPrompts } from '@lib/ai/agents/lessonMentor/promptsGenerator';
 
 // ── Concurrency & timeout ───────────────────────────────
 
@@ -47,7 +77,11 @@ const jobTimeout = ({ ms, jobId }: { ms: number; jobId: string }) =>
 
 // ── Helpers ─────────────────────────────────────────────
 
-const formatCourseAnswers = (course: CourseDocument): { questionId: string; answer: string }[] => {
+// Accepts the plain `ICourse` shape rather than the full `CourseDocument`
+// (Mongoose-hydrated doc) so callers can pass `.lean()`-fetched courses.
+// Only reads `course.answers` and `course.clarifyData.questions` — both
+// pure data, no Mongoose methods needed.
+const formatCourseAnswers = (course: Pick<ICourse, 'answers' | 'clarifyData'>): { questionId: string; answer: string }[] => {
   if (!course.answers || !course.clarifyData?.questions) return [];
   return Object.entries(course.answers as Record<string, unknown>).map(([id, answer]) => {
     const question = course.clarifyData!.questions.find((q) => q.id === id);
@@ -186,7 +220,12 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
 // ── Execute (core job logic) ──────────────────────────────
 
 const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: string; userId: string; courseId: string; type: string; metadata?: Record<string, unknown> | null }): Promise<void> => {
-  const course = await CourseModel.findById(courseId);
+  // Read-only — every downstream mutation goes through `findByIdAndUpdate`
+  // by id, never via `course.save()`. `.lean()` cuts hydration overhead on
+  // a doc that can be very large (full structure with hundreds of lessons)
+  // and matters under the 50-job concurrency cap. If a future change ever
+  // needs to call a Mongoose method on this object, drop the `.lean()`.
+  const course = await CourseModel.findById(courseId).lean();
   if (!course) throw new Error('Course not found');
 
   switch (type) {
@@ -446,6 +485,47 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
           });
           emitProgress({ type: 'insights_saved', count: persistedIds.length });
         }
+
+        // Index the freshly-saved lesson into the RAG store. Awaited (not
+        // fire-and-forget) so the embedding cost is recorded inside the
+        // job's usage context — `recordUsage` reads the active ALS scope,
+        // and a detached promise can fire after the scope has exited.
+        // No-ops gracefully when OPENAI/PINECONE keys aren't configured.
+        await indexLessonContent({
+          courseId,
+          moduleIndex,
+          lessonIndex,
+          blocks: allBlocks,
+        }).catch(bgError('jobRunner.indexLessonContent'));
+
+        // Generate lesson-specific opening prompts for the mentor panel.
+        // Awaited so the Haiku call is recorded in the job's spend
+        // accumulator. Failures (timeouts, malformed JSON) leave the
+        // field empty — the chat history endpoint falls back to the
+        // hard-coded generic prompts in that case. Re-runs of this
+        // job overwrite the field, keeping prompts fresh after lesson
+        // regeneration.
+        const lessonContentForPrompts = allBlocks
+          .filter((b) => ['intro', 'section', 'callout', 'summary'].includes(b.type))
+          .sort((a, b) => a.order - b.order)
+          .map((b) => b.content)
+          .join('\n\n');
+        const generatedPrompts = await generateMentorPrompts({
+          courseGoal: course.goal ?? '',
+          moduleTitle: mod.name,
+          lessonTitle: lesson.name,
+          lessonSummary: capturedSummary,
+          lessonContent: lessonContentForPrompts,
+        }).catch((e) => {
+          bgError('jobRunner.generateMentorPrompts')(e);
+          return null;
+        });
+        if (generatedPrompts && generatedPrompts.length > 0) {
+          await LessonContentModel.updateOne(
+            { courseId, moduleIndex, lessonIndex },
+            { $set: { suggestedMentorPrompts: generatedPrompts } },
+          ).catch(bgError('jobRunner.saveMentorPrompts'));
+        }
         return;
       } catch (e) {
         if (saveTimer) clearTimeout(saveTimer);
@@ -453,9 +533,23 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         // otherwise see `completed: false` rows with the debounced writes)
         // gets a clean slate on retry. Matches the cleanup path the SSE
         // endpoint used to run on abort/failure.
-        await LessonContentModel.deleteOne({ courseId, moduleIndex, lessonIndex, completed: false }).catch(bgError('jobRunner.cleanupLesson'));
-        InsightModel.deleteMany({ courseId, moduleIndex, lessonIndex }).catch(bgError('jobRunner.cleanupInsights'));
-        deleteByPrefix(`lessons/${courseId}/${moduleIndex}/${lessonIndex}/`).catch(bgError('jobRunner.cleanupS3'));
+        //
+        // All three cleanups must complete before we re-throw — previously
+        // only the first was awaited, leaving deleteMany + S3 racing
+        // against the job's failure bookkeeping. allSettled so a slow S3
+        // call doesn't block the others, and a single failure doesn't
+        // abandon the rest.
+        await Promise.allSettled([
+          LessonContentModel.deleteOne({ courseId, moduleIndex, lessonIndex, completed: false }).catch(
+            bgError('jobRunner.cleanupLesson'),
+          ),
+          InsightModel.deleteMany({ courseId, moduleIndex, lessonIndex }).catch(
+            bgError('jobRunner.cleanupInsights'),
+          ),
+          deleteByPrefix(`lessons/${courseId}/${moduleIndex}/${lessonIndex}/`).catch(
+            bgError('jobRunner.cleanupS3'),
+          ),
+        ]);
 
         const msg = e instanceof Error ? e.message : String(e);
         lessonGenOutcome = msg.includes('failed persistence validation')
