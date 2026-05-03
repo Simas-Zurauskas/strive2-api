@@ -1,6 +1,6 @@
 import { OpenAPIV3 } from 'openapi-types';
 import { ERROR_CODES } from '@middleware/errorMiddleware';
-import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
+import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, GOAL_TYPES, GOAL_TYPE_CONFIDENCES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
 import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 import { INSIGHT_KINDS, INSIGHT_MODES, INSIGHT_RATINGS, INSIGHT_STATES } from '@lib/insightConstants';
@@ -46,6 +46,16 @@ export const schemas: SchemaMap = {
   CourseDomain: {
     type: 'string',
     enum: [...COURSE_DOMAINS],
+  },
+
+  GoalType: {
+    type: 'string',
+    enum: [...GOAL_TYPES],
+  },
+
+  GoalTypeConfidence: {
+    type: 'string',
+    enum: [...GOAL_TYPE_CONFIDENCES],
   },
 
   JobStatusEnum: {
@@ -321,6 +331,10 @@ export const schemas: SchemaMap = {
         type: 'array',
         items: { $ref: '#/components/schemas/ClarifyQuestion' },
       },
+      goalTypeNoun: {
+        type: 'string',
+        description: "Chip label noun phrase produced by the goalType classifier (e.g. 'your YouTube channel', 'the CPA exam'). The verb (e.g. 'monetize', 'pass') is a static client-side map keyed off course.goalType.",
+      },
     },
   },
 
@@ -385,6 +399,22 @@ export const schemas: SchemaMap = {
     properties: {
       summary: { type: 'string' },
       bullets: { type: 'array', items: { type: 'string' } },
+      lessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description:
+          'Optional. [min, max] estimated total lesson count for this tier, derived from the (depth, isSoft) lesson-count hints. Computed server-side at depth-previews generation time, or backfilled at read time on legacy courses. Absent on courses persisted before this field was added.',
+      },
+      estimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description:
+          'Optional. [min, max] estimated total learner-facing hours for this tier. Derived from lessonCountRange × ~25 minutes per lesson, rounded up, with a floor of 1 hour. Absent on legacy courses.',
+      },
     },
   },
 
@@ -397,6 +427,28 @@ export const schemas: SchemaMap = {
       deep_dive: { $ref: '#/components/schemas/DepthPreview' },
       recommended: { $ref: '#/components/schemas/CourseDepth' },
       recommendationReason: { type: 'string' },
+      overcommitRisk: {
+        type: 'string',
+        enum: ['low', 'moderate', 'high'],
+        description:
+          'Optional. LLM-emitted holistic judgment of how likely the learner is to over-commit if they pick a depth above `recommended`. Drives the depth-override gate as the primary cost signal — `high` triggers a confirmation dialog when combined with an expansion signal; `moderate` triggers when combined with a large-course expansion (>15 lessons). Absent on courses persisted before this field was added; the gate falls back to phrase-regex softness/finish-pressure detection in that case.',
+      },
+      overcommitRationale: {
+        type: 'string',
+        description:
+          'Optional. One-sentence rationale for `overcommitRisk`, referencing specific answer content (e.g. "Mentioned \'just want to learn the basics\'"). Surfaced verbatim in the 409 confirmation dialog and gate-fire logs. Absent when `overcommitRisk` is absent.',
+      },
+      undercommitRisk: {
+        type: 'string',
+        enum: ['low', 'moderate', 'high'],
+        description:
+          'Optional. LLM-emitted judgment of how poorly served the learner will be if they pick a depth BELOW `recommended` — the symmetric coverage-gap signal to `overcommitRisk`. `moderate` or `high` triggers the undercommit half of the depth-override gate (separate 409 code DEPTH_UNDERCOMMIT_REQUIRES_ACK) so the learner is warned before committing to a tier that would skip practical applications they explicitly asked about. Absent on legacy courses; absence means no undercommit warning will fire (we have no regex fallback for deadline/professional-goal phrasing).',
+      },
+      undercommitRationale: {
+        type: 'string',
+        description:
+          'Optional. One-sentence rationale for `undercommitRisk`, referencing specific answer content (e.g. "You said the interview is in 3 weeks"). Surfaced verbatim in the 409 dialog and gate-fire logs. Absent when `undercommitRisk` is absent.',
+      },
     },
   },
 
@@ -1108,6 +1160,8 @@ export const schemas: SchemaMap = {
       status: { $ref: '#/components/schemas/CourseStatus' },
       goal: { type: 'string' },
       domain: nullableRef('#/components/schemas/CourseDomain'),
+      goalType: nullableRef('#/components/schemas/GoalType'),
+      goalTypeConfidence: nullableRef('#/components/schemas/GoalTypeConfidence'),
       clarifyData: { $ref: '#/components/schemas/ClarifyResponse' },
       answers: { type: 'object' },
       depth: { $ref: '#/components/schemas/CourseDepth' },
@@ -1374,6 +1428,166 @@ export const schemas: SchemaMap = {
       byService: {
         type: 'array',
         items: { $ref: '#/components/schemas/UsageServiceTotal' },
+      },
+    },
+  },
+
+  // ── Generic ack response ─────────────────────────────────
+
+  OkResponse: {
+    type: 'object',
+    required: ['ok'],
+    properties: {
+      ok: { type: 'boolean' },
+    },
+  },
+
+  // ── Usage sort enums ─────────────────────────────────────
+  // Surfaced as named schemas so the client can derive these
+  // string-literal unions from `@/api/types` instead of
+  // redeclaring them locally (CLAUDE.md "no local enum types"
+  // rule).
+
+  UsageSortField: {
+    type: 'string',
+    enum: ['timestamp', 'costMicroCents', 'chargedMicroCents', 'service'],
+  },
+
+  UsageSortDir: {
+    type: 'string',
+    enum: ['asc', 'desc'],
+  },
+
+  // ── Lesson-mentor chat ───────────────────────────────────
+
+  LessonChatHistoryAttachmentRef: {
+    type: 'object',
+    required: ['attachmentId'],
+    properties: {
+      attachmentId: { type: 'string' },
+    },
+  },
+
+  MentorChatHandoff: {
+    type: 'object',
+    required: ['target', 'label'],
+    properties: {
+      target: { type: 'string', enum: ['quiz', 'insights', 'lesson'] },
+      moduleIndex: { type: 'integer' },
+      lessonIndex: { type: 'integer' },
+      label: { type: 'string' },
+    },
+    description:
+      'A successful emit_handoff result persisted alongside the assistant message that produced it. Used by the client to re-render the inline button on history reload.',
+  },
+
+  LessonChatHistoryMessage: {
+    type: 'object',
+    required: ['role', 'content'],
+    properties: {
+      role: { type: 'string' },
+      content: { type: 'string' },
+      createdAt: { type: 'string', format: 'date-time' },
+      attachments: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/LessonChatHistoryAttachmentRef' },
+      },
+      handoffs: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/MentorChatHandoff' },
+      },
+    },
+  },
+
+  LessonChatAttachmentMeta: {
+    type: 'object',
+    required: ['id', 'filename', 'kind', 'approxTokens'],
+    properties: {
+      id: { type: 'string' },
+      filename: { type: 'string' },
+      kind: { type: 'string', enum: ['pdf', 'text'] },
+      approxTokens: { type: 'integer' },
+    },
+  },
+
+  LessonChatHistoryResponse: {
+    type: 'object',
+    required: ['messages', 'attachmentsById', 'suggestedPrompts', 'lessonGenerated'],
+    properties: {
+      messages: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/LessonChatHistoryMessage' },
+      },
+      attachmentsById: {
+        type: 'object',
+        additionalProperties: { $ref: '#/components/schemas/LessonChatAttachmentMeta' },
+        description:
+          'Lookup by attachment id. The full extracted text is server-only — only metadata reaches the client.',
+      },
+      suggestedPrompts: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+      lessonGenerated: {
+        type: 'boolean',
+        description: 'True once the lesson content has been generated and persisted.',
+      },
+    },
+  },
+
+  // ── Course-mentor chat (compass) ─────────────────────────
+
+  CourseMentorHistoryMessage: {
+    type: 'object',
+    required: ['role', 'content'],
+    properties: {
+      role: { type: 'string' },
+      content: { type: 'string' },
+      createdAt: { type: 'string', format: 'date-time' },
+      handoffs: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/MentorChatHandoff' },
+      },
+    },
+  },
+
+  CourseMentorHistoryResponse: {
+    type: 'object',
+    required: ['messages', 'suggestedPrompts', 'courseGenerated', 'hasAnyLessonContent'],
+    properties: {
+      messages: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/CourseMentorHistoryMessage' },
+      },
+      suggestedPrompts: {
+        type: 'array',
+        items: { type: 'string' },
+      },
+      courseGenerated: {
+        type: 'boolean',
+        description:
+          "True once the course structure exists and is in 'ready' status. Drives the panel's empty state.",
+      },
+      hasAnyLessonContent: {
+        type: 'boolean',
+        description: 'True if at least one lesson in the course has had its content generated.',
+      },
+    },
+  },
+
+  // ── Mentor attachment ────────────────────────────────────
+
+  MentorAttachmentResponse: {
+    type: 'object',
+    required: ['id', 'filename', 'kind', 'approxTokens', 'dedupedFromExisting'],
+    properties: {
+      id: { type: 'string' },
+      filename: { type: 'string' },
+      kind: { type: 'string', enum: ['pdf', 'text'] },
+      approxTokens: { type: 'integer' },
+      dedupedFromExisting: {
+        type: 'boolean',
+        description: 'True when this exact file (sha256 match) was already on the session.',
       },
     },
   },

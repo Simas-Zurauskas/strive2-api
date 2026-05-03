@@ -2,6 +2,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { getUtilityModel } from '@lib/langchain';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { CourseDomain } from '@lib/constants';
+import { genLog } from '@lib/loggers';
 import { TopicPlan, topicPlanSchema } from './schemas';
 
 // Per-domain steer for the planner. Keeps queries native to the subject —
@@ -17,6 +18,7 @@ const DOMAIN_HINTS: Record<CourseDomain, string> = {
   creative: 'Favour maker blogs, practitioner tutorials, tool documentation, worked examples from recognised artists or craftspeople in this specific medium.',
   business: 'Favour practitioner-written pieces (HBR, MIT Sloan Review, a16z, Stratechery), case studies, and reputable operator blogs; peer-reviewed management research where the lesson cites theory.',
   practical: 'Favour how-to guides from accredited tradespeople, safety authorities, tool manufacturers, and well-regarded practitioner forums; avoid listicle-style SEO content.',
+  'practical-ai': 'Favour vendor cookbooks and prompt libraries (OpenAI Cookbook, Anthropic prompt library + docs, Google AI Studio guides), no-code platform docs (n8n, Zapier, Make, LangChain/LangGraph how-tos, LlamaIndex recipes), and respected practitioner sources (Simon Willison\'s blog, Latent Space, Eugene Yan, Hamel Husain). Avoid academic ML papers (arXiv, NeurIPS) unless the lesson is explicitly about a research technique, and avoid SEO listicles ("Top 10 ChatGPT prompts…").',
   'life-skills': 'Favour applied research from recognised psychologists/coaches, reputable long-form essays, and skill-specific coaching resources; avoid generic productivity listicles.',
   other: 'Pick sources appropriate to the subject as inferred from the lesson description.',
 };
@@ -112,14 +114,11 @@ export const planQueries = async ({
       { metadata: { llmLabel: 'lesson:links.plan' } },
     );
     if (!plan.topics.length) return fallbackPlan(lessonName);
-    console.log(`[links.queryPlanner] ✓ Planned ${plan.topics.length} topic(s):`.cyan);
-    for (const t of plan.topics) {
-      console.log(`[links.queryPlanner]   • ${t.topic}  →  "${t.query}"`.gray);
-    }
+    genLog.info(`links:plan topics=${plan.topics.length} queries=${plan.topics.map((t) => `"${t.query}"`).join(',')}`);
     return plan;
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    console.warn(`[links.queryPlanner] planner LLM failed (${reason}); using keyword fallback`.yellow);
+    genLog.warn(`links:plan-fallback reason=${reason} — using keyword heuristic`);
     return fallbackPlan(lessonName);
   }
 };

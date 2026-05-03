@@ -10,8 +10,18 @@ import {
   bumpContentValidationRepairHaikuFallback,
 } from '@lib/metrics';
 import type { LessonProgressWriter } from '@src/types/socketEvents';
+import { genLog } from '@lib/loggers';
 import { LessonState } from '../state';
 import { lessonBlockSchema } from '../prompts';
+
+// Wall-clock cap on the AI-SDK `generateObject` call. The repair path is a
+// small structured emission (≤4 missing blocks), so 2 minutes is generous;
+// the bound exists because the AI SDK does not enforce its own timeout —
+// without `abortSignal`, a stalled Anthropic connection would hang the
+// repair indefinitely. The outer try/catch in `runRepair` handles
+// `AbortError` the same way it handles `NoObjectGeneratedError`: fall
+// through to the Sonnet escalation, then to the no-op return.
+const VALIDATION_TIMEOUT_MS = 120_000; // 2 minutes
 
 // Mirror of the helper in contentGeneration.ts. When generateObject rejects,
 // the terse "response did not match schema" message is all the Job record
@@ -21,12 +31,12 @@ const logNoObjectDetails = (label: string, err: unknown): void => {
   if (!NoObjectGeneratedError.isInstance(err)) return;
   const cause = err.cause;
   const causeMsg = cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
-  console.error(`[${label}] NoObjectGeneratedError cause: ${causeMsg}`.red);
+  genLog.error(`lesson:validate ${label} no-object cause=${causeMsg}`);
   if (typeof err.text === 'string' && err.text.length > 0) {
-    console.error(`[${label}] raw response tail (last 600 chars): ${err.text.slice(-600)}`.red);
+    genLog.error(`lesson:validate ${label} raw-tail=${err.text.slice(-600)}`);
   }
   if (err.usage) {
-    console.error(`[${label}] usage: ${JSON.stringify(err.usage)}`.red);
+    genLog.error(`lesson:validate ${label} usage=${JSON.stringify(err.usage)}`);
   }
 };
 
@@ -167,7 +177,7 @@ async function repairStructuralGaps({
   let nextSectionOrder = maxOrder + 1;
   const summaryOrder = maxOrder + gaps.needMoreSections + 1;
 
-  console.log(`[contentValidation] 🔄 Attempting repair: generating ${missing.join(', ')}`.yellow);
+  genLog.warn(`lesson:validate repair-start missing=[${missing.join(' | ')}]`);
 
   // Track which types we need so we can filter out unexpected ones
   const allowedTypes = new Set<string>();
@@ -185,24 +195,34 @@ async function repairStructuralGaps({
   const userPrompt = `## Existing blocks\n\n${existingBlocksSummary}\n\n## Missing blocks to generate\n\n${missing.map((m) => `- ${m}`).join('\n')}\n\nGenerate ONLY the missing blocks. Do not duplicate existing content.`;
 
   const runRepair = async ({ modelId, label }: { modelId: string; label: string }) => {
-    const result = await generateObject({
-      model: anthropic(modelId),
-      schema: z.object({ blocks: z.array(lessonBlockSchema) }),
-      temperature: 0.3,
-      messages: [
-        { role: 'system' as const, content: systemPrompt },
-        { role: 'user' as const, content: userPrompt },
-      ],
-    });
-    logCacheUsage({
-      label,
-      usage: usageFromVercelAi({
-        providerMetadata: result.providerMetadata,
-        usage: result.usage,
-      }),
-      model: modelId,
-    });
-    return result.object;
+    const abortController = new AbortController();
+    const abortTimer = setTimeout(() => {
+      genLog.warn(`lesson:validate ${label} timeout (${VALIDATION_TIMEOUT_MS}ms) — aborting`);
+      abortController.abort();
+    }, VALIDATION_TIMEOUT_MS);
+    try {
+      const result = await generateObject({
+        model: anthropic(modelId),
+        schema: z.object({ blocks: z.array(lessonBlockSchema) }),
+        temperature: 0.3,
+        abortSignal: abortController.signal,
+        messages: [
+          { role: 'system' as const, content: systemPrompt },
+          { role: 'user' as const, content: userPrompt },
+        ],
+      });
+      logCacheUsage({
+        label,
+        usage: usageFromVercelAi({
+          providerMetadata: result.providerMetadata,
+          usage: result.usage,
+        }),
+        model: modelId,
+      });
+      return result.object;
+    } finally {
+      clearTimeout(abortTimer);
+    }
   };
 
   let object: { blocks: LessonState['contentBlocks'] };
@@ -217,13 +237,13 @@ async function repairStructuralGaps({
     }
   } catch (haikuError) {
     const haikuMsg = haikuError instanceof Error ? haikuError.message : String(haikuError);
-    console.warn(`[contentValidation] ⚠ Haiku repair fell through (${haikuMsg}) — retrying with Sonnet`.yellow);
+    genLog.warn(`lesson:validate repair-haiku-fallthrough reason=${haikuMsg} — retrying on Sonnet`);
     bumpContentValidationRepairHaikuFallback();
     try {
       object = await runRepair({ modelId: MODEL_IDS.SONNET, label: 'lesson:validation-repair.sonnet' });
     } catch (sonnetError) {
       const reason = sonnetError instanceof Error ? sonnetError.message : String(sonnetError);
-      console.error(`[contentValidation] ✗ Repair failed on both Haiku and Sonnet: ${reason}`.red);
+      genLog.error(`lesson:validate repair-both-fail reason=${reason}`);
       logNoObjectDetails('contentValidation.repair', sonnetError);
       return blocks;
     }
@@ -249,11 +269,11 @@ async function repairStructuralGaps({
       writer?.({ type: 'block', block });
     }
 
-    console.log(`[contentValidation] ✓ Repair complete: generated ${repairedBlocks.length} blocks`.green);
+    genLog.info(`lesson:validate repair-ok generated=${repairedBlocks.length}`);
     return [...blocks, ...repairedBlocks];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    console.error(`[contentValidation] ✗ Repair failed: ${reason}`.red);
+    genLog.error(`lesson:validate repair-postprocess-fail reason=${reason}`);
     logNoObjectDetails('contentValidation.repair', error);
     return blocks; // Fall back to original blocks
   }
@@ -316,7 +336,7 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     }
   }
   if (sanitizedMermaidLabels > 0) {
-    console.log(`[contentValidation] normalized ${sanitizedMermaidLabels} mermaid label(s): \\n → <br/>`.cyan);
+    genLog.info(`lesson:validate mermaid-normalize labels=${sanitizedMermaidLabels} (\\n → <br/>)`);
   }
 
   // Check callout blocks have variant set
@@ -328,10 +348,9 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
   }
 
   if (warnings.length > 0) {
-    console.warn(`[contentValidation] ⚠ ${warnings.length} issues found:`.yellow);
-    for (const w of warnings) console.warn(`  - ${w}`.yellow);
+    genLog.warn(`lesson:validate issues=${warnings.length} list=[${warnings.join(' | ')}]`);
   } else {
-    console.log(`[contentValidation] ✓ All checks passed (${blocks.length} blocks)`.green);
+    genLog.info(`lesson:validate ok blocks=${blocks.length}`);
   }
 
   // ── Section-title dedup (case-insensitive) ──
@@ -357,7 +376,7 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
   if (duplicatesRemoved.length > 0) {
     for (const { id, title } of duplicatesRemoved) {
       const firstId = seenTitles.get(title.toLowerCase());
-      console.warn(`[contentValidation] Removed duplicate section ${id} (title "${title}" already in ${firstId})`.yellow);
+      genLog.warn(`lesson:validate dedup-section drop=${id} firstSeen=${firstId} title="${title}"`);
       warnings.push(`Removed duplicate section ${id}: "${title}"`);
     }
   }
@@ -371,7 +390,7 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     if (b.type !== 'section') continue;
     if (hasValidSectionStart(b.content)) continue;
     const preview = b.content.trim().slice(0, 60);
-    console.warn(`[contentValidation] Section ${b.id} has malformed start: "${preview}..."`.yellow);
+    genLog.warn(`lesson:validate malformed-section block=${b.id} preview="${preview}..."`);
     warnings.push(`Section ${b.id} starts malformed: "${preview}..."`);
   }
 
@@ -393,7 +412,7 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     if (!needsRepair) break;
 
     if (attempt > 1) {
-      console.log(`[contentValidation] 🔄 Repair attempt ${attempt}/${MAX_REPAIR_ATTEMPTS}`.yellow);
+      genLog.info(`lesson:validate repair-attempt ${attempt}/${MAX_REPAIR_ATTEMPTS}`);
     }
     blocks = await repairStructuralGaps({ blocks, gaps, writer });
 
@@ -403,7 +422,7 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     // either case, a next iteration would fire with identical gaps and
     // almost certainly produce the same outcome — so stop here.
     if (blocks.length === prevBlockCount) {
-      console.warn(`[contentValidation] ⚠ Repair attempt ${attempt} made no progress, stopping`.yellow);
+      genLog.warn(`lesson:validate repair-noprogress attempt=${attempt} — stopping`);
       break;
     }
     prevBlockCount = blocks.length;
@@ -420,9 +439,9 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     const postSections = blocks.filter((b) => b.type === 'section').length;
     const stillBroken = postIntro !== 1 || postSummary !== 1 || postSections < 2;
     if (stillBroken) {
-      console.warn(`[contentValidation] ⚠ Post-repair: intro=${postIntro}, summary=${postSummary}, sections=${postSections} — still incomplete`.yellow);
+      genLog.warn(`lesson:validate post-repair-incomplete intro=${postIntro} summary=${postSummary} sections=${postSections}`);
     } else {
-      console.log(`[contentValidation] ✓ Post-repair: structure valid (intro=${postIntro}, summary=${postSummary}, sections=${postSections})`.green);
+      genLog.info(`lesson:validate post-repair-ok intro=${postIntro} summary=${postSummary} sections=${postSections}`);
     }
   }
 
@@ -445,7 +464,7 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
 
     converted = true;
     const newId = b.id.replace(/^code-/, 'section-converted-');
-    console.warn(`[contentValidation] Converting code block ${b.id} → section (detected non-code content)`.yellow);
+    genLog.warn(`lesson:validate code→section block=${b.id} (non-code content detected)`);
     warnings.push(`Converted non-code code block ${b.id} to section`);
 
     return {
@@ -467,12 +486,12 @@ export const contentValidation = async (state: LessonState, config?: RunnableCon
     const { text, failedSpans } = sanitizeLatex(b.content);
     if (failedSpans === 0) return b;
     totalLatexFailures += failedSpans;
-    console.warn(`[contentValidation] LaTeX sanitize: block ${b.id} had ${failedSpans} malformed span(s)`.yellow);
+    genLog.warn(`lesson:validate latex-sanitize block=${b.id} failedSpans=${failedSpans}`);
     return { ...b, content: text };
   });
 
   if (totalLatexFailures > 0) {
-    console.warn(`[contentValidation] ⚠ Total LaTeX parse failures: ${totalLatexFailures}`.yellow);
+    genLog.warn(`lesson:validate latex-failures total=${totalLatexFailures}`);
   }
 
   // Return updated blocks if anything changed (repair, filtering, conversion, or LaTeX fix-ups)

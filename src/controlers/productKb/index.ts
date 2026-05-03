@@ -1,0 +1,1 @@
+export { productKbChatController } from './productKbChat';

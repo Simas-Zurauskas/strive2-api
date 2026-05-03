@@ -18,6 +18,8 @@ import {
 } from '@lib/metrics';
 import { withRetry } from '@lib/retry';
 import { lintDistractors, repairDistractors } from '@lib/ai/distractorLint';
+import { lintQuizIntegrity } from '@lib/ai/quizIntegrityLint';
+import { genLog } from '@lib/loggers';
 import { QuizState } from '../state';
 import { quizOutputSchema, buildModuleQuizSystemPrompt, quizQuestionSchema } from '../prompts';
 import { shuffleQuizOptions } from './shuffleQuizOptions';
@@ -49,13 +51,22 @@ const LINT_REASON_HINT: Record<string, string> = {
   'length-uniformity': 'all four options must be within ±35% of the median character length — move the short/long outliers toward the median, preferably by lengthening short distractors with plausible elaboration rather than shortening the correct answer',
   'correct-is-longest': 'the correct answer cannot be strictly the longest option — tighten it or lengthen the distractors so at least one ties or exceeds it',
   'distractor-absolute-qualifier': 'distractors contain "always / never / only / all / none / every / any" while the correct answer does not — strip those absolute qualifiers from distractors (or add one to the correct answer)',
+  'duplicate-options': 'two or more options have identical text after trimming and casefolding — generate four distinct distractors with different misconceptions, no near-duplicates',
+  'truncated-correct': 'the correct option appears truncated (ends mid-clause / on a trailing conjunction / as an unbalanced quote / as a SQL fragment shorter than peers) — rewrite it as a complete self-contained answer',
+  'explanation-mismatch': 'the explanation argues for a different option than `correctIndex` points to (textual cite or signature-token overlap disagrees) — re-read the explanation and either (a) update correctIndex to match what the explanation actually justifies, or (b) rewrite the explanation to defend the option at correctIndex',
 };
 
 const lintQuizQuestions = (questions: QuizQuestion[]): QuizLintViolation[] => {
   const out: QuizLintViolation[] = [];
   for (const q of questions) {
-    const lint = lintDistractors({ options: q.options, correctIndex: q.correctIndex });
-    if (lint.reasons.length > 0) out.push({ id: q.id, reasons: lint.reasons });
+    const styleLint = lintDistractors({ options: q.options, correctIndex: q.correctIndex });
+    const integrityLint = lintQuizIntegrity({
+      options: q.options,
+      correctIndex: q.correctIndex,
+      explanation: q.explanation,
+    });
+    const merged = [...styleLint.reasons, ...integrityLint.reasons];
+    if (merged.length > 0) out.push({ id: q.id, reasons: merged });
   }
   return out;
 };
@@ -91,11 +102,24 @@ const repairQuizQuestions = ({
 
     q.options = repair.options;
 
-    const postLint = lintDistractors({ options: repair.options, correctIndex: q.correctIndex });
-    if (postLint.reasons.length === 0) {
+    // Re-lint with BOTH style and integrity. `repairDistractors` only
+    // addresses style violations (`correct-is-longest`, `distractor-
+    // absolute-qualifier`); integrity violations (`duplicate-options`,
+    // `truncated-correct`, `explanation-mismatch`) survive any repair.
+    // Without re-checking integrity here, a question with both kinds of
+    // violations would be marked `repairedIds` after the style fix and
+    // ship with the integrity violation silently intact.
+    const postStyle = lintDistractors({ options: repair.options, correctIndex: q.correctIndex });
+    const postIntegrity = lintQuizIntegrity({
+      options: repair.options,
+      correctIndex: q.correctIndex,
+      explanation: q.explanation,
+    });
+    const postReasons = [...postStyle.reasons, ...postIntegrity.reasons];
+    if (postReasons.length === 0) {
       repairedIds.push(v.id);
     } else {
-      residual.push({ id: v.id, reasons: postLint.reasons });
+      residual.push({ id: v.id, reasons: postReasons });
     }
   }
 
@@ -158,8 +182,8 @@ const reportQuizGenerationFailure = ({
     errorPreview: message.slice(0, 500),
     isEmptyTool,
   };
-  console.warn(
-    `[quizGeneration] failure diagnostic (attempt ${attempt}) — module="${state.moduleName}", promptLen=${humanMessageLength}, emptyTool=${isEmptyTool}`.yellow,
+  genLog.warn(
+    `quiz:generate attempt-fail attempt=${attempt} module="${state.moduleName}" promptLen=${humanMessageLength} emptyTool=${isEmptyTool}`,
   );
   Sentry.captureMessage('quizGeneration attempt failure', {
     level: 'warning',
@@ -212,7 +236,8 @@ const narrowDomain = (raw: string | null): CourseDomain | null =>
   raw !== null && (COURSE_DOMAINS as readonly string[]).includes(raw) ? (raw as CourseDomain) : null;
 
 export const quizGeneration = async (state: QuizState): Promise<Partial<QuizState>> => {
-  console.log(`[quizGeneration] Generating module quiz for "${state.moduleName}"...`.cyan);
+  const quizStart = Date.now();
+  genLog.info(`quiz:generate start module="${state.moduleName}"`);
 
   try {
     // Model-tier escalation — mirror of `interactiveGeneration.ts`. Attempt
@@ -263,7 +288,7 @@ export const quizGeneration = async (state: QuizState): Promise<Partial<QuizStat
         // `lintFeedback` because its question-id references won't apply to
         // a fresh Sonnet generation.
         if (tier === 'haiku' && lintAttempt < MAX_DISTRACTOR_LINT_ATTEMPTS) {
-          console.warn(`[quizGeneration] ⚠ Haiku attempt failed (${err instanceof Error ? err.message : err}) — escalating to Sonnet`.yellow);
+          genLog.warn(`quiz:generate haiku-fail reason=${err instanceof Error ? err.message : err} — escalating to Sonnet`);
           lintFeedback = null;
           continue;
         }
@@ -284,7 +309,7 @@ export const quizGeneration = async (state: QuizState): Promise<Partial<QuizStat
 
       if (actionableViolations.length === 0) {
         for (let i = 0; i < lengthOnlyIds.length; i++) bumpQuizDistractorLintLengthOnlyShipped();
-        console.log(`[quizGeneration] ℹ distractor-lint length-uniformity only on ${lengthOnlyIds.length} question(s) — shipping (correct-not-longest guard holds): ${lengthOnlyIds.join(', ')}`.gray);
+        genLog.info(`quiz:generate lint-length-only count=${lengthOnlyIds.length} ids=${lengthOnlyIds.join(',')} — shipping (correct-not-longest holds)`);
         break;
       }
 
@@ -295,7 +320,7 @@ export const quizGeneration = async (state: QuizState): Promise<Partial<QuizStat
       const repair = repairQuizQuestions({ questions: attempted.questions, violations: actionableViolations });
       if (repair.repairedIds.length > 0) {
         for (let i = 0; i < repair.repairedIds.length; i++) bumpQuizDistractorLintRepaired();
-        console.log(`[quizGeneration] ✓ distractor-lint repair cleared ${repair.repairedIds.length} question(s): ${repair.repairedIds.join(', ')}`.green);
+        genLog.info(`quiz:generate lint-repair-ok cleared=${repair.repairedIds.length} ids=${repair.repairedIds.join(',')}`);
       }
 
       const residualActionable = repair.residual.filter(isActionableViolation);
@@ -308,7 +333,7 @@ export const quizGeneration = async (state: QuizState): Promise<Partial<QuizStat
         // Repair cleared every actionable reason — ship without a retry.
         if (residualLengthOnlyIds.length > 0) {
           for (let i = 0; i < residualLengthOnlyIds.length; i++) bumpQuizDistractorLintLengthOnlyShipped();
-          console.log(`[quizGeneration] ℹ distractor-lint length-uniformity only on ${residualLengthOnlyIds.length} question(s) — shipping: ${residualLengthOnlyIds.join(', ')}`.gray);
+          genLog.info(`quiz:generate lint-length-only count=${residualLengthOnlyIds.length} ids=${residualLengthOnlyIds.join(',')} — shipping`);
         }
         break;
       }
@@ -320,15 +345,15 @@ export const quizGeneration = async (state: QuizState): Promise<Partial<QuizStat
       if (lintAttempt === MAX_DISTRACTOR_LINT_ATTEMPTS) {
         // Out of attempts. Ship with hard-fail log.
         bumpQuizDistractorLintHardFail();
-        console.warn(`[quizGeneration] ⚠ distractor-lint hard-fail after ${MAX_DISTRACTOR_LINT_ATTEMPTS} attempts + repair on ${residualActionable.length}/${attempted.questions.length} question(s) — shipping anyway: ${residualSummary}`.yellow);
+        genLog.warn(`quiz:generate lint-hardfail attempts=${MAX_DISTRACTOR_LINT_ATTEMPTS} stillFailing=${residualActionable.length}/${attempted.questions.length} residual=${residualSummary} — shipping anyway`);
         if (residualLengthOnlyIds.length > 0) {
           for (let i = 0; i < residualLengthOnlyIds.length; i++) bumpQuizDistractorLintLengthOnlyShipped();
-          console.log(`[quizGeneration] ℹ distractor-lint length-uniformity only on ${residualLengthOnlyIds.length} question(s) — shipping: ${residualLengthOnlyIds.join(', ')}`.gray);
+          genLog.info(`quiz:generate lint-length-only count=${residualLengthOnlyIds.length} ids=${residualLengthOnlyIds.join(',')} — shipping`);
         }
         break;
       }
       bumpQuizDistractorLintRetry();
-      console.warn(`[quizGeneration] ⚠ distractor-lint attempt ${lintAttempt}/${MAX_DISTRACTOR_LINT_ATTEMPTS} after repair — ${residualSummary}; retrying with feedback`.yellow);
+      genLog.warn(`quiz:generate lint-retry attempt=${lintAttempt}/${MAX_DISTRACTOR_LINT_ATTEMPTS} residual=${residualSummary} — retrying with feedback`);
       lintFeedback = buildDistractorLintFeedback({ questions: attempted.questions, violations: residualActionable });
     }
 
@@ -346,15 +371,16 @@ export const quizGeneration = async (state: QuizState): Promise<Partial<QuizStat
     if (totalStrips > 0) {
       bumpArtifactScrubStrips(totalStrips);
       for (let i = 0; i < totalGutted; i++) bumpArtifactScrubGutted();
-      console.warn(`[quizGeneration] ⚠ Artifact scrub: ${totalStrips} meta-phrase(s) removed${totalGutted > 0 ? `, ${totalGutted} explanation(s) gutted → fallback used` : ''}`.yellow);
+      genLog.warn(`quiz:generate artifact-scrub strips=${totalStrips} gutted=${totalGutted}`);
     }
 
     const shuffledQuestions = sanitizedQuestions.map((question) => shuffleQuizOptions({ question }));
 
-    console.log(`[quizGeneration] ✓ ${shuffledQuestions.length} questions generated`.green);
+    genLog.info(`quiz:generate done questions=${shuffledQuestions.length} ms=${Date.now() - quizStart}`);
     return { questions: shuffledQuestions };
   } catch (e) {
-    console.error(`[quizGeneration] ✗ Failed: ${e instanceof Error ? e.message : e}`.red);
+    const reason = e instanceof Error ? e.message : String(e);
+    genLog.error(`quiz:generate fail module="${state.moduleName}" reason=${reason}`);
     throw e;
   }
 };

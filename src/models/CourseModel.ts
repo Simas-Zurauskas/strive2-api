@@ -1,5 +1,14 @@
 import mongoose, { HydratedDocument, Schema, Types } from 'mongoose';
-import { COURSE_DOMAINS, COURSE_STATUSES, CourseDomain, CourseStatus } from '@lib/constants';
+import {
+  COURSE_DOMAINS,
+  COURSE_STATUSES,
+  CourseDomain,
+  CourseStatus,
+  GOAL_TYPES,
+  GOAL_TYPE_CONFIDENCES,
+  GoalType,
+  GoalTypeConfidence,
+} from '@lib/constants';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -10,8 +19,21 @@ export interface ICourse {
   status: CourseStatus;
   goal: string;
   domain: CourseDomain | null;
+  // Pre-flight classification by the clarify job; user-overridable via the
+  // ClarifyStep chip. Null on pre-feature courses (treated as `master`
+  // semantics by every reader). `goalTypeConfidence` is metadata only, used
+  // to log classifier skew and to gate a future "we're not sure — pick one"
+  // UX. User overrides set confidence to `high`.
+  goalType: GoalType | null;
+  goalTypeConfidence: GoalTypeConfidence | null;
   clarifyData: {
+    courseName?: string;
     questions: { id: string; question: string; type: string; options: string[] | null }[];
+    // Chip-label noun phrase derived by the goalType classifier (e.g. "your
+    // YouTube channel", "the CPA exam"). Verb is a static map per goalType
+    // on the client side. Lives on clarifyData so it gets cleared with a
+    // clarify regen.
+    goalTypeNoun?: string;
   } | null;
   answers: Record<string, unknown> | null;
   depth: string | null;
@@ -37,6 +59,17 @@ export interface ICourse {
   } | null;
   feedbackHistory: string[];
   pendingFeedback: string | null;
+  /**
+   * Structure-review chat opening prompts for the design-chat panel's
+   * empty state. Generated once per structure (and re-generated after
+   * each `modify_structure` tool run) via a Haiku call — see
+   * `generateDesignPrompts`. Optional + capped at 4 so a generation
+   * failure or a pre-feature course falls back gracefully to the
+   * hardcoded defaults baked into the client `ChatPanel`.
+   *
+   * Mirrors `LessonContent.suggestedMentorPrompts`.
+   */
+  suggestedDesignPrompts: string[];
   currentStep: number;
   activeJobId: Types.ObjectId | null;
   // Set whenever a `generate_lesson` job is submitted and cleared when the
@@ -80,6 +113,16 @@ const schema = new Schema<ICourse>(
       enum: [...COURSE_DOMAINS],
       default: null,
     },
+    goalType: {
+      type: String,
+      enum: [...GOAL_TYPES],
+      default: null,
+    },
+    goalTypeConfidence: {
+      type: String,
+      enum: [...GOAL_TYPE_CONFIDENCES],
+      default: null,
+    },
     clarifyData: {
       type: Schema.Types.Mixed,
       default: null,
@@ -113,6 +156,10 @@ const schema = new Schema<ICourse>(
       type: String,
       default: null,
       maxlength: 5000,
+    },
+    suggestedDesignPrompts: {
+      type: [{ type: String, maxlength: 200 }],
+      default: [],
     },
     currentStep: { type: Number, default: 1 },
     activeJobId: {

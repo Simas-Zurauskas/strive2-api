@@ -1,6 +1,7 @@
 import Mailjet from 'node-mailjet';
 import * as Sentry from '@sentry/node';
 import { MAILJET_API_KEY, MAILJET_API_SECRET, FRONTEND_URL } from '@conf/env';
+import { integrationLog } from '@lib/loggers';
 
 export const SENDER_EMAIL_ACCOUNT = 'accounts@strive-learning.com';
 
@@ -17,7 +18,11 @@ const mailjet = new Mailjet({
  */
 export const sendVerificationEmail = async (params: { to: string; token: string }): Promise<void> => {
   const { to, token } = params;
-  const verificationUrl = `${FRONTEND_URL}/verify-email?token=${token}&email=${encodeURIComponent(to)}`;
+  // The verification URL only needs the token — the server looks the
+  // user up by the hashed token directly, so the email address adds no
+  // information and removes a small leakage surface (URL stored in
+  // browser history, referer headers, downstream mail-relay logs).
+  const verificationUrl = `${FRONTEND_URL}/verify-email?token=${token}`;
 
   await mailjet.post('send', { version: 'v3.1' }).request({
     Messages: [
@@ -81,16 +86,14 @@ export const sendVerificationEmailAsync = (params: { to: string; token: string }
       try {
         await sendVerificationEmail(params);
         if (attempt > 0) {
-          console.log(
-            `[email] Verification email to ${params.to} succeeded on retry ${attempt}`.cyan,
-          );
+          integrationLog.info(`mailjet:send ok template=verify to=${params.to} attempt=${attempt}`);
         }
         return;
       } catch (err) {
         lastError = err;
         const message = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[email] Verification email attempt ${attempt + 1} to ${params.to} failed: ${message}`.yellow,
+        integrationLog.warn(
+          `mailjet:send fail template=verify to=${params.to} attempt=${attempt + 1}/${delays.length + 1} reason=${message}`,
         );
 
         if (attempt < delays.length) {
@@ -102,8 +105,8 @@ export const sendVerificationEmailAsync = (params: { to: string; token: string }
     // Exhausted retries — record as a breadcrumb so ops sees the trend.
     // The end user can still self-recover via the resend-verification
     // endpoint; we don't surface this failure to them.
-    console.error(
-      `[email] Verification email to ${params.to} failed after ${delays.length + 1} attempts`.red,
+    integrationLog.error(
+      `mailjet:send exhausted template=verify to=${params.to} attempts=${delays.length + 1}`,
     );
     Sentry.captureException(lastError, {
       tags: { email_delivery: 'verification' },
@@ -170,16 +173,14 @@ export const sendPasswordResetEmailAsync = (params: { to: string; token: string 
       try {
         await sendPasswordResetEmail(params);
         if (attempt > 0) {
-          console.log(
-            `[email] Password-reset email to ${params.to} succeeded on retry ${attempt}`.cyan,
-          );
+          integrationLog.info(`mailjet:send ok template=password-reset to=${params.to} attempt=${attempt}`);
         }
         return;
       } catch (err) {
         lastError = err;
         const message = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[email] Password-reset email attempt ${attempt + 1} to ${params.to} failed: ${message}`.yellow,
+        integrationLog.warn(
+          `mailjet:send fail template=password-reset to=${params.to} attempt=${attempt + 1}/${delays.length + 1} reason=${message}`,
         );
 
         if (attempt < delays.length) {
@@ -188,12 +189,117 @@ export const sendPasswordResetEmailAsync = (params: { to: string; token: string 
       }
     }
 
-    console.error(
-      `[email] Password-reset email to ${params.to} failed after ${delays.length + 1} attempts`.red,
+    integrationLog.error(
+      `mailjet:send exhausted template=password-reset to=${params.to} attempts=${delays.length + 1}`,
     );
     Sentry.captureException(lastError, {
       tags: { email_delivery: 'password_reset' },
       extra: { to: params.to, attempts: delays.length + 1 },
+    });
+  });
+};
+
+// ── Security-action one-time codes ──────────────────────────────
+//
+// Sends a 6-digit code that the user must re-enter to authorise a sensitive
+// account action (password change, account deletion). The code is the only
+// gate when a stolen JWT or unattended-device session is used to attempt
+// the action — the attacker can't read the legitimate user's email, so
+// they can't complete the action.
+
+const ACTION_COPY: Record<string, { subject: string; verb: string; warning: string }> = {
+  set_password: {
+    subject: 'Confirm setting a password',
+    verb: 'set a password on your account',
+    warning: 'If you did NOT request to set a password, ignore this email and consider signing out of all sessions from your account settings.',
+  },
+  change_password: {
+    subject: 'Confirm your password change',
+    verb: 'change your password',
+    warning: 'If you did NOT request a password change, ignore this email and consider signing out of all sessions from your account settings.',
+  },
+  delete_account: {
+    subject: 'Confirm account deletion',
+    verb: 'permanently delete your account',
+    warning: 'If you did NOT request to delete your account, ignore this email and consider signing out of all sessions from your account settings — someone may have access to your device or token.',
+  },
+};
+
+export const sendSecurityActionCode = async (params: {
+  to: string;
+  action: 'set_password' | 'change_password' | 'delete_account';
+  code: string;
+  expiresInMinutes: number;
+}): Promise<void> => {
+  const copy = ACTION_COPY[params.action];
+  await mailjet.post('send', { version: 'v3.1' }).request({
+    Messages: [
+      {
+        From: { Email: SENDER_EMAIL_ACCOUNT, Name: 'Strive' },
+        To: [{ Email: params.to }],
+        Subject: copy.subject,
+        HTMLPart: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+            <h1 style="font-size: 24px; font-weight: 700; color: #111827; margin-bottom: 16px;">
+              Confirmation code
+            </h1>
+            <p style="font-size: 15px; color: #4b5563; line-height: 1.6; margin-bottom: 24px;">
+              Enter this 6-digit code in Strive to ${copy.verb}:
+            </p>
+            <div style="font-family: 'SF Mono', 'Menlo', monospace; font-size: 32px; letter-spacing: 8px; font-weight: 700; color: #111827; padding: 16px 24px; background: #f3f4f6; border-radius: 8px; text-align: center;">
+              ${params.code}
+            </div>
+            <p style="font-size: 13px; color: #9ca3af; line-height: 1.6; margin-top: 32px;">
+              This code expires in ${params.expiresInMinutes} minutes. ${copy.warning}
+            </p>
+          </div>
+        `,
+        TextPart: `Confirmation code\n\nEnter this 6-digit code in Strive to ${copy.verb}:\n\n${params.code}\n\nThis code expires in ${params.expiresInMinutes} minutes.\n\n${copy.warning}`,
+      },
+    ],
+  });
+};
+
+/**
+ * Fire-and-forget version of `sendSecurityActionCode` with the same retry
+ * harness as the other transactional emails. The user-facing flow blocks
+ * on the request route returning 200, then waits for the email to arrive —
+ * so a slow Mailjet send is OK. We still don't block the HTTP response on
+ * the round-trip itself.
+ */
+export const sendSecurityActionCodeAsync = (params: {
+  to: string;
+  action: 'set_password' | 'change_password' | 'delete_account';
+  code: string;
+  expiresInMinutes: number;
+}): void => {
+  setImmediate(async () => {
+    const delays = [1_000, 4_000, 16_000];
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      try {
+        await sendSecurityActionCode(params);
+        if (attempt > 0) {
+          integrationLog.info(`mailjet:send ok template=security-action action=${params.action} to=${params.to} attempt=${attempt}`);
+        }
+        return;
+      } catch (err) {
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        integrationLog.warn(
+          `mailjet:send fail template=security-action action=${params.action} to=${params.to} attempt=${attempt + 1}/${delays.length + 1} reason=${message}`,
+        );
+        if (attempt < delays.length) {
+          await new Promise((r) => setTimeout(r, delays[attempt]));
+        }
+      }
+    }
+    integrationLog.error(
+      `mailjet:send exhausted template=security-action action=${params.action} to=${params.to} attempts=${delays.length + 1}`,
+    );
+    Sentry.captureException(lastError, {
+      tags: { email_delivery: 'security_action' },
+      extra: { to: params.to, action: params.action, attempts: delays.length + 1 },
     });
   });
 };

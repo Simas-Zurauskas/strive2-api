@@ -72,6 +72,7 @@ const LESSON_DOMAIN_LABELS: Record<CourseDomain, string> = {
   creative: '**creative**',
   business: '**business** (management, marketing, product, sales, strategy, PM, personal finance)',
   practical: '**practical** (trades, crafts, cooking, gardening, home repair, applied fitness)',
+  'practical-ai': '**practical-ai** (prompt engineering, no-code AI workflows, n8n/Zapier/Make, agent recipes, RAG/chatbot assembly, AI as a tool for marketing/ops/research/creative)',
   'life-skills': '**life-skills** (communication, public speaking, productivity, career, soft skills)',
   other: '**other**',
 };
@@ -89,6 +90,7 @@ const LESSON_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
   creative: PROSE_ONLY_LESSON_BRANCH,
   business: `ZERO code blocks. Prose-driven with frameworks (OKRs, Porter, RACI, 4Ps, AARRR) shown inline when relevant. Use markdown pipe-tables for trade-off comparisons and option analysis. Mermaid for decision trees, stakeholder influence maps, and org/process diagrams. LaTeX only for specific quant concepts (ROI, NPV, break-even, unit economics) — default to prose + numbers. Callouts: "warning" for common management anti-patterns, "important" for non-negotiable operating principles.`,
   practical: `ZERO code blocks, ZERO LaTeX. Prose-driven with EXPLICIT procedural step lists (numbered markdown), a tools/materials enumeration in a callout BEFORE the procedure, and "warning" callouts flagging safety-critical or timing-critical steps. Mermaid for decision flows ("if the dough is sticky → …"), never for decoration. Use "important" callouts for no-skip steps; units (°F, cups, mm, grit) in prose.`,
+  'practical-ai': `Code blocks ALLOWED but ONLY for verbatim copy-paste artifacts the learner will OPERATE, not software they will write — full prompt text (set \`metadata.language: "text"\` or \`"markdown"\`, ALWAYS \`executable: false\`), tool config snippets (n8n JSON, agent YAML, function-calling schemas). Prefer numbered procedural lists for tool-clicking steps, pipe-tables for model/tool selection trade-offs (cost, latency, context window, strengths), and "warning" callouts for hallucination, prompt-injection, PII leakage, and runaway-cost traps. Mermaid welcome for agent decision flows and tool-routing graphs. ZERO LaTeX.`,
   'life-skills': `ZERO code blocks, ZERO LaTeX. Prose-driven with scripted example dialogs (before/after pairs showing an anti-pattern then the improved version), self-assessment rubrics as markdown tables, and reflective prompts woven into sections. Mermaid for decision flows in interpersonal scenarios ("if they push back on X → …"). Callouts: "tip" for phrasings that work, "warning" for phrasings that backfire.`,
   other: PROSE_ONLY_LESSON_BRANCH,
 };
@@ -256,6 +258,7 @@ const INTERACTIVE_DOMAIN_LABELS: Record<CourseDomain, string> = {
   creative: '**creative**',
   business: '**business** (management, marketing, product, sales, strategy, PM, personal finance)',
   practical: '**practical** (trades, crafts, cooking, gardening, home repair, applied fitness)',
+  'practical-ai': '**practical-ai** (prompt engineering, no-code AI workflows, n8n/Zapier/Make, agent recipes, RAG/chatbot assembly, AI as a tool for marketing/ops/research/creative)',
   'life-skills': '**life-skills** (communication, public speaking, productivity, career, soft skills)',
   other: '**other**',
 };
@@ -272,6 +275,7 @@ const INTERACTIVE_DOMAIN_BRANCHES: Record<CourseDomain, string> = {
   creative: THOUGHT_EXERCISE_INTERACTIVE_BRANCH,
   business: "THOUGHT exercise (`metadata: null`). Give a realistic case vignette: a named role (VP of Product, team lead, CFO) at a sized company, a specific decision with constraints (budget, timeline, stakeholder pushback). Ask the learner to APPLY a framework from the lesson, WRITE a brief recommendation or decision memo, or ANALYZE the trade-offs between 2–3 concrete options. Avoid multiple-choice format here; the module quiz handles that.",
   practical: "THOUGHT exercise (`metadata: null`). Either a PLANNING task (design a cut list for a 60-inch dining table given only a circular saw and router; plan a shopping list for 4 pounds of sourdough) OR a DIAGNOSTIC task (given a described failure — 'the dough is sticky and won't hold shape', 'the cabinet door binds on the top corner' — identify which step likely went wrong and how to recover). Scenarios reference the tools and materials the learner said they have.",
+  'practical-ai': "THOUGHT exercise (`metadata: null`). Pick ONE: a PROMPT-DESIGN task ('write a system + user prompt that extracts {fields} from {input shape} and returns valid JSON; state your role/format/constraints'), a DIAGNOSTIC task (here is a failing prompt or agent trace — name the failure mode from the lesson's taxonomy and rewrite/repair it), OR a WORKFLOW-DESIGN task ('sketch an n8n / Zapier / agent flow for {goal}: list nodes, the model on each LLM step, termination condition, and the one eval you'd run before shipping'). Scenarios reference the tools the learner uses (ChatGPT, Claude, n8n, Zapier, Make, custom GPTs).",
   'life-skills': "THOUGHT exercise (`metadata: null`). Pick ONE: a ROLEPLAY prompt (write a 4–8 line script for a specific scenario: 'respond to a direct report who just told you they're leaving'), a REWRITE-AND-CRITIQUE (here is a draft email / Slack message — critique it against the lesson's framework and rewrite it), OR a self-assessment against a rubric from the lesson with a follow-up reflection prompt.",
   other: THOUGHT_EXERCISE_INTERACTIVE_BRANCH,
 };

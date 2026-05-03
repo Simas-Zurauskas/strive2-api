@@ -1,20 +1,5 @@
 import * as Sentry from '@sentry/node';
-
-/**
- * Log-color convention across api/src (uses the `colors` package's
- * String.prototype extensions):
- *   .red    — genuine terminal error: thrown, 5xx, process exit, or a
- *             fire-and-forget failure captured to Sentry. Paired with
- *             `console.error` or `bgError(...)`.
- *   .yellow — recoverable warning: retry fired, soft-fail, degraded output
- *             shipped, feature disabled, cap exceeded but proceeding.
- *             Paired with `console.warn`.
- *
- * If a caller catches and continues (ships partial/fallback output), the
- * log is yellow even when it describes a failure. Red is reserved for
- * paths the system cannot recover from — it should track 1:1 with things
- * Sentry cares about.
- */
+import { lifecycleLog } from '@lib/loggers';
 
 /**
  * Canonical error handler for fire-and-forget background operations.
@@ -30,7 +15,8 @@ import * as Sentry from '@sentry/node';
  *     .catch(bgError('gamification.onLessonComplete'));
  *
  * The returned handler:
- *   - logs a single red line to stdout with the context label and message,
+ *   - logs one error line on `lifecycleLog` (cross-cutting fire-and-forget
+ *     channel — not bound to a single domain), tagged with the context label,
  *   - captures the error in Sentry tagged with `background_task: <context>`
  *     so dashboards can group recurring bg failures separately from
  *     request-path errors.
@@ -40,6 +26,6 @@ import * as Sentry from '@sentry/node';
  */
 export const bgError = (context: string) => (err: unknown): void => {
   const message = err instanceof Error ? err.message : String(err);
-  console.error(`[bg:${context}] ${message}`.red);
+  lifecycleLog.error(`bg:${context} ${message}`);
   Sentry.captureException(err, { tags: { background_task: context } });
 };

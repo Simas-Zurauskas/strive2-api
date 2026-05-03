@@ -13,6 +13,7 @@ import {
   STRIPE_PRICE_ID_STUDIO_ANNUAL,
   STRIPE_PRICE_ID_STUDIO_MONTHLY,
   STRIPE_SECRET_KEY,
+  STRIPE_TAX_ENABLED,
 } from '@conf/env';
 import UserModel from '@models/UserModel';
 import {
@@ -21,7 +22,7 @@ import {
   TOPUP_MAX_USD,
   TOPUP_MIN_USD,
 } from '@lib/creditPricing';
-import { monetization } from '@lib/loggers';
+import { monetizationLog } from '@lib/loggers';
 
 // ── Client singleton ──────────────────────────────────────
 
@@ -124,11 +125,11 @@ export const ensureStripeCustomer = async ({ userId }: { userId: string }): Prom
     // created will sit in Stripe unused — acceptable since customers are
     // free to create.
     const winner = await UserModel.findById(userId).select('subscription.stripeCustomerId').lean();
-    monetization.warn(`Race creating Stripe customer for user=${userId}, orphaned ${customer.id}`);
+    monetizationLog.warn(`Race creating Stripe customer for user=${userId}, orphaned ${customer.id}`);
     return winner?.subscription?.stripeCustomerId ?? customer.id;
   }
 
-  monetization.info(`Stripe customer created: user=${userId} customer=${customer.id}`);
+  monetizationLog.info(`Stripe customer created: user=${userId} customer=${customer.id}`);
   return customer.id;
 };
 
@@ -220,9 +221,19 @@ export const createSubscriptionCheckout = async ({
     line_items: [{ price: priceId, quantity: 1 }],
     success_url: buildSuccessUrl({ kind: 'subscription' }),
     cancel_url: buildCancelUrl(),
-    // Tax + automatic address collection are gated on Stripe Tax enabled
-    // for the account. Turn these on in Phase 5 once Stripe Tax is live.
-    automatic_tax: { enabled: false },
+    // Stripe Tax computes VAT automatically based on the customer's address.
+    // Required for EU consumer sales (OSS rules from euro one). Toggled by
+    // STRIPE_TAX_ENABLED env so dev / testing accounts without Stripe Tax
+    // configured don't 400 every checkout.
+    automatic_tax: { enabled: STRIPE_TAX_ENABLED },
+    // Address collection is required when tax is on (Stripe needs the
+    // country to pick the right VAT rate) and is harmless otherwise.
+    billing_address_collection: STRIPE_TAX_ENABLED ? 'required' : 'auto',
+    // Persist the collected address on the Customer record so subsequent
+    // top-ups / portal sessions inherit it. `tax_id` lets B2B customers
+    // enter a VAT id that Stripe Tax then validates and exempts.
+    customer_update: STRIPE_TAX_ENABLED ? { address: 'auto', name: 'auto' } : undefined,
+    tax_id_collection: STRIPE_TAX_ENABLED ? { enabled: true } : undefined,
     metadata: {
       userId,
       planKey: plan,
@@ -238,7 +249,7 @@ export const createSubscriptionCheckout = async ({
       },
     },
   });
-  monetization.info(
+  monetizationLog.info(
     `Subscription checkout started: user=${userId} plan=${plan}/${cadence}${replacingSubscriptionId ? ` replacing=${replacingSubscriptionId}` : ''}`,
   );
   return session;
@@ -304,7 +315,11 @@ export const createTopupCheckout = async ({
     // Canceled top-up sends user back to where they probably clicked from —
     // the Billing tab under Profile.
     cancel_url: `${FRONTEND_URL}/profile?tab=billing`,
-    automatic_tax: { enabled: false },
+    // Same Stripe Tax stance as subscription checkout. See note there.
+    automatic_tax: { enabled: STRIPE_TAX_ENABLED },
+    billing_address_collection: STRIPE_TAX_ENABLED ? 'required' : 'auto',
+    customer_update: STRIPE_TAX_ENABLED ? { address: 'auto', name: 'auto' } : undefined,
+    tax_id_collection: STRIPE_TAX_ENABLED ? { enabled: true } : undefined,
     // Two metadata scopes. Session metadata is read by
     // `checkout.session.completed`; PaymentIntent metadata follows the
     // charge through any future refund so we can claw back credits
@@ -314,7 +329,7 @@ export const createTopupCheckout = async ({
       metadata: { userId, flow: 'topup', credits: String(credits), amountUsd: String(amountUsd) },
     },
   });
-  monetization.info(
+  monetizationLog.info(
     `Top-up checkout started: user=${userId} credits=${credits} amount=$${amountUsd}`,
   );
   return session;
@@ -437,7 +452,7 @@ export const scheduleSubscriptionDowngrade = async ({
     proration_behavior: 'none',
   });
 
-  monetization.info(
+  monetizationLog.info(
     `Downgrade requested: user=${userId} ${currentPlan}→${plan}/${cadence} applies at ${periodEnd?.toISOString() ?? '(unknown)'}`,
   );
   return { periodEnd, scheduledPlan: plan };
@@ -483,7 +498,7 @@ export const scheduleSubscriptionCancellation = async ({
   const periodEndSeconds = updated.items.data[0]?.current_period_end;
   const periodEnd = typeof periodEndSeconds === 'number' ? new Date(periodEndSeconds * 1000) : null;
 
-  monetization.info(
+  monetizationLog.info(
     `Cancellation requested: user=${userId} subscription=${subId} ends=${periodEnd?.toISOString() ?? '(unknown)'}`,
   );
   return { periodEnd };
@@ -549,12 +564,12 @@ export const cancelAllSubscriptionsForCustomer = async ({
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (code === 'resource_missing') continue;
-      monetization.warn(
+      monetizationLog.warn(
         `Failed to cancel ${s.id} during account deletion: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
-  monetization.info(
+  monetizationLog.info(
     `Cancelled ${canceled}/${cancellable.length} subscription(s) on customer ${customerId} during account deletion`,
   );
   return canceled;

@@ -30,6 +30,48 @@ export const protect = asyncHandler(async (req: Request, res: Response, next: Ne
   next();
 });
 
+/**
+ * Soft-auth: attach `req.userId` if a valid bearer token is present, but
+ * never reject the request. Designed for surfaces that are public to
+ * anonymous visitors AND benefit from per-user attribution when a session
+ * exists — e.g. the product-KB chat (free for everyone, but rate-limit
+ * + usage telemetry should bind to the user when one is signed in).
+ *
+ * Failures in any step (no header, malformed header, invalid token, missing
+ * user, stale tokenVersion) all fall through silently to anonymous mode.
+ * Errors loading the user are swallowed for the same reason: the worst
+ * case is "treated as anonymous", never a 5xx on a public surface.
+ */
+export const optionalProtect = asyncHandler(
+  async (req: Request, _res: Response, next: NextFunction) => {
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) {
+      next();
+      return;
+    }
+    const token = header.split(' ')[1];
+    if (!token) {
+      next();
+      return;
+    }
+    const decoded = decodeAuthToken(token);
+    if (!decoded?.id) {
+      next();
+      return;
+    }
+    try {
+      const user = await UserModel.findById(decoded.id).select('tokenVersion').lean();
+      if (user && decoded.tokenVersion === user.tokenVersion) {
+        req.userId = decoded.id;
+      }
+    } catch {
+      // Stay anonymous on any DB error — public surfaces should never 5xx
+      // because of an auth-attribution lookup.
+    }
+    next();
+  },
+);
+
 // Gates feature routes (course, gamification, insight, …) behind email
 // verification for credential-based accounts. `protect` stays JWT-only so
 // /me, /logout, /resend-verification-authenticated, /delete-account remain

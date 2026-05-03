@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import asyncHandler from 'express-async-handler';
 import { InsufficientCreditsError, getBalance } from '@services/creditService';
-import { monetization } from '@lib/loggers';
+import { monetizationLog } from '@lib/loggers';
 
 /**
  * Gate for credit-metered endpoints. The user may start ANY action as long
@@ -22,7 +22,7 @@ export const requireCredits = () => asyncHandler(async (req: Request, _res: Resp
 
   const balance = await getBalance(userId);
   if (balance.total < 1) {
-    monetization.info(
+    monetizationLog.info(
       `Credit gate blocked: user=${userId} balance=${balance.total} path=${req.method} ${req.originalUrl}`,
     );
     throw new InsufficientCreditsError({ need: 1, have: balance.total });

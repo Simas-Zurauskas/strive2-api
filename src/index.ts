@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import 'tsconfig-paths/register';
+// IMPORTANT: Sentry init MUST come before any other module that participates
+// in instrumentation (express, http, mongoose). Importing this file runs
+// Sentry.init synchronously as a side-effect.
+import '@conf/sentry';
 import 'colors';
 import { createServer } from 'http';
 import connectDB from '@conf/mongo';
@@ -19,6 +23,7 @@ import { billingRoutes } from '@routes/billingRoutes';
 import { courseRoutes } from '@routes/courseRoutes';
 import { gamificationRoutes } from '@routes/gamificationRoutes';
 import { insightRoutes } from '@routes/insightRoutes';
+import { productKbRoutes } from '@routes/productKbRoutes';
 import { usageRoutes } from '@routes/usageRoutes';
 import { stripeWebhookController } from '@controlers/billing';
 import mongoose from 'mongoose';
@@ -27,8 +32,10 @@ import { initJobSocketBridge } from '@lib/jobSocketBridge';
 import { decodeAuthToken } from '@lib/auth';
 import { bumpRateLimitHit, renderMetrics } from '@lib/metrics';
 import { requestId } from '@middleware/requestId';
-import { jobLimit } from '@services/jobRunner';
+import { jobLimit, startStuckJobWatchdog, stopStuckJobWatchdog } from '@services/jobRunner';
+import { getVersionInfo } from '@conf/versionInfo';
 import { printGraphImages } from '@lib/ai/agents/printGraphImages';
+import { lifecycleLog } from '@lib/loggers';
 
 mt.tz.setDefault('UTC');
 
@@ -60,11 +67,7 @@ app.use(
 // `express.json()` would consume + re-serialize them first, breaking
 // verification. Mount the route here with its own `express.raw()` parser
 // BEFORE the global JSON parser below.
-app.post(
-  '/api/stripe/webhook',
-  express.raw({ type: 'application/json' }),
-  stripeWebhookController,
-);
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookController);
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -107,15 +110,15 @@ if (ENVIRONMENT !== 'development') {
         // uses `u:<userId>` and anon uses `i:<ip>`.
         bumpRateLimitHit();
         const key = (req as unknown as { rateLimit?: { key?: string } }).rateLimit?.key ?? 'unknown';
-        console.warn(`[rate_limit_hit] key=${key} path=${req.method} ${req.originalUrl}`.yellow);
+        lifecycleLog.warn(`rate-limit:hit key=${key} ${req.method} ${req.originalUrl}`);
         res.status(options.statusCode).json(options.message);
       },
     }),
   );
 }
 
-app.get('/', (req, res) => {
-  res.json({ service: 'Strive API', version: '1.0.0' });
+app.get('/version', (_req, res) => {
+  res.json(getVersionInfo());
 });
 
 // ── Health endpoints ─────────────────────────────────────
@@ -198,6 +201,7 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/course', courseRoutes);
 app.use('/api/gamification', gamificationRoutes);
 app.use('/api/insight', insightRoutes);
+app.use('/api/product-kb', productKbRoutes);
 app.use('/api/usage', usageRoutes);
 
 app.get('/swagger.json', (req, res) => {
@@ -233,8 +237,13 @@ initJobSocketBridge();
 // traffic never sees a partially-initialized system.
 connectDB().then(() => {
   server.listen(PORT, () => {
-    console.log(`Server running on: ${API_URL}`.bgCyan);
-    printGraphImages();
+    lifecycleLog.info(`boot:ready url=${API_URL} env=${ENVIRONMENT} port=${PORT}`);
+    // Watchdog must start AFTER the boot reaper has run (which is awaited
+    // inside `connectDB`). Otherwise the watchdog would race the reaper for
+    // the same `processing` rows. Starting it here also means tests can
+    // import jobRunner without spawning a background timer.
+    startStuckJobWatchdog();
+    // printGraphImages();
   });
 });
 
@@ -244,18 +253,22 @@ let shuttingDown = false;
 
 const gracefulShutdown = async (signal: string) => {
   if (shuttingDown) {
-    console.log(`\n[Shutdown] ${signal} received again, forcing exit`.red);
+    lifecycleLog.error(`shutdown:double-signal signal=${signal} — forcing exit`);
     process.exit(1);
   }
   shuttingDown = true;
 
-  console.log(`\n[Shutdown] ${signal} received, shutting down gracefully...`.yellow);
+  lifecycleLog.info(`shutdown:start signal=${signal}`);
+
+  // Stop the watchdog timer so a slow shutdown doesn't get a final tick that
+  // would race our drain logic.
+  stopStuckJobWatchdog();
 
   // Hard safety net: if anything below hangs (a driver op, a socket, a
   // background flush), kill the process anyway. `unref()` so the timer
   // itself does not keep the loop alive.
   const hardKill = setTimeout(() => {
-    console.log('[Shutdown] Hard timeout exceeded, killing process'.red);
+    lifecycleLog.error('shutdown:hard-timeout — killing process');
     process.exit(1);
   }, 130_000);
   hardKill.unref();
@@ -275,20 +288,61 @@ const gracefulShutdown = async (signal: string) => {
   const drainTimeout = 120_000; // Lesson generation takes 60-120s
   const start = Date.now();
   while (jobLimit.activeCount > 0 && Date.now() - start < drainTimeout) {
-    console.log(`[Shutdown] Waiting for ${jobLimit.activeCount} active job(s) to finish...`.yellow);
+    lifecycleLog.info(`shutdown:drain active=${jobLimit.activeCount} elapsed=${Date.now() - start}ms`);
     await new Promise((r) => setTimeout(r, 1000));
   }
 
   if (jobLimit.activeCount > 0) {
-    console.log(`[Shutdown] ${jobLimit.activeCount} job(s) still running after timeout, forcing exit`.red);
+    lifecycleLog.error(`shutdown:drain-timeout active=${jobLimit.activeCount} — forcing exit`);
   }
 
   await mongoose.connection.close();
-  console.log('[Shutdown] MongoDB connection closed'.cyan);
+  lifecycleLog.info('mongo:disconnect');
 
+  lifecycleLog.info(`shutdown:done signal=${signal} elapsed=${Date.now() - start}ms`);
   clearTimeout(hardKill);
   process.exit(0);
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// ── Process-level exception handlers ────────────────────
+//
+// `uncaughtException`: Node's exit semantics are unsafe-by-default — without
+//   a handler the process crashes immediately with no Sentry capture and no
+//   structured log line. WITH a handler, Node leaves the process running in
+//   an undefined state, which is also bad. The right policy is "log + capture
+//   + drain Sentry + exit non-zero so the orchestrator restarts a clean
+//   process". The 2s drain budget matches Sentry.flush defaults.
+//
+// `unhandledRejection`: less severe — we log + capture but don't exit.
+//   Promise rejections are usually recoverable (transient vendor outage,
+//   SDK bug), and exiting on every one makes the service flap on flaky
+//   networks. Set `--unhandled-rejections=strict` if a future Node version
+//   behaviour changes that policy.
+//
+// Note `googleTtsService.ts:18-25` calls out a known landmine: google-gax's
+// metadata-server probe rejects asynchronously and escapes user-level
+// try/catch. This handler is the safety net for that and similar SDK quirks.
+process.on('uncaughtException', (err: Error) => {
+  lifecycleLog.error(`uncaughtException ${err?.stack ?? err}`);
+  try {
+    Sentry.captureException(err, { tags: { fatal: 'uncaughtException' } });
+  } catch {
+    // Swallow — we're already in a fatal path.
+  }
+  Sentry.close(2_000)
+    .catch(() => undefined)
+    .finally(() => process.exit(1));
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  lifecycleLog.error(`unhandledRejection ${err.stack ?? err.message}`);
+  try {
+    Sentry.captureException(err, { tags: { fatal: 'unhandledRejection' } });
+  } catch {
+    // Swallow — same reason.
+  }
+});

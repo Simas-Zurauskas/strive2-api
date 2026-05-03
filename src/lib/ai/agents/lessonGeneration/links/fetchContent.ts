@@ -3,6 +3,7 @@ import { JINA_API_KEY } from '@conf/env';
 import { bumpLinksFetchFailure } from '@lib/metrics';
 import { priceLlmUsage } from '@lib/pricing';
 import { recordUsage } from '@services/usageService';
+import { genLog } from '@lib/loggers';
 import { FetchedCandidate, SearchCandidate } from './schemas';
 
 const JINA_READER_BASE = 'https://r.jina.ai/';
@@ -139,6 +140,6 @@ export const fetchCandidateContent = async ({
   const limit = pLimit(CONCURRENCY);
   const results = await Promise.all(candidates.map((c) => limit(() => fetchOne(c))));
   const fetched = results.filter((r): r is FetchedCandidate => r !== null);
-  console.log(`[links.fetchContent] ✓ ${fetched.length} of ${candidates.length} fetched via Jina`.cyan);
+  genLog.info(`links:fetch fetched=${fetched.length}/${candidates.length} via=jina`);
   return fetched;
 };

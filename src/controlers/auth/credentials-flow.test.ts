@@ -149,7 +149,7 @@ describe('verifyEmailController', () => {
     });
 
     const { req, res, status } = buildReqRes({
-      body: { token: plainToken, email: 'verify@example.com' },
+      body: { token: plainToken },
     });
     await invokeController(verifyEmailController, req, res);
     expect(status).toHaveBeenCalledWith(200);
@@ -169,7 +169,7 @@ describe('verifyEmailController', () => {
       emailVerificationExpiry: new Date(Date.now() - 1000),
     });
     const { req, res, status } = buildReqRes({
-      body: { token: plainToken, email: 'expired@example.com' },
+      body: { token: plainToken },
     });
     let caught: unknown;
     try {
@@ -190,7 +190,7 @@ describe('verifyEmailController', () => {
       emailVerificationExpiry: new Date(Date.now() + 60_000),
     });
     const { req, res, status } = buildReqRes({
-      body: { token: 'fake-token-123', email: 'wrong-token@example.com' },
+      body: { token: 'fake-token-123' },
     });
     let caught: unknown;
     try {
@@ -202,10 +202,24 @@ describe('verifyEmailController', () => {
     expect((caught as { errorCode?: string }).errorCode).toBe('EMAIL_VERIFICATION_INVALID');
   });
 
-  test('already verified → 400 EMAIL_ALREADY_VERIFIED', async () => {
-    await makeUser({ email: 'av@example.com', emailVerified: true });
+  test('already-verified user with active token → 400 EMAIL_ALREADY_VERIFIED', async () => {
+    // Realistic scenario: user verifies → success clears their token →
+    // a `resendVerification` (or admin re-issue) creates a new token →
+    // user clicks the new link expecting to re-verify. The token-lookup
+    // succeeds; the controller returns ALREADY_VERIFIED. Old behaviour
+    // (lookup by email) covered the post-clear case too, but in the new
+    // hash-only lookup that case becomes INVALID — which is acceptable
+    // since a stale link with no DB referent is genuinely indistinguish-
+    // able from a forged token.
+    const { plainToken, hashedToken } = generateVerificationToken();
+    await makeUser({
+      email: 'av@example.com',
+      emailVerified: true,
+      emailVerificationToken: hashedToken,
+      emailVerificationExpiry: new Date(Date.now() + 60_000),
+    });
     const { req, res, status } = buildReqRes({
-      body: { token: 'whatever', email: 'av@example.com' },
+      body: { token: plainToken },
     });
     let caught: unknown;
     try {
@@ -217,9 +231,9 @@ describe('verifyEmailController', () => {
     expect((caught as { errorCode?: string }).errorCode).toBe('EMAIL_ALREADY_VERIFIED');
   });
 
-  test('unknown email → 400 EMAIL_VERIFICATION_INVALID (not 404 — enum safety)', async () => {
+  test('unknown token → 400 EMAIL_VERIFICATION_INVALID', async () => {
     const { req, res, status } = buildReqRes({
-      body: { token: 'whatever', email: 'noone@example.com' },
+      body: { token: 'noone-issued-this' },
     });
     let caught: unknown;
     try {

@@ -1,3 +1,24 @@
+/**
+ * NOTE — split lines for the next maintainer.
+ *
+ * This file is ~660 LOC and mixes three concerns: queue mutation
+ * (enqueue / dequeue / mark-due), eligibility / fresh-pool gating
+ * (the `INSIGHT_QUEUE_FRESH_REASON` decision-tree logic), and Leitner
+ * scheduling (next-due interval bumps). The next change here should
+ * extract along this seam:
+ *
+ *   - `insightQueueMutationService.ts` — queue mutation entry points
+ *     (the public API: enqueue / dequeue / acknowledge).
+ *   - `insightSchedulingService.ts` — Leitner-v0 next-due bumps and
+ *     interval bookkeeping. Pure-ish logic, easy to unit-test.
+ *   - This file (renamed `insightQueueEligibility.ts`) — fresh-pool
+ *     gating + decision-tree counters that already drive the
+ *     `insight_queue_fresh_reason` metric.
+ *
+ * The split lines above respect the existing test boundary
+ * (`insightQueueService.test.ts`) — that test would need to follow
+ * whichever file holds the public API after the split.
+ */
 import mongoose, { Types } from 'mongoose';
 import InsightModel, { IInsight } from '@models/InsightModel';
 import UserInsightProgressModel, {

@@ -249,3 +249,93 @@ describe('requireVerified', () => {
     expect(res.status).toHaveBeenCalledWith(401);
   });
 });
+
+// ── optionalProtect — soft-auth helper ───────────────────
+//
+// Used by the public productKb chat surface (anonymous visitors allowed,
+// signed-in users get attribution). The contract is "never reject; attach
+// req.userId only when the bearer token is fully valid". Audit gap: this
+// path was previously untested even though it gates a paid LLM endpoint.
+
+import { optionalProtect } from '@middleware/authMiddleware';
+
+describe('optionalProtect', () => {
+  test('no Authorization header → next() with userId unset', async () => {
+    const { req, res, next } = buildReqRes();
+    await runMiddleware(optionalProtect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.userId).toBeUndefined();
+  });
+
+  test('non-Bearer scheme (Basic …) → next() with userId unset', async () => {
+    const { req, res, next } = buildReqRes({ authHeader: 'Basic dXNlcjpwYXNz' });
+    await runMiddleware(optionalProtect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.userId).toBeUndefined();
+  });
+
+  test('Bearer with empty token → next() with userId unset', async () => {
+    const { req, res, next } = buildReqRes({ authHeader: 'Bearer ' });
+    await runMiddleware(optionalProtect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.userId).toBeUndefined();
+  });
+
+  test('Bearer with garbage token → next() with userId unset (silent fall-through)', async () => {
+    const { req, res, next } = buildReqRes({ authHeader: 'Bearer not-a-jwt' });
+    await runMiddleware(optionalProtect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.userId).toBeUndefined();
+  });
+
+  test('valid Bearer token → next() with req.userId set', async () => {
+    const user = await makeUser({});
+    const token = generateAuthToken({ id: user._id.toString(), tokenVersion: user.tokenVersion });
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${token}` });
+    await runMiddleware(optionalProtect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.userId).toBe(user._id.toString());
+  });
+
+  test('valid token but stale tokenVersion (post-logout) → next() with userId unset', async () => {
+    const user = await makeUser({ tokenVersion: 0 });
+    // Token issued at v0; user's version bumped to 1 (e.g. via logout).
+    const stale = generateAuthToken({ id: user._id.toString(), tokenVersion: 0 });
+    await UserModel.updateOne({ _id: user._id }, { tokenVersion: 1 });
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${stale}` });
+    await runMiddleware(optionalProtect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.userId).toBeUndefined();
+  });
+
+  test('valid-shape token referencing a deleted user → next() with userId unset', async () => {
+    // 24-hex ObjectId that has no matching row.
+    const token = generateAuthToken({ id: 'aaaaaaaaaaaaaaaaaaaaaaaa', tokenVersion: 0 });
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${token}` });
+    await runMiddleware(optionalProtect, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.userId).toBeUndefined();
+  });
+
+  test('DB throw during user lookup → next() with userId unset (never 5xx)', async () => {
+    const token = generateAuthToken({ id: 'aaaaaaaaaaaaaaaaaaaaaaaa', tokenVersion: 0 });
+    const { req, res, next } = buildReqRes({ authHeader: `Bearer ${token}` });
+    // Force the lookup to throw — public surfaces should never propagate this.
+    const findByIdSpy = vi
+      .spyOn(UserModel, 'findById')
+      .mockReturnValueOnce({
+        select: () => ({ lean: () => Promise.reject(new Error('mongo down')) }),
+      } as never);
+    try {
+      await runMiddleware(optionalProtect, req, res, next);
+      expect(next).toHaveBeenCalledOnce();
+      expect(req.userId).toBeUndefined();
+    } finally {
+      findByIdSpy.mockRestore();
+    }
+  });
+
+  // assert is imported above; this tag-along call exists so the import isn't
+  // marked unused by linters when this block is the only consumer.
+  assert.equal(typeof optionalProtect, 'function');
+});

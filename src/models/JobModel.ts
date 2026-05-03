@@ -11,6 +11,11 @@ export interface IJob {
   error: string | null;
   metadata: Record<string, unknown> | null;
   completedAt: Date | null;
+  // Updated periodically while a job is `processing` so a watchdog can detect
+  // stuck jobs whose worker crashed without going through the usual
+  // `failJob` / `completeJob` exit paths. `null` for `pending` rows that
+  // haven't started yet.
+  lastHeartbeat: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -55,6 +60,10 @@ const schema = new Schema<IJob>(
       type: Date,
       default: null,
     },
+    lastHeartbeat: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -69,6 +78,9 @@ const schema = new Schema<IJob>(
 
 schema.index({ userId: 1, courseId: 1 });
 schema.index({ completedAt: 1 }, { expireAfterSeconds: 86400 }); // TTL: auto-delete 24h after completion
+// Watchdog sweep: find processing jobs whose lastHeartbeat is stale.
+// Sparse so pending/done rows (with null heartbeat) aren't indexed.
+schema.index({ status: 1, lastHeartbeat: 1 }, { sparse: true });
 
 // ── Model ──────────────────────────────────────────────────
 

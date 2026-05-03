@@ -11,6 +11,7 @@ import {
   NARRATION_RATE_MIN,
 } from '@lib/narration/voices';
 import { parseIndexParam } from './validation';
+import { ttsLog } from '@lib/loggers';
 
 const narrationSchema = z.object({
   voiceId: z
@@ -140,12 +141,10 @@ export const generateLessonNarrationController = asyncHandler(async (req, res) =
     }
   }
 
-  console.log(
-    `[narration] submitJob userId=${userId} courseId=${courseId} ` +
-    `mi=${moduleIndex} li=${lessonIndex} ` +
-    `bodyVoice=${voiceId ?? 'unset'} bodyRate=${rate ?? 'unset'} ` +
-    `→ resolvedVoice=${resolvedVoiceId ?? 'catalog-default'} ` +
-    `resolvedRate=${resolvedRate ?? 'catalog-default'}`.cyan,
+  ttsLog.info(
+    `request:submit userId=${userId} course=${courseId} module=${moduleIndex} lesson=${lessonIndex} ` +
+      `bodyVoice=${voiceId ?? 'unset'} bodyRate=${rate ?? 'unset'} ` +
+      `resolvedVoice=${resolvedVoiceId ?? 'catalog-default'} resolvedRate=${resolvedRate ?? 'catalog-default'}`,
   );
 
   const jobId = await submitJob({

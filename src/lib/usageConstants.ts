@@ -9,6 +9,8 @@
  */
 export const USAGE_SERVICES = [
   'anthropic', // Claude LLM calls (all models, all three SDKs)
+  'openai',    // OpenAI embeddings (lesson-RAG indexing + search query)
+  'pinecone',  // Pinecone vector store (lesson-RAG WU on upsert, RU on query)
   'bfl',       // Black Forest Labs — Flux Kontext Pro hero images
   'tavily',    // Tavily advanced web search
   'jina',      // Jina Reader — main-content extraction

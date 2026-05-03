@@ -41,9 +41,7 @@ import { createCourse } from '@services/courseDbService';
 export const createCourseController = asyncHandler(async (req, res) => {
   const { goal } = createCourseSchema.parse(req.body);
 
-  console.log(`[API] Creating course for user: ${req.userId} goal: ${goal}`.cyan);
   const course = await createCourse({ userId: req.userId!, goal });
-  console.log(`[API] Course created: ${course._id.toString()}`.green);
 
   res.status(200).json({ data: { courseId: course._id.toString() } });
 });

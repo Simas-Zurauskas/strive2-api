@@ -37,13 +37,11 @@ export const generateStructureController = asyncHandler(async (req, res) => {
   const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
-  console.log(`[API] Submitting generate structure job, courseId: ${courseId}`.cyan);
   const jobId = await submitJob({
     userId,
     courseId,
     type: 'generate_structure',
   });
-  console.log(`[API] Generate structure job submitted: ${jobId}`.green);
 
   res.status(202).json({ data: { jobId } });
 });

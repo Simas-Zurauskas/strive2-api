@@ -1,3 +1,25 @@
+/**
+ * NOTE — split lines for the next maintainer.
+ *
+ * This file is ~860 LOC and mixes five concerns: XP/leveling, badges
+ * (achievements), streaks, leaderboards, and profile reads. The next
+ * change here should extract along this seam:
+ *
+ *   - `gamificationCoreService.ts` — XP, levels, badges, streaks
+ *     (everything that MUTATES UserGamification on user actions).
+ *   - `gamificationProfileService.ts` — profile reads + leaderboard
+ *     queries (everything READ-ONLY for display).
+ *
+ * Keep XP / badge / streak shared types here or move to
+ * `lib/gamificationConstants.ts`. The two services don't currently
+ * share state beyond the model itself, so the split is mechanical —
+ * no cyclic-import hazard.
+ *
+ * Don't split unless you're already touching the file for an unrelated
+ * reason. Breaking up a stable file just for size is churn for no
+ * value; the marker exists to make the seam obvious when the next
+ * feature lands.
+ */
 import mongoose from 'mongoose';
 import UserGamificationModel, { IUserGamification } from '@models/UserGamificationModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
@@ -309,18 +331,37 @@ const checkAchievements = async ({
 
   for (const achievement of candidates) {
     const earned = await isAchievementEarned({ achievement, userObjId, context });
-    if (earned) {
-      doc.earnedAchievements.push({
-        achievementId: achievement.id,
-        earnedAt: new Date(),
-        metadata: context as Record<string, unknown>,
-      });
+    if (!earned) continue;
+
+    // Atomic per-achievement insert with a "not yet earned" filter. This
+    // replaces the prior `doc.earnedAchievements.push()` + `doc.save()` flow,
+    // which had a race window between two concurrent `checkAchievements`
+    // calls for the same user — both would load the doc, both push the same
+    // achievement, the second save would clobber the first or persist a
+    // duplicate row in the array. The `$ne` filter here guarantees at most
+    // one writer wins per (user, achievementId).
+    const result = await UserGamificationModel.updateOne(
+      {
+        userId: userObjId,
+        'earnedAchievements.achievementId': { $ne: achievement.id },
+      },
+      {
+        $push: {
+          earnedAchievements: {
+            achievementId: achievement.id,
+            earnedAt: new Date(),
+            metadata: context as Record<string, unknown>,
+          },
+        },
+      },
+    );
+
+    // modifiedCount === 1 → we won the race; modifiedCount === 0 → another
+    // concurrent caller already inserted this achievement. Both outcomes
+    // are correct; we only emit `newlyEarned` for the one we actually wrote.
+    if (result.modifiedCount === 1) {
       newlyEarned.push(achievement);
     }
-  }
-
-  if (newlyEarned.length > 0) {
-    await doc.save();
   }
 
   return newlyEarned;

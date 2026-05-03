@@ -1,5 +1,5 @@
-import 'colors';
 import type { UsageService } from '@lib/usageConstants';
+import { llmLog } from '@lib/loggers';
 
 /**
  * Single source of truth for how much every paid action costs us.
@@ -79,6 +79,18 @@ export const LLM_PRICING: Record<string, LlmPrice> = {
     cacheWrite1hMicroCentsPerMTok: 0,
     cacheReadMicroCentsPerMTok: 0,
   },
+  // OpenAI text-embedding-3-small — $0.02/1M input tokens. 1536 dims,
+  // sufficient quality for educational-content retrieval. We use it for
+  // lesson chunk indexing (write-side) AND mentor query embedding (read-side).
+  // Reconciled against https://openai.com/api/pricing/ on 2026-04-29.
+  // Unit: $0.02/MTok = 2¢/MTok = 20,000 μ¢/MTok.
+  'openai-text-embedding-3-small': {
+    inputMicroCentsPerMTok: 20_000,            // $0.02/M
+    outputMicroCentsPerMTok: 0,
+    cacheWrite5mMicroCentsPerMTok: 0,
+    cacheWrite1hMicroCentsPerMTok: 0,
+    cacheReadMicroCentsPerMTok: 0,
+  },
 };
 
 /**
@@ -98,6 +110,18 @@ export const SERVICE_PRICING = {
   bfl_flux_dev: { perUnitMicroCents: 25_000 },           // $0.025/image — the only BFL hero-image model we call
   tavily_search_advanced: { perUnitMicroCents: 16_000 }, // 2 credits × $0.008 PAYG = $0.016/query
   judge0_rapidapi: { perUnitMicroCents: 2_000 },         // $0.002/submission (RapidAPI Basic overage)
+  // Pinecone Standard plan (us-east region — lowest of $4-$4.50/M WU and $16-$18/M RU
+  // posted ranges). The $50/month plan minimum is a fixed overhead the platform
+  // eats; only variable WU/RU usage is allocated to user actions.
+  //
+  // - 1 WU = 1 KB of an upsert request, 5 WU minimum per request → recorded per upsert.
+  // - 1 RU = 1 GB of namespace size touched by a query, 0.25 RU minimum → recorded per
+  //   query. We default to the 0.25 RU minimum until namespace exceeds 0.25 GB; at
+  //   that point we'd want to fetch describeIndexStats() periodically and scale.
+  //
+  // Reconciled against pinecone.io/pricing on 2026-04-29.
+  pinecone_write_unit: { perUnitMicroCents: 4 },         // $4/M WU → 4 μ¢/WU
+  pinecone_read_unit: { perUnitMicroCents: 16 },         // $16/M RU → 16 μ¢/RU
 } as const;
 
 /**
@@ -150,7 +174,7 @@ export const priceLlmUsage = ({
   if (!price) {
     if (!warnedMissingModels.has(model)) {
       warnedMissingModels.add(model);
-      console.warn(`[pricing] no LLM_PRICING entry for model "${model}" — cost tracking will return 0 for this model until added`.yellow);
+      llmLog.warn(`pricing:missing-model model="${model}" — cost tracking returns 0 until added to LLM_PRICING`);
     }
     return 0;
   }
@@ -205,6 +229,8 @@ export const STATIC_MARKUP_SERVICES: ReadonlySet<UsageService> = new Set<UsageSe
   'jina',
   'bfl',
   'tts',
+  'openai',   // OpenAI embeddings — lesson-RAG indexing + mentor search queries
+  'pinecone', // Pinecone vector store — WU on upsert, RU on query
 ]);
 
 export const applyStaticMarkup = ({

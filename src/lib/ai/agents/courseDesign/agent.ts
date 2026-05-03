@@ -1,6 +1,7 @@
 import { AIMessage } from '@langchain/core/messages';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode } from '@langchain/langgraph/prebuilt';
+import { chatLog } from '@lib/loggers';
 import { chat, saveMessages } from './nodes';
 import { StateAnnotation, State } from './state';
 import { TOOLS } from './tools';
@@ -12,13 +13,14 @@ import { NodeFunction } from './types';
 const baseToolNode = new ToolNode(TOOLS);
 
 const toolsWithStateUpdate: NodeFunction = async (state, config) => {
-  console.log('[agent:tools] ── Executing tools ──'.cyan);
+  const toolsStart = Date.now();
+  chatLog.info('design:tool batch start');
   const result = await baseToolNode.invoke(state, config);
   const resultMessages = result.messages ?? [];
 
   resultMessages.forEach((msg: { name?: string; content?: unknown }, i: number) => {
-    const content = String(msg.content ?? '').slice(0, 150);
-    console.log(`[agent:tools]   result[${i}]: name=${msg.name ?? '?'} content=${content}`.gray);
+    const contentLen = String(msg.content ?? '').length;
+    chatLog.info(`design:tool result[${i}] name=${msg.name ?? '?'} content=${contentLen}c`);
   });
 
   // Check if modify_structure was called and succeeded
@@ -27,7 +29,9 @@ const toolsWithStateUpdate: NodeFunction = async (state, config) => {
       try {
         const parsed = JSON.parse(String(msg.content));
         if (parsed.success && parsed.modules) {
-          console.log(`[agent:tools] ✓ modify_structure succeeded — ${parsed.modules.length} modules`.green);
+          chatLog.info(
+            `design:tool batch done ms=${Date.now() - toolsStart} — modify_structure ok modules=${parsed.modules.length}`,
+          );
           return {
             ...result,
             currentStructure: { modules: parsed.modules, reasoning: parsed.reasoning },
@@ -35,13 +39,18 @@ const toolsWithStateUpdate: NodeFunction = async (state, config) => {
             refinementCount: state.refinementCount + 1,
           };
         }
-        console.log(`[agent:tools] ✗ modify_structure failed: ${parsed.error}`.red);
+        chatLog.error(
+          `design:tool batch done ms=${Date.now() - toolsStart} — modify_structure failed err=${parsed.error}`,
+        );
       } catch {
-        console.log('[agent:tools] ✗ modify_structure — failed to parse result'.red);
+        chatLog.error(
+          `design:tool batch done ms=${Date.now() - toolsStart} — modify_structure unparseable result`,
+        );
       }
     }
   }
 
+  chatLog.info(`design:tool batch done ms=${Date.now() - toolsStart}`);
   return result;
 };
 
@@ -49,11 +58,14 @@ const toolsWithStateUpdate: NodeFunction = async (state, config) => {
 
 const routeModelOutput = (state: State): string => {
   const lastMessage = state.messages[state.messages.length - 1];
-  if (lastMessage && (lastMessage as AIMessage).tool_calls?.length) {
-    console.log('[agent:route] → tools (tool_calls detected)'.yellow);
+  const toolCalls = (lastMessage as AIMessage).tool_calls;
+  if (lastMessage && toolCalls?.length) {
+    chatLog.info(
+      `design:route → tools (${toolCalls.length} tool_call(s): ${toolCalls.map((tc) => tc.name).join(',')})`,
+    );
     return 'tools';
   }
-  console.log('[agent:route] → saveMessages (no tool_calls)'.yellow);
+  chatLog.info('design:route → saveMessages (no tool_calls)');
   return 'saveMessages';
 };
 

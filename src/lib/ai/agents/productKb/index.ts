@@ -1,0 +1,1 @@
+export { productKbAgent } from './agent';

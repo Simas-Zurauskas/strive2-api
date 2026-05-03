@@ -5,5 +5,5 @@ build
 .DS_Store
 var
 videos
-src/scripts/debugOrchestrator/output
+scripts/debugOrchestrator/output
 strive-454313-61c6760e0389.json

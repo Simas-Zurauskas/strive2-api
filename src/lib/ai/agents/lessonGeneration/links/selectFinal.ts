@@ -1,3 +1,4 @@
+import { genLog } from '@lib/loggers';
 import { FinalLink, JudgedCandidate } from './schemas';
 
 // Match the judge's "7–8: genuinely expands the lesson; clear recommend" band.
@@ -73,18 +74,21 @@ export const selectFinalLinks = ({ candidates }: SelectFinalInput): FinalLink[] 
     decisions.push({ candidate: c, decision: 'kept' });
   }
 
-  console.log(
-    `[links.selectFinal] Judging ${candidates.length} candidate(s) — threshold ≥ ${SCORE_THRESHOLD}, cap ${MAX_LINKS}, host cap ${HOSTNAME_CAP}`
-      .cyan,
+  const counts = decisions.reduce<Record<Decision, number>>(
+    (acc, d) => ({ ...acc, [d.decision]: (acc[d.decision] ?? 0) + 1 }),
+    { kept: 0, below_threshold: 0, host_cap: 0, over_max: 0 },
   );
+  // Per-candidate table is useful for tuning the threshold and caps —
+  // hostname + score + decision keeps the line compact.
   for (const { candidate, decision } of decisions) {
-    const score = candidate.judgedScore.toFixed(1).padStart(4);
+    const score = candidate.judgedScore.toFixed(1);
     const host = padRight(candidate.hostname, 28);
     const title = candidate.title.slice(0, 60);
-    const reason = decision === 'kept' ? '' : `  (${decision.replace('_', ' ')})`;
-    console.log(`[links.selectFinal]   ${decisionGlyph[decision]} ${score}  ${host}  ${title}${reason}`.gray);
+    genLog.info(`links:select  ${decisionGlyph[decision]} ${score} ${host} ${title}${decision === 'kept' ? '' : ` (${decision})`}`);
   }
-  console.log(`[links.selectFinal] ✓ Shipping ${out.length} link(s)`.green);
+  genLog.info(
+    `links:select-done shipped=${out.length} kept=${counts.kept} threshold=${counts.below_threshold} hostCap=${counts.host_cap} overMax=${counts.over_max} threshold=${SCORE_THRESHOLD} max=${MAX_LINKS}`,
+  );
 
   return out;
 };

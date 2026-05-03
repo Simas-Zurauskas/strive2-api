@@ -21,12 +21,12 @@
  * built to surface.
  */
 
-import 'colors';
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { LLMResult } from '@langchain/core/outputs';
 import { bumpLlmCallMetrics } from '@lib/metrics';
 import { priceLlmUsage } from '@lib/pricing';
 import { recordUsage } from '@services/usageService';
+import { llmLog } from '@lib/loggers';
 
 export interface CacheUsage {
   cacheRead: number;
@@ -278,10 +278,8 @@ export const logCacheUsage = ({ label, usage, model }: { label: string; usage: C
   bumpLlmCallMetrics({ label, usage });
   const totalInput = usage.cacheRead + usage.cacheCreation + usage.uncached;
   const hitPct = totalInput > 0 ? Math.round((usage.cacheRead / totalInput) * 100) : 0;
-  console.log(
-    `[llm:${label}] cache`.bgCyan.white,
-    ` read=${usage.cacheRead} write=${usage.cacheCreation} uncached=${usage.uncached} out=${usage.output} hit=${hitPct}%`
-      .cyan,
+  llmLog.info(
+    `${label} read=${usage.cacheRead} write=${usage.cacheCreation} uncached=${usage.uncached} out=${usage.output} hit=${hitPct}%`,
   );
   const costMicroCents = priceLlmUsage({
     model,

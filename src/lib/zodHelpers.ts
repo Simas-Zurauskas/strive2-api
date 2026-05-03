@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { jsonrepair } from 'jsonrepair';
 import * as Sentry from '@sentry/node';
+import { genLog } from '@lib/loggers';
 
 /**
  * Check whether a comma at `fromPos` is structural JSON punctuation (separator
@@ -158,8 +159,8 @@ export const jsonish = <T extends z.ZodTypeAny>(schema: T): T => {
               const window = pos >= 0
                 ? `…${s.slice(windowStart, pos)}⟦HERE⟧${s.slice(pos, windowEnd)}…`
                 : s.slice(0, 200);
-              console.warn(
-                `[jsonish] parse failed\n  strict: ${strictReason}\n  repair: ${repairReason}\n  length: ${s.length}\n  window around pos ${pos}: ${JSON.stringify(window)}`,
+              genLog.warn(
+                `jsonish:parse-fail strict=${strictReason} repair=${repairReason} len=${s.length} pos=${pos} window=${JSON.stringify(window)}`,
               );
               Sentry.captureMessage('jsonish parse failed — all 3 tiers', {
                 level: 'warning',

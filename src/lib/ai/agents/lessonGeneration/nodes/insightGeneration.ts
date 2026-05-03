@@ -7,6 +7,7 @@ import { jsonish } from '@lib/zodHelpers';
 import { INSIGHT_KINDS, INSIGHT_MAX_PER_LESSON, INSIGHT_MIN_PER_LESSON } from '@lib/insightConstants';
 import { GeneratedInsight } from '@services/insightContentService';
 import type { LessonProgressWriter } from '@src/types/socketEvents';
+import { genLog } from '@lib/loggers';
 import { LessonState } from '../state';
 import { validateInsightCandidate } from './insightGuardrails';
 
@@ -109,7 +110,7 @@ const filterCandidates = (
     // don't pollute the answer-map key space.
     const validation = validateInsightCandidate(c);
     if (!validation.valid) {
-      console.log(`[insightGeneration] drop candidate (${validation.reason})`.gray);
+      genLog.info(`lesson:insights drop reason=${validation.reason}`);
       continue;
     }
 
@@ -147,7 +148,7 @@ export const insightGeneration = async (
     ['intro', 'section', 'callout', 'summary'].includes(b.type),
   );
   if (teachable.length === 0) {
-    console.log(`[insightGeneration] Skipped — no teachable blocks`.gray);
+    genLog.info(`lesson:insights skip reason=no_teachable_blocks`);
     return { insights: [] };
   }
 
@@ -166,7 +167,7 @@ ${formatLessonForExtraction(state)}
 Return ${INSIGHT_MIN_PER_LESSON}-${INSIGHT_MAX_PER_LESSON} insight cards covering the most important ideas. Prefer questions over clozes unless a cloze is clearly the better shape for the claim.`;
 
   try {
-    console.log(`[insightGeneration] Extracting insights...`.cyan);
+    genLog.info(`lesson:insights extract teachable=${teachable.length}`);
 
     const model = getUtilityModel().withStructuredOutput(insightsOutputSchema);
     const result = await withRetry(() =>
@@ -184,14 +185,15 @@ Return ${INSIGHT_MIN_PER_LESSON}-${INSIGHT_MAX_PER_LESSON} insight cards coverin
       writer?.({ type: 'insight', insight: ins });
     }
 
-    console.log(
-      `[insightGeneration] ✓ ${filtered.length} insights (${result.insights.length} candidates)`.green,
+    genLog.info(
+      `lesson:insights done kept=${filtered.length}/${result.insights.length}`,
     );
     return { insights: filtered };
   } catch (e) {
     // Extraction failures never block the lesson. Research philosophy:
     // insights are additive enrichment.
-    console.warn(`[insightGeneration] ✗ Failed: ${e instanceof Error ? e.message : e}`.yellow);
+    const reason = e instanceof Error ? e.message : String(e);
+    genLog.warn(`lesson:insights fail reason=${reason} — lesson ships without cards`);
     return { insights: [] };
   }
 };

@@ -11,7 +11,8 @@ import {
 } from '@lib/creditPricing';
 import { getUsageContext } from '@lib/usageContext';
 import { bumpCreditDebitExhausted } from '@lib/metrics';
-import { monetization } from '@lib/loggers';
+import { monetizationLog } from '@lib/loggers';
+import { withCreditTransaction } from '@lib/dbTransaction';
 
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -116,34 +117,50 @@ const applyFreePeriodReset = async ({
   // Conditional on the exact expiring periodEnd: if another concurrent caller
   // already reset the period, this update no-ops (modifiedCount=0) and the
   // ledger insert below is skipped. Prevents double-grants on racing writes.
-  const result = await UserModel.updateOne(
-    { _id: userId, 'credits.periodEnd': priorPeriodEnd },
-    {
-      $set: {
-        'credits.allowanceBalance': plan.monthlyAllowance,
-        'credits.allowanceGranted': plan.monthlyAllowance,
-        'credits.periodStart': periodStart,
-        'credits.periodEnd': periodEnd,
-      },
-    },
-  );
-
-  if (result.modifiedCount === 0) return;
-
+  //
+  // Wrapped in a transaction so the period-reset $set and the ledger insert
+  // commit atomically — without it, a process crash between them leaves the
+  // user with a fresh allowance and no audit row. (No-op transaction in
+  // test/dev where the underlying mongo isn't a replica set.)
   const delta = plan.monthlyAllowance - oldAllowance;
-  await CreditLedgerModel.create({
-    userId,
-    timestamp: now,
-    delta,
-    allowanceDelta: delta,
-    bonusDelta: 0,
-    balanceBefore: oldAllowance,
-    balanceAfter: plan.monthlyAllowance,
-    bonusBefore: oldBonus,
-    bonusAfter: oldBonus,
-    reason: 'period_reset',
-    notes: 'free-tier 30-day rollover',
+  const applied = await withCreditTransaction(async (session) => {
+    const result = await UserModel.updateOne(
+      { _id: userId, 'credits.periodEnd': priorPeriodEnd },
+      {
+        $set: {
+          'credits.allowanceBalance': plan.monthlyAllowance,
+          'credits.allowanceGranted': plan.monthlyAllowance,
+          'credits.periodStart': periodStart,
+          'credits.periodEnd': periodEnd,
+        },
+      },
+      { session: session ?? undefined },
+    );
+
+    if (result.modifiedCount === 0) return false;
+
+    await CreditLedgerModel.create(
+      [
+        {
+          userId,
+          timestamp: now,
+          delta,
+          allowanceDelta: delta,
+          bonusDelta: 0,
+          balanceBefore: oldAllowance,
+          balanceAfter: plan.monthlyAllowance,
+          bonusBefore: oldBonus,
+          bonusAfter: oldBonus,
+          reason: 'period_reset',
+          notes: 'free-tier 30-day rollover',
+        },
+      ],
+      { session: session ?? undefined },
+    );
+    return true;
   });
+
+  if (!applied) return;
 
   emitCreditsUpdated({
     userId,
@@ -156,7 +173,7 @@ const applyFreePeriodReset = async ({
     },
   });
 
-  monetization.info(
+  monetizationLog.info(
     `Free period reset: user=${String(userId)} allowance=${oldAllowance}→${plan.monthlyAllowance} next=${periodEnd.toISOString()}`,
   );
 };
@@ -220,40 +237,64 @@ export const debitActualSpend = async ({
     const totalDebit = allowanceDebit + bonusDebit;
     if (totalDebit === 0) return;
 
-    const result = await UserModel.updateOne(
-      {
-        _id: userId,
-        'credits.allowanceBalance': { $gte: allowanceDebit },
-        'credits.bonusBalance': { $gte: bonusDebit },
-      },
-      {
-        $inc: {
-          'credits.allowanceBalance': -allowanceDebit,
-          'credits.bonusBalance': -bonusDebit,
+    // Wrap the CAS update + ledger insert in a transaction so a process
+    // crash between them can't leave the user debited without an audit row.
+    // The CAS filter (`$gte` on each pool) inside the transaction commits
+    // only if the balance still satisfies the precondition; on conflict
+    // we retry the outer loop with a fresh read.
+    let didDebit = false;
+    let newAllowance = 0;
+    let newBonus = 0;
+    await withCreditTransaction(async (session) => {
+      const result = await UserModel.updateOne(
+        {
+          _id: userId,
+          'credits.allowanceBalance': { $gte: allowanceDebit },
+          'credits.bonusBalance': { $gte: bonusDebit },
         },
-      },
-    );
+        {
+          $inc: {
+            'credits.allowanceBalance': -allowanceDebit,
+            'credits.bonusBalance': -bonusDebit,
+          },
+        },
+        { session: session ?? undefined },
+      );
 
-    if (result.modifiedCount === 1) {
-      const newAllowance = balance.allowance - allowanceDebit;
-      const newBonus = balance.bonus - bonusDebit;
+      if (result.modifiedCount !== 1) {
+        // CAS lost — bail this iteration. The outer loop retries.
+        return;
+      }
 
-      await CreditLedgerModel.create({
-        userId,
-        timestamp: new Date(),
-        delta: -totalDebit,
-        allowanceDelta: -allowanceDebit,
-        bonusDelta: -bonusDebit,
-        balanceBefore: balance.allowance,
-        balanceAfter: newAllowance,
-        bonusBefore: balance.bonus,
-        bonusAfter: newBonus,
-        reason: 'debit_action',
-        actionType: jobType,
-        jobId,
-        notes: `Real cost: ${microCents} μ¢`,
-      });
+      newAllowance = balance.allowance - allowanceDebit;
+      newBonus = balance.bonus - bonusDebit;
 
+      await CreditLedgerModel.create(
+        [
+          {
+            userId,
+            timestamp: new Date(),
+            delta: -totalDebit,
+            allowanceDelta: -allowanceDebit,
+            bonusDelta: -bonusDebit,
+            balanceBefore: balance.allowance,
+            balanceAfter: newAllowance,
+            bonusBefore: balance.bonus,
+            bonusAfter: newBonus,
+            reason: 'debit_action',
+            actionType: jobType,
+            jobId,
+            notes: `Real cost: ${microCents} μ¢`,
+          },
+        ],
+        { session: session ?? undefined },
+      );
+      didDebit = true;
+    });
+
+    if (didDebit) {
+      // Socket emit lives outside the transaction — it's a side-effect, not
+      // part of the atomic state change.
       emitCreditsUpdated({
         userId,
         payload: {
@@ -269,7 +310,7 @@ export const debitActualSpend = async ({
       const clamped = totalDebit < credits
         ? ` (clamped from ${credits} — ${credits - totalDebit} absorbed)`
         : '';
-      monetization.info(
+      monetizationLog.info(
         `Debited: user=${String(userId)} job=${jobType} credits=−${totalDebit} (allowance=−${allowanceDebit} bonus=−${bonusDebit}) spent=${microCents}μ¢${clamped} balance=${newAllowance + newBonus}`,
       );
 
@@ -284,7 +325,7 @@ export const debitActualSpend = async ({
   // Escalate to Sentry + bump the `credit_debit_exhausted_total` metric so
   // a climbing rate is visible in dashboards — at a certain volume this
   // stops being bounded-loss and starts being a reconciliation problem.
-  monetization.warn(
+  monetizationLog.warn(
     `Debit retries exhausted: user=${String(userId)} job=${String(jobId)} type=${jobType} spent=${microCents}μ¢ — user got free work`,
   );
   bumpCreditDebitExhausted();

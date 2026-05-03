@@ -55,7 +55,5 @@ export const deleteCourseController = asyncHandler(async (req, res) => {
   ]);
   await CourseModel.findByIdAndDelete(course._id);
 
-  console.log(`[API] Course deleted: ${course._id}`.green);
-
   res.status(200).json({ data: { deleted: true } });
 });

@@ -57,15 +57,11 @@ const parseSortDir = (value: unknown): 1 | -1 => {
  *       - in: query
  *         name: sortBy
  *         schema:
- *           type: string
- *           enum: [timestamp, costMicroCents, chargedMicroCents, service]
- *           default: timestamp
+ *           $ref: '#/components/schemas/UsageSortField'
  *       - in: query
  *         name: sortDir
  *         schema:
- *           type: string
- *           enum: [asc, desc]
- *           default: desc
+ *           $ref: '#/components/schemas/UsageSortDir'
  *     responses:
  *       200:
  *         content:

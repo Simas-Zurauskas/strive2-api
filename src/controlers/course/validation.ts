@@ -1,16 +1,54 @@
 import { z } from 'zod';
-import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES, LESSON_PROGRESS_STATUSES } from '@lib/constants';
+import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES, GOAL_TYPES, LESSON_PROGRESS_STATUSES } from '@lib/constants';
 import LessonContentModel from '@models/LessonContentModel';
 
 export const createCourseSchema = z.object({
   goal: z.string().min(1, 'Goal is required').max(500, 'Goal must be at most 500 characters'),
 });
 
+// Each clarify answer is either a single text response (free-text fields)
+// or a small set of multiple-choice selections (chip-pickers). Bound both
+// shapes tightly so a malicious client can't persist arbitrary nested JSON
+// that later flows back into LLM prompts (self-amplification of prompt
+// injection) or that could carry Mongo-operator keys (`$gt`, `$ne`) in
+// later lookups.
+const answerValueSchema = z.union([
+  z.string().max(2000),
+  z.array(z.string().max(500)).max(20),
+]);
+
 export const updateCourseSchema = z.object({
   goal: z.string().min(1).max(500).optional(),
-  answers: z.record(z.string(), z.unknown()).optional(),
+  // Question-id keys are arbitrary strings (the clarify agent invents them
+  // per question), but we cap key length so abusive payloads can't blow up
+  // the document. The .superRefine() below additionally rejects any key
+  // starting with `$` (Mongo operator) or `__` (prototype escape) — they
+  // have no place in a learner's answer payload.
+  answers: z
+    .record(z.string().max(120), answerValueSchema)
+    .superRefine((rec, ctx) => {
+      for (const key of Object.keys(rec)) {
+        if (key.startsWith('$') || key.startsWith('__')) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Invalid answer key: ${key}`,
+            path: [key],
+          });
+        }
+      }
+    })
+    .optional(),
   depth: z.enum(COURSE_DEPTHS).optional(),
   status: z.enum(COURSE_STATUSES).optional(),
+  /**
+   * User-selected goalType from the ClarifyStep chip. Setting this field
+   * marks the value as user-confirmed (`goalTypeConfidence = 'high'`),
+   * which causes the next clarify job to skip the auto-classifier and
+   * use this value verbatim. The cascade — clearing clarifyData and
+   * triggering a clarify regen — is orchestrated by the client in
+   * `useWizardHandlers`, mirroring the goal-text overwrite path.
+   */
+  goalType: z.enum(GOAL_TYPES).optional(),
   /**
    * Client-side acknowledgement that the learner saw the "your answers
    * suggest a lighter-effort course" warning and still wants the deeper
@@ -33,6 +71,16 @@ export const chatStreamSchema = z.object({
       }),
     )
     .min(1),
+  /**
+   * Mentor-only: ids of attachments to associate with the new user
+   * turn. The actual content lives on `LessonMentorChatModel.attachments`
+   * (already validated and capped at attach time). This array is just
+   * the per-turn pointer set. Capped at 1 per turn — server-side
+   * enforcement of the "one paperclip per send" UX. Optional + max
+   * keeps the existing course-design chat (which doesn't use this
+   * field) trivially valid.
+   */
+  attachmentIds: z.array(z.string()).max(1).optional(),
 });
 
 export const refineStructureSchema = z.object({

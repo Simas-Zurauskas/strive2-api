@@ -9,6 +9,7 @@ import { objectExists, uploadBuffer } from './s3Service';
 import { synthesizeNarration } from './googleTtsService';
 import { recordUsage } from './usageService';
 import { priceTtsUsage } from '@lib/pricing';
+import { ttsLog } from '@lib/loggers';
 
 /**
  * Lesson narration orchestrator. Public entry point used by the job
@@ -85,10 +86,9 @@ export const runLessonNarration = async ({
   voiceId,
   rate,
 }: RunLessonNarrationParams): Promise<RunLessonNarrationResult> => {
-  const tag = `[narration ${courseId}/${moduleIndex}/${lessonIndex}]`;
-  console.log(
-    `${tag} run start — incomingVoiceId=${voiceId ?? 'unset'} incomingRate=${rate ?? 'unset'}`.cyan,
-  );
+  const coord = `${courseId}/${moduleIndex}/${lessonIndex}`;
+  const startedAt = Date.now();
+  ttsLog.info(`run:start lesson=${coord} incomingVoice=${voiceId ?? 'unset'} incomingRate=${rate ?? 'unset'}`);
 
   const lesson = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
   if (!lesson) {
@@ -104,15 +104,12 @@ export const runLessonNarration = async ({
   const contentHash = buildContentHash({ script, voiceId: voice.id, rate: resolvedRate });
   const s3Key = buildAudioS3Key(contentHash);
 
-  console.log(
-    `${tag} resolved → voice=${voice.id} rate=${resolvedRate} ` +
-    `scriptChars=${script.length} hash=${contentHash.slice(0, 12)}…`.cyan,
+  ttsLog.info(
+    `resolve lesson=${coord} voice=${voice.id} rate=${resolvedRate} chars=${script.length} hash=${contentHash.slice(0, 12)}…`,
   );
 
   const exists = await objectExists({ key: s3Key });
-  console.log(
-    `${tag} cache=${exists ? 'HIT' : 'MISS'} key=${s3Key}`.cyan,
-  );
+  ttsLog.info(`cache:${exists ? 'hit' : 'miss'} lesson=${coord} key=${s3Key}`);
 
   if (!exists) {
     const { audio, billedCharacters } = await synthesizeNarration({
@@ -121,8 +118,8 @@ export const runLessonNarration = async ({
       rate: resolvedRate,
     });
     await uploadBuffer({ key: s3Key, body: audio, contentType: 'audio/mpeg' });
-    console.log(
-      `${tag} synthesised + uploaded — bytes=${audio.length} billedChars=${billedCharacters}`.cyan,
+    ttsLog.info(
+      `synth:done lesson=${coord} bytes=${audio.length} billedChars=${billedCharacters}`,
     );
 
     // Record vendor cost. `applyStaticMarkup` doubles this on the user
@@ -159,8 +156,8 @@ export const runLessonNarration = async ({
       audioGeneratedAt: new Date(),
     },
   );
-  console.log(
-    `${tag} done — voice=${voice.id} cached=${exists} key=${s3Key}`.green,
+  ttsLog.info(
+    `run:done lesson=${coord} voice=${voice.id} cached=${exists} key=${s3Key} ms=${Date.now() - startedAt}`,
   );
 
   return {
@@ -197,8 +194,7 @@ export const clearLessonNarration = async ({
       audioGeneratedAt: null,
     },
   );
-  console.log(
-    `[narration ${courseId}/${moduleIndex}/${lessonIndex}] cleared — ` +
-    `matched=${result.matchedCount} modified=${result.modifiedCount}`.cyan,
+  ttsLog.info(
+    `clear lesson=${courseId}/${moduleIndex}/${lessonIndex} matched=${result.matchedCount} modified=${result.modifiedCount}`,
   );
 };

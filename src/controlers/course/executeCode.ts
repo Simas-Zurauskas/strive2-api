@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { JUDGE0_API_KEY, JUDGE0_API_URL } from '@conf/env';
 import { priceFlatUnit } from '@lib/pricing';
 import { recordUsage } from '@services/usageService';
+import { integrationLog } from '@lib/loggers';
 
 // ── Judge0 language IDs ────────────────────────────────
 // Full list: https://github.com/judge0/judge0#supported-languages
@@ -127,7 +128,8 @@ export const executeCodeController = asyncHandler(async (req, res) => {
     throw new Error(`Unsupported language: ${language}. Supported: ${Object.keys(LANGUAGE_IDS).join(', ')}`);
   }
 
-  console.log(`[API] Executing ${language} code (${code.length} chars)`.cyan);
+  const execStart = Date.now();
+  integrationLog.info(`judge0:exec start lang=${language} chars=${code.length}`);
 
   // Detect RapidAPI vs self-hosted/CE based on URL
   const isRapidApi = JUDGE0_API_URL.includes('rapidapi.com');
@@ -152,7 +154,7 @@ export const executeCodeController = asyncHandler(async (req, res) => {
 
   if (!response.ok) {
     const text = await response.text();
-    console.error(`[API] Judge0 error: ${response.status} ${text}`.red);
+    integrationLog.error(`judge0:exec fail status=${response.status} body=${text.slice(0, 200)}`);
     res.status(502);
     throw new Error('Code execution service error');
   }
@@ -186,6 +188,10 @@ export const executeCodeController = asyncHandler(async (req, res) => {
     if (Buffer.byteLength(raw, 'utf-8') <= OUTPUT_CAP_BYTES) return raw;
     return raw.slice(0, OUTPUT_CAP_BYTES) + TRUNCATE_MARKER;
   };
+
+  integrationLog.info(
+    `judge0:exec done lang=${language} status="${result.status?.description ?? 'Unknown'}" judge0Time=${result.time ?? 'na'} ms=${Date.now() - execStart}`,
+  );
 
   res.status(200).json({
     data: {
