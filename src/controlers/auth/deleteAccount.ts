@@ -1,10 +1,11 @@
 import asyncHandler from 'express-async-handler';
-import UserModel, { AuthProvider } from '@models/UserModel';
+import UserModel from '@models/UserModel';
 import CourseModel from '@models/CourseModel';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import JobModel from '@models/JobModel';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import LessonMentorChatModel from '@models/LessonMentorChatModel';
+import CourseMentorChatModel from '@models/CourseMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import UserInsightProgressModel from '@models/UserInsightProgressModel';
@@ -12,6 +13,7 @@ import UserGamificationModel from '@models/UserGamificationModel';
 import { cleanupCourseContent } from '@services/courseCleanupService';
 import { recordAccountDeletion } from '@services/abuseLogService';
 import { cancelAllSubscriptionsForCustomer } from '@services/stripeService';
+import { consumeSecurityActionCode } from '@services/securityActionService';
 import { bgError } from '@lib/bg';
 import { deleteAccountSchema } from './validation';
 
@@ -20,6 +22,11 @@ import { deleteAccountSchema } from './validation';
  * /api/auth/delete-account:
  *   delete:
  *     summary: Delete the authenticated user's account and all associated data
+ *     description: |
+ *       Two-factor: requires a fresh 6-digit confirmation code emailed to the
+ *       user via `/api/auth/security-action/request-code` with action=delete_account.
+ *       Applies uniformly to credentials and OAuth users — a stolen JWT alone
+ *       cannot delete the account.
  *     tags:
  *       - Auth
  *     security:
@@ -30,10 +37,11 @@ import { deleteAccountSchema } from './validation';
  *         application/json:
  *           schema:
  *             type: object
- *             required: [password]
+ *             required: [code]
  *             properties:
- *               password:
+ *               code:
  *                 type: string
+ *                 description: 6-digit confirmation code from the email.
  *     responses:
  *       200:
  *         content:
@@ -48,7 +56,17 @@ import { deleteAccountSchema } from './validation';
  *                   properties:
  *                     deleted:
  *                       type: boolean
+ *       400:
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiError'
  *       401:
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ApiError'
+ *       429:
  *         content:
  *           application/json:
  *             schema:
@@ -57,25 +75,26 @@ import { deleteAccountSchema } from './validation';
 export const deleteAccountController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
 
-  const user = await UserModel.findById(userId).select('+password');
+  const user = await UserModel.findById(userId);
 
   if (!user) {
     res.status(401);
     throw new Error('Not authenticated');
   }
 
-  // Require password confirmation for users with credentials auth
-  const hasCredentials = user.authProviders.some((p) => p.provider === AuthProvider.CREDENTIALS);
-
-  if (hasCredentials) {
-    const { password } = deleteAccountSchema.parse(req.body);
-    const isValid = await user.comparePassword(password);
-
-    if (!isValid) {
-      res.status(401);
-      throw new Error('Invalid password');
-    }
-  }
+  // Email-OTP gate. Replaces the prior password-only check, which:
+  //   1. Was bypassed entirely for OAuth-only users (Google sign-in users
+  //      had no password and could be deleted with just a stolen JWT).
+  //   2. Was insufficient for credentials users — a stolen token + a
+  //      keylogged password is the same single point of compromise.
+  // The code is emailed to the user's verified address; an attacker
+  // controlling only the JWT can't read it.
+  const { code } = deleteAccountSchema.parse(req.body);
+  await consumeSecurityActionCode({
+    userId,
+    action: 'delete_account',
+    code,
+  });
 
   const courseIds = await CourseModel.find({ userId: user._id }).distinct('_id');
 
@@ -96,6 +115,11 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
     // by a foreign-key drift would persist indefinitely without this.
     // Mirrors the `CourseDesignChatModel` pattern.
     LessonMentorChatModel.deleteMany({ userId: user._id }),
+    // Same defense-in-depth wipe as LessonMentorChat — `cleanupCourseContent`
+    // covers the per-course rows, but a stray foreign-key drift would leave
+    // a row that this user-scoped delete catches. Added after audit found
+    // CourseMentorChatModel was missing from both cleanup paths.
+    CourseMentorChatModel.deleteMany({ userId: user._id }),
     UserGamificationModel.deleteMany({ userId: user._id }),
     // Strip these courses from any OTHER user's favorites — `CourseModel.deleteMany`
     // below doesn't trigger the $pull that single-course deletion does.

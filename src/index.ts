@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import 'tsconfig-paths/register';
+// IMPORTANT: Sentry init MUST come before any other module that participates
+// in instrumentation (express, http, mongoose). Importing this file runs
+// Sentry.init synchronously as a side-effect.
+import '@conf/sentry';
 import 'colors';
 import { createServer } from 'http';
 import connectDB from '@conf/mongo';
@@ -28,7 +32,8 @@ import { initJobSocketBridge } from '@lib/jobSocketBridge';
 import { decodeAuthToken } from '@lib/auth';
 import { bumpRateLimitHit, renderMetrics } from '@lib/metrics';
 import { requestId } from '@middleware/requestId';
-import { jobLimit } from '@services/jobRunner';
+import { jobLimit, startStuckJobWatchdog, stopStuckJobWatchdog } from '@services/jobRunner';
+import { getVersionInfo } from '@conf/versionInfo';
 import { printGraphImages } from '@lib/ai/agents/printGraphImages';
 import { lifecycleLog } from '@lib/loggers';
 
@@ -112,8 +117,8 @@ if (ENVIRONMENT !== 'development') {
   );
 }
 
-app.get('/', (req, res) => {
-  res.json({ service: 'Strive API', version: '1.0.0' });
+app.get('/version', (_req, res) => {
+  res.json(getVersionInfo());
 });
 
 // ── Health endpoints ─────────────────────────────────────
@@ -233,6 +238,11 @@ initJobSocketBridge();
 connectDB().then(() => {
   server.listen(PORT, () => {
     lifecycleLog.info(`boot:ready url=${API_URL} env=${ENVIRONMENT} port=${PORT}`);
+    // Watchdog must start AFTER the boot reaper has run (which is awaited
+    // inside `connectDB`). Otherwise the watchdog would race the reaper for
+    // the same `processing` rows. Starting it here also means tests can
+    // import jobRunner without spawning a background timer.
+    startStuckJobWatchdog();
     // printGraphImages();
   });
 });
@@ -249,6 +259,10 @@ const gracefulShutdown = async (signal: string) => {
   shuttingDown = true;
 
   lifecycleLog.info(`shutdown:start signal=${signal}`);
+
+  // Stop the watchdog timer so a slow shutdown doesn't get a final tick that
+  // would race our drain logic.
+  stopStuckJobWatchdog();
 
   // Hard safety net: if anything below hangs (a driver op, a socket, a
   // background flush), kill the process anyway. `unref()` so the timer
@@ -292,3 +306,43 @@ const gracefulShutdown = async (signal: string) => {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// ── Process-level exception handlers ────────────────────
+//
+// `uncaughtException`: Node's exit semantics are unsafe-by-default — without
+//   a handler the process crashes immediately with no Sentry capture and no
+//   structured log line. WITH a handler, Node leaves the process running in
+//   an undefined state, which is also bad. The right policy is "log + capture
+//   + drain Sentry + exit non-zero so the orchestrator restarts a clean
+//   process". The 2s drain budget matches Sentry.flush defaults.
+//
+// `unhandledRejection`: less severe — we log + capture but don't exit.
+//   Promise rejections are usually recoverable (transient vendor outage,
+//   SDK bug), and exiting on every one makes the service flap on flaky
+//   networks. Set `--unhandled-rejections=strict` if a future Node version
+//   behaviour changes that policy.
+//
+// Note `googleTtsService.ts:18-25` calls out a known landmine: google-gax's
+// metadata-server probe rejects asynchronously and escapes user-level
+// try/catch. This handler is the safety net for that and similar SDK quirks.
+process.on('uncaughtException', (err: Error) => {
+  lifecycleLog.error(`uncaughtException ${err?.stack ?? err}`);
+  try {
+    Sentry.captureException(err, { tags: { fatal: 'uncaughtException' } });
+  } catch {
+    // Swallow — we're already in a fatal path.
+  }
+  Sentry.close(2_000)
+    .catch(() => undefined)
+    .finally(() => process.exit(1));
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  lifecycleLog.error(`unhandledRejection ${err.stack ?? err.message}`);
+  try {
+    Sentry.captureException(err, { tags: { fatal: 'unhandledRejection' } });
+  } catch {
+    // Swallow — same reason.
+  }
+});

@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/node';
 import { STRIPE_WEBHOOK_SECRET } from '@conf/env';
 import { monetizationLog } from '@lib/loggers';
 import { constructWebhookEvent } from '@services/stripeService';
-import { handleStripeEvent } from '@services/stripeWebhookService';
+import { handleStripeEvent, RetryableWebhookError } from '@services/stripeWebhookService';
 
 /**
  * Stripe webhook entrypoint. This route must be mounted with `express.raw()`
@@ -11,10 +11,19 @@ import { handleStripeEvent } from '@services/stripeWebhookService';
  * against the raw bytes and is rejected if the body has been JSON-decoded
  * in place.
  *
- * Responds 200 as soon as the signature verifies. Business logic runs after
- * (or concurrently with) the response: Stripe retries on any non-2xx or
- * timeout (>30s), so we acknowledge fast and let internal errors surface
- * via Sentry without triggering Stripe's retry storm.
+ * Response policy (revised):
+ *   - Bad signature → 400 (Stripe doesn't retry; we don't want it to)
+ *   - Handler succeeded → 200
+ *   - Handler threw `RetryableWebhookError` (transient: DB outage, vendor
+ *     error, etc.) → 5xx so Stripe retries us with exponential backoff
+ *   - Handler threw any other error → 200 + Sentry capture. We ack to break
+ *     the retry loop on *deterministic* failures (a malformed payload, a
+ *     bug we shipped) — re-delivery won't help. Reconciliation cron picks
+ *     up the drift. This is the deliberate trade-off described in the
+ *     audit: deterministic bugs are reconciled, transient failures retry.
+ *
+ * The handler differentiates by throwing the right error class. Anything
+ * not specifically classified as retryable defaults to ack-and-log.
  */
 export const stripeWebhookController = async (req: Request, res: Response): Promise<void> => {
   if (!STRIPE_WEBHOOK_SECRET) {
@@ -46,16 +55,23 @@ export const stripeWebhookController = async (req: Request, res: Response): Prom
     await handleStripeEvent(event);
     res.status(200).json({ received: true });
   } catch (err) {
-    // Handler errors shouldn't trigger infinite Stripe retries. Log + ack.
-    // Business reconciliation (if any rows drifted) falls to the Phase 5
-    // nightly cron, not to Stripe's retry loop.
+    const isRetryable = err instanceof RetryableWebhookError;
     monetizationLog.error(
-      `Webhook handler threw for ${event.type} (${event.id}): ${err instanceof Error ? err.message : String(err)}`,
+      `Webhook handler threw for ${event.type} (${event.id}) retryable=${isRetryable}: ${err instanceof Error ? err.message : String(err)}`,
     );
     Sentry.captureException(err, {
-      tags: { area: 'stripe.webhook', eventType: event.type },
+      tags: { area: 'stripe.webhook', eventType: event.type, retryable: String(isRetryable) },
       extra: { eventId: event.id },
     });
+
+    if (isRetryable) {
+      // 503 → Stripe retries with exponential backoff up to ~3 days.
+      res.status(503).json({ received: false, retry: true });
+      return;
+    }
+
+    // Deterministic / unclassified errors: ack to stop retry storm.
+    // Reconciliation cron is responsible for catching any drift.
     res.status(200).json({ received: true, handlerError: true });
   }
 };

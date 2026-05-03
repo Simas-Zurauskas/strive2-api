@@ -17,6 +17,16 @@ import { buildReqRes, invokeController } from '../../../test-helpers/express';
 import { generateVerificationToken } from '@lib/auth';
 import { AuthProvider } from '@lib/constants';
 
+// Stub the email-OTP service so changePassword tests stay focused on the
+// post-confirmation logic. The OTP flow itself is exercised by the
+// securityActionService unit tests (TODO if not present) and end-to-end
+// by the auth-route tests. Per-test we override the mock impl when we
+// want to assert the OTP rejection path.
+const consumeMock = vi.fn();
+vi.mock('@services/securityActionService', () => ({
+  consumeSecurityActionCode: (...args: unknown[]) => consumeMock(...args),
+}));
+
 import { resetPasswordController } from '@controlers/auth/resetPassword';
 import { setPasswordController } from '@controlers/auth/setPassword';
 import { changePasswordController } from '@controlers/auth/changePassword';
@@ -135,7 +145,12 @@ describe('resetPasswordController', () => {
 // ── setPasswordController ─────────────────────────────
 
 describe('setPasswordController', () => {
-  test('Google-only user (no CREDENTIALS, no password): password set + CREDENTIALS added + tokenVersion bumped', async () => {
+  beforeEach(() => {
+    consumeMock.mockReset();
+    consumeMock.mockResolvedValue(undefined); // happy path: code valid
+  });
+
+  test('Google-only user (no CREDENTIALS, no password): password set + CREDENTIALS added + tokenVersion bumped + fresh token returned', async () => {
     const user = await makeUser({
       email: 'sp@example.com',
       authProviders: [{ provider: AuthProvider.GOOGLE, providerId: 'g1' }],
@@ -143,9 +158,9 @@ describe('setPasswordController', () => {
     // makeUser hashes a default password — strip it for this test
     await UserModel.updateOne({ _id: user._id }, { $unset: { password: '' } });
 
-    const { req, res, status } = buildReqRes({
+    const { req, res, status, json } = buildReqRes({
       userId: user._id.toString(),
-      body: { newPassword: 'set-pw-12345' },
+      body: { newPassword: 'set-pw-12345', code: '123456' },
     });
     await invokeController(setPasswordController, req, res);
     expect(status).toHaveBeenCalledWith(200);
@@ -155,13 +170,24 @@ describe('setPasswordController', () => {
     expect(after?.tokenVersion).toBe(user.tokenVersion + 1);
     const creds = after?.authProviders.filter((p) => p.provider === AuthProvider.CREDENTIALS);
     expect(creds).toHaveLength(1);
+    expect(consumeMock).toHaveBeenCalledWith({
+      userId: user._id.toString(),
+      action: 'set_password',
+      code: '123456',
+    });
+
+    // The response carries a fresh JWT bound to the new tokenVersion so the
+    // calling session can stay alive without re-authenticating.
+    const body = json.mock.calls[0]?.[0] as { data?: { token?: string } };
+    expect(typeof body?.data?.token).toBe('string');
+    expect(body.data!.token!.length).toBeGreaterThan(20);
   });
 
   test('user already has a password → 400 PASSWORD_ALREADY_SET', async () => {
     const user = await makeUser({ email: 'spset@example.com' }); // makeUser sets a password by default
     const { req, res, status } = buildReqRes({
       userId: user._id.toString(),
-      body: { newPassword: 'nope-pw-12345' },
+      body: { newPassword: 'nope-pw-12345', code: '123456' },
     });
     let caught: unknown;
     try {
@@ -183,7 +209,7 @@ describe('setPasswordController', () => {
 
     const { req, res, status } = buildReqRes({
       userId: user._id.toString(),
-      body: { newPassword: 'nope-pw-12345' },
+      body: { newPassword: 'nope-pw-12345', code: '123456' },
     });
     let caught: unknown;
     try {
@@ -198,23 +224,58 @@ describe('setPasswordController', () => {
   test('unknown userId → 401', async () => {
     const { req, res, status } = buildReqRes({
       userId: 'aaaaaaaaaaaaaaaaaaaaaaaa',
-      body: { newPassword: 'set-pw-12345' },
+      body: { newPassword: 'set-pw-12345', code: '123456' },
     });
     await expect(invokeController(setPasswordController, req, res)).rejects.toThrow('Unauthorized');
     expect(status).toHaveBeenCalledWith(401);
+  });
+
+  test('invalid OTP code → 400 SECURITY_CODE_INVALID; no password set', async () => {
+    const { AppError } = await import('@middleware/errorMiddleware');
+    consumeMock.mockRejectedValueOnce(
+      new AppError('Confirmation code is incorrect.', {
+        errorCode: 'SECURITY_CODE_INVALID',
+        statusCode: 400,
+      }),
+    );
+
+    const user = await makeUser({
+      email: 'sp-bad-code@example.com',
+      authProviders: [{ provider: AuthProvider.GOOGLE, providerId: 'g1' }],
+    });
+    await UserModel.updateOne({ _id: user._id }, { $unset: { password: '' } });
+
+    const { req, res } = buildReqRes({
+      userId: user._id.toString(),
+      body: { newPassword: 'should-not-apply', code: '999999' },
+    });
+    await expect(invokeController(setPasswordController, req, res)).rejects.toMatchObject({
+      message: expect.stringContaining('incorrect'),
+    });
+
+    const after = await UserModel.findById(user._id).select('+password tokenVersion authProviders');
+    expect(after?.password).toBeFalsy();
+    expect(after?.tokenVersion).toBe(user.tokenVersion);
+    const creds = after?.authProviders.filter((p) => p.provider === AuthProvider.CREDENTIALS) ?? [];
+    expect(creds).toHaveLength(0);
   });
 });
 
 // ── changePasswordController ──────────────────────────
 
 describe('changePasswordController', () => {
-  test('credentials user: password updated + tokenVersion bumped', async () => {
+  beforeEach(() => {
+    consumeMock.mockReset();
+    consumeMock.mockResolvedValue(undefined); // happy path: code valid
+  });
+
+  test('credentials user: password updated + tokenVersion bumped + fresh token returned', async () => {
     const user = await makeUser({ email: 'cp@example.com' });
     const before = await UserModel.findById(user._id).select('+password').lean();
 
-    const { req, res, status } = buildReqRes({
+    const { req, res, status, json } = buildReqRes({
       userId: user._id.toString(),
-      body: { newPassword: 'new-pw-12345' },
+      body: { newPassword: 'new-pw-12345', code: '123456' },
     });
     await invokeController(changePasswordController, req, res);
     expect(status).toHaveBeenCalledWith(200);
@@ -222,6 +283,17 @@ describe('changePasswordController', () => {
     const after = await UserModel.findById(user._id).select('+password tokenVersion').lean();
     expect(after?.password).not.toBe(before?.password); // hash rotated
     expect(after?.tokenVersion).toBe(user.tokenVersion + 1);
+    expect(consumeMock).toHaveBeenCalledWith({
+      userId: user._id.toString(),
+      action: 'change_password',
+      code: '123456',
+    });
+
+    // The response carries a fresh JWT bound to the new tokenVersion so the
+    // calling session can stay alive without re-authenticating.
+    const body = json.mock.calls[0]?.[0] as { data?: { token?: string } };
+    expect(typeof body?.data?.token).toBe('string');
+    expect(body.data!.token!.length).toBeGreaterThan(20);
   });
 
   test('Google-only user (no CREDENTIALS provider) → 400 PASSWORD_NOT_SET', async () => {
@@ -233,7 +305,7 @@ describe('changePasswordController', () => {
 
     const { req, res, status } = buildReqRes({
       userId: user._id.toString(),
-      body: { newPassword: 'nope-pw-12345' },
+      body: { newPassword: 'nope-pw-12345', code: '123456' },
     });
     let caught: unknown;
     try {
@@ -248,9 +320,32 @@ describe('changePasswordController', () => {
   test('unknown userId → 401', async () => {
     const { req, res, status } = buildReqRes({
       userId: 'aaaaaaaaaaaaaaaaaaaaaaaa',
-      body: { newPassword: 'new-pw-12345' },
+      body: { newPassword: 'new-pw-12345', code: '123456' },
     });
     await expect(invokeController(changePasswordController, req, res)).rejects.toThrow('Unauthorized');
     expect(status).toHaveBeenCalledWith(401);
+  });
+
+  test('invalid OTP code → 400 SECURITY_CODE_INVALID; no password change', async () => {
+    const { AppError } = await import('@middleware/errorMiddleware');
+    consumeMock.mockRejectedValueOnce(
+      new AppError('Confirmation code is incorrect.', {
+        errorCode: 'SECURITY_CODE_INVALID',
+        statusCode: 400,
+      }),
+    );
+
+    const user = await makeUser({ email: 'cp-bad-code@example.com' });
+    const before = await UserModel.findById(user._id).select('+password').lean();
+    const { req, res } = buildReqRes({
+      userId: user._id.toString(),
+      body: { newPassword: 'should-not-apply', code: '999999' },
+    });
+    await expect(invokeController(changePasswordController, req, res)).rejects.toMatchObject({
+      message: expect.stringContaining('incorrect'),
+    });
+    const after = await UserModel.findById(user._id).select('+password tokenVersion').lean();
+    expect(after?.password).toBe(before?.password); // unchanged
+    expect(after?.tokenVersion).toBe(user.tokenVersion); // unchanged
   });
 });

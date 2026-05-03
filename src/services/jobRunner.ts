@@ -778,7 +778,20 @@ const processJob = async (jobId: string): Promise<void> => {
     return;
   }
 
-  await JobModel.findByIdAndUpdate(jobId, { status: 'processing' });
+  // Stamp lastHeartbeat at start so the stuck-job watchdog has a fresh
+  // baseline. Subsequent heartbeats are written from `emitProgress` (lesson
+  // generation paths) and from a periodic interval below for job types that
+  // don't stream progress.
+  await JobModel.findByIdAndUpdate(jobId, { status: 'processing', lastHeartbeat: new Date() });
+  // For non-streaming job types (clarify, refine, etc.) `emitProgress` never
+  // fires. A periodic interval keeps the heartbeat warm so the watchdog
+  // doesn't kill them. Cleared in the finally block below.
+  const heartbeatInterval = setInterval(() => {
+    JobModel.findByIdAndUpdate(jobId, { lastHeartbeat: new Date() }).catch(bgError('jobRunner.heartbeat'));
+  }, 30_000);
+  // unref so the interval doesn't block process exit on shutdown if the job
+  // ever lingers past its drain budget.
+  heartbeatInterval.unref();
   const startedAt = Date.now();
   jobLog.info(
     `${job.type}:run jobId=${jobId} userId=${job.userId.toString()} course=${job.courseId.toString()}`,
@@ -852,10 +865,12 @@ const processJob = async (jobId: string): Promise<void> => {
       extra: { jobId, courseId: job.courseId.toString(), metadata: job.metadata },
     });
   } finally {
+    clearInterval(heartbeatInterval);
     // Use findByIdAndUpdate so this is a no-op if the job document was deleted (e.g. course/account deletion)
     await JobModel.findByIdAndUpdate(jobId, {
       status,
       completedAt: new Date(),
+      lastHeartbeat: null,
       ...(status === 'failed' ? { error: errorMessage } : {}),
     });
 
@@ -878,4 +893,86 @@ const processJob = async (jobId: string): Promise<void> => {
       jobEvents.emit('update', failedPayload);
     }
   }
+};
+
+// ── Stuck-job watchdog ──────────────────────────────────
+//
+// The boot-time reaper at `conf/mongo.ts` only fires once per process start.
+// Between boots, a job can crash mid-execution in ways that bypass the
+// `processJob` finally block — e.g. a synchronous throw escaping the timeout
+// race, or an OOM that doesn't kill the process. The 600s `JOB_TIMEOUT_MS`
+// covers most cases for jobs that ARE inside the race, but cancelled-via-
+// fatal paths leave the row stamped `processing` indefinitely.
+//
+// This watchdog scans every WATCHDOG_INTERVAL_MS for `processing` jobs whose
+// `lastHeartbeat` is older than STALE_HEARTBEAT_MS, marks them failed, clears
+// the corresponding course's `activeJobId`, and emits a `failed` socket
+// event so the client UI catches up. We sweep gently (one batch per tick,
+// no pagination) because in practice "more than a handful stuck" implies a
+// platform-level issue that should also be alerting via Sentry.
+
+const WATCHDOG_INTERVAL_MS = 60_000; // sweep every 60s
+const STALE_HEARTBEAT_MS = 120_000; // a 2-minute heartbeat gap is conclusive (interval writes every 30s)
+
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+const sweepStuckJobs = async (): Promise<void> => {
+  const cutoff = new Date(Date.now() - STALE_HEARTBEAT_MS);
+  // findOneAndUpdate atomically claims one stuck job at a time. We loop a
+  // bounded number of iterations to avoid an unbounded sweep — if there are
+  // more than 20 stuck jobs in a single tick, the next tick picks them up.
+  for (let i = 0; i < 20; i++) {
+    const job = await JobModel.findOneAndUpdate(
+      { status: 'processing', lastHeartbeat: { $lt: cutoff } },
+      { status: 'failed', error: 'Stuck job (no heartbeat)', completedAt: new Date(), lastHeartbeat: null },
+      { returnDocument: 'before' },
+    ).catch((err) => {
+      bgError('jobRunner.watchdog.scan')(err);
+      return null;
+    });
+    if (!job) return;
+
+    jobLog.warn(`watchdog:stuck-job-killed jobId=${job._id.toString()} type=${job.type} userId=${job.userId.toString()}`);
+    Sentry.captureMessage('watchdog:stuck-job-killed', {
+      level: 'warning',
+      tags: { source: 'jobRunner.watchdog', jobType: job.type },
+      extra: { jobId: job._id.toString(), courseId: job.courseId.toString() },
+    });
+
+    // Clear the course mutex so a new job can run. Use a conditional filter
+    // so we don't accidentally clear a freshly-claimed activeJobId from a
+    // racing successor.
+    await CourseModel.findOneAndUpdate(
+      { _id: job.courseId, activeJobId: job._id },
+      { activeJobId: null, activeLesson: null },
+    ).catch(bgError('jobRunner.watchdog.clearCourse'));
+
+    // Notify the UI exactly like processJob does on the failure branch.
+    const payload = {
+      jobId: job._id.toString(),
+      status: 'failed' as const,
+      error: 'Stuck job (no heartbeat)',
+      courseId: job.courseId.toString(),
+      type: job.type,
+      userId: job.userId.toString(),
+    };
+    jobEvents.emit(`job:${job._id.toString()}`, payload);
+    jobEvents.emit('update', payload);
+  }
+};
+
+export const startStuckJobWatchdog = (): void => {
+  if (watchdogTimer) return;
+  watchdogTimer = setInterval(() => {
+    sweepStuckJobs().catch(bgError('jobRunner.watchdog.tick'));
+  }, WATCHDOG_INTERVAL_MS);
+  // Don't keep the event loop alive on its own.
+  watchdogTimer.unref();
+  jobLog.info('watchdog:start interval=60s threshold=120s');
+};
+
+export const stopStuckJobWatchdog = (): void => {
+  if (!watchdogTimer) return;
+  clearInterval(watchdogTimer);
+  watchdogTimer = null;
 };

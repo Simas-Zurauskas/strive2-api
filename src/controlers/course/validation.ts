@@ -6,9 +6,38 @@ export const createCourseSchema = z.object({
   goal: z.string().min(1, 'Goal is required').max(500, 'Goal must be at most 500 characters'),
 });
 
+// Each clarify answer is either a single text response (free-text fields)
+// or a small set of multiple-choice selections (chip-pickers). Bound both
+// shapes tightly so a malicious client can't persist arbitrary nested JSON
+// that later flows back into LLM prompts (self-amplification of prompt
+// injection) or that could carry Mongo-operator keys (`$gt`, `$ne`) in
+// later lookups.
+const answerValueSchema = z.union([
+  z.string().max(2000),
+  z.array(z.string().max(500)).max(20),
+]);
+
 export const updateCourseSchema = z.object({
   goal: z.string().min(1).max(500).optional(),
-  answers: z.record(z.string(), z.unknown()).optional(),
+  // Question-id keys are arbitrary strings (the clarify agent invents them
+  // per question), but we cap key length so abusive payloads can't blow up
+  // the document. The .superRefine() below additionally rejects any key
+  // starting with `$` (Mongo operator) or `__` (prototype escape) — they
+  // have no place in a learner's answer payload.
+  answers: z
+    .record(z.string().max(120), answerValueSchema)
+    .superRefine((rec, ctx) => {
+      for (const key of Object.keys(rec)) {
+        if (key.startsWith('$') || key.startsWith('__')) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Invalid answer key: ${key}`,
+            path: [key],
+          });
+        }
+      }
+    })
+    .optional(),
   depth: z.enum(COURSE_DEPTHS).optional(),
   status: z.enum(COURSE_STATUSES).optional(),
   /**

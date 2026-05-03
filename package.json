@@ -2,11 +2,12 @@
   "name": "strive.api",
   "version": "1.0.0",
   "description": "",
+  "private": true,
   "main": "index.js",
   "scripts": {
     "start": "node build/index.js",
     "dev": "nodemon --watch src --ext ts,tsx,scss --exec \"ts-node --files -r tsconfig-paths/register src/index.ts\"",
-    "build": "tsc && tsc-alias",
+    "build": "rm -rf build && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
     "tsc": "tsc --noEmit",
     "stripe:webhook": "stripe listen --forward-to http://localhost:4000/api/stripe/webhook",
     "test": "vitest run",
@@ -16,7 +17,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "UNLICENSED",
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.64",
     "@ai-sdk/langchain": "^2.0.144",

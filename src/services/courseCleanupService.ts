@@ -1,4 +1,5 @@
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
+import CourseMentorChatModel from '@models/CourseMentorChatModel';
 import LessonContentModel from '@models/LessonContentModel';
 import LessonMentorChatModel from '@models/LessonMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
@@ -14,6 +15,7 @@ import { jobLog, integrationLog } from '@lib/loggers';
 export interface CleanupResult {
   chatSessionsDeleted: number;
   mentorChatsDeleted: number;
+  courseMentorChatsDeleted: number;
   lessonContentDeleted: number;
   lessonProgressDeleted: number;
   quizContentDeleted: number;
@@ -38,6 +40,7 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
   const [
     chatSessions,
     mentorChats,
+    courseMentorChats,
     lessonContent,
     lessonProgress,
     quizContent,
@@ -48,6 +51,10 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
   ] = await Promise.all([
     CourseDesignChatModel.deleteMany({ courseId }),
     LessonMentorChatModel.deleteMany({ courseId }),
+    // CourseMentorChatModel was added after the original cleanup wiring
+    // landed and was missing from the cascade — leaving rows orphaned on
+    // course deletion. Caught by the audit; one-line fix.
+    CourseMentorChatModel.deleteMany({ courseId }),
     LessonContentModel.deleteMany({ courseId }),
     UserLessonProgressModel.deleteMany({ courseId }),
     ModuleQuizContentModel.deleteMany({ courseId }),
@@ -75,6 +82,7 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
   const result: CleanupResult = {
     chatSessionsDeleted: chatSessions.deletedCount,
     mentorChatsDeleted: mentorChats.deletedCount,
+    courseMentorChatsDeleted: courseMentorChats.deletedCount,
     lessonContentDeleted: lessonContent.deletedCount,
     lessonProgressDeleted: lessonProgress.deletedCount,
     quizContentDeleted: quizContent.deletedCount,

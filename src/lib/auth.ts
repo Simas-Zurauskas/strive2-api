@@ -10,13 +10,22 @@ export interface AuthTokenPayload {
   exp: number;
 }
 
-// 30-day expiry matches the default NextAuth session lifetime on the client.
-// Previously 100d — reduced to shorten the exposure window for stolen tokens.
-// Existing tokens retain their original baked-in exp; only newly issued tokens
-// get the shorter lifetime. A proper refresh-token flow remains a follow-up.
+// 7-day expiry: cuts the stolen-token exposure window from 30 days to 7 days
+// while still long enough to survive most user "go on holiday" scenarios.
+// Sliding-refresh: the client (NextAuth jwt callback) calls
+// `/api/auth/refresh` BEFORE the token expires to swap in a fresh 7-day
+// token without re-authenticating. That swap reads `tokenVersion` from the
+// DB, so a stolen token whose tokenVersion has been bumped (logout,
+// password change, etc.) refuses to refresh — losing the attacker the
+// session even before the access token expires.
+//
+// Existing tokens retain their original baked-in exp; only newly issued
+// tokens get the shorter lifetime.
+export const ACCESS_TOKEN_TTL = '7d';
+
 export const generateAuthToken = (params: { id: string; tokenVersion: number }): string => {
   const { id, tokenVersion } = params;
-  return jwt.sign({ id, tokenVersion }, JWT_SECRET, { expiresIn: '30d', algorithm: 'HS256' });
+  return jwt.sign({ id, tokenVersion }, JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL, algorithm: 'HS256' });
 };
 
 export const decodeAuthToken = (token: string): AuthTokenPayload | undefined => {

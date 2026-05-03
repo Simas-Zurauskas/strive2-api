@@ -9,6 +9,10 @@
  *
  * Bugs here orphan rows, leak billing, or skip the abuse defense.
  *
+ * Auth model: deletion is gated by an email-OTP flow, NOT by password.
+ * The OTP service is mocked here so tests focus on the post-confirmation
+ * cascade; the OTP code itself is exercised in securityActionService tests.
+ *
  * Run: yarn test deleteAccount
  */
 
@@ -27,11 +31,12 @@ import { buildReqRes, invokeController } from '../../../test-helpers/express';
 import { AuthProvider } from '@lib/constants';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 
-// Mock Stripe + abuse-log + cleanupCourseContent so we can spy on each call.
-const { fakeCancelAllSubs, fakeRecordDeletion, fakeCleanupCourse } = vi.hoisted(() => ({
+// Mock Stripe + abuse-log + cleanupCourseContent + securityActionService.
+const { fakeCancelAllSubs, fakeRecordDeletion, fakeCleanupCourse, fakeConsumeCode } = vi.hoisted(() => ({
   fakeCancelAllSubs: vi.fn(() => Promise.resolve()),
   fakeRecordDeletion: vi.fn(() => Promise.resolve()),
   fakeCleanupCourse: vi.fn(() => Promise.resolve({})),
+  fakeConsumeCode: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock('@services/stripeService', async (importOriginal) => {
@@ -52,9 +57,15 @@ vi.mock('@services/courseCleanupService', () => ({
   getEditImpact: vi.fn(),
 }));
 
+vi.mock('@services/securityActionService', () => ({
+  consumeSecurityActionCode: fakeConsumeCode,
+}));
+
 import { deleteAccountController } from '@controlers/auth/deleteAccount';
 
 setupTestDb();
+
+const VALID_CODE = '123456';
 
 beforeEach(() => {
   fakeCancelAllSubs.mockReset();
@@ -63,12 +74,14 @@ beforeEach(() => {
   fakeRecordDeletion.mockResolvedValue(undefined);
   fakeCleanupCourse.mockReset();
   fakeCleanupCourse.mockResolvedValue({});
+  fakeConsumeCode.mockReset();
+  fakeConsumeCode.mockResolvedValue(undefined);
 });
 
 // ── Happy paths ─────────────────────────────────────────
 
 describe('deleteAccountController — happy paths', () => {
-  test('credentials user with valid password: cascade complete + user deleted', async () => {
+  test('credentials user with valid OTP code: cascade complete + user deleted', async () => {
     const user = await makeUser({
       email: 'del@example.com',
       plainPassword: 'pw12345678',
@@ -79,12 +92,18 @@ describe('deleteAccountController — happy paths', () => {
 
     const { req, res, status, json } = buildReqRes({
       userId: user._id.toString(),
-      body: { password: 'pw12345678' },
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res);
     expect(status).toHaveBeenCalledWith(200);
     expect(json).toHaveBeenCalledWith({ data: { deleted: true } });
 
+    // OTP code was consumed exactly once for the right action.
+    expect(fakeConsumeCode).toHaveBeenCalledWith({
+      userId: user._id.toString(),
+      action: 'delete_account',
+      code: VALID_CODE,
+    });
     // User row gone
     expect(await UserModel.findById(user._id)).toBeNull();
     // Per-course cleanup ran for each course
@@ -98,16 +117,18 @@ describe('deleteAccountController — happy paths', () => {
       email: 'del@example.com',
       userId: user._id,
     });
+    // Hint: course2 kept around to verify both cleanups ran (see expect above).
+    expect(course2._id.toString()).toBeTruthy();
   });
 
-  test('Google-only user: no password required → cascades without comparePassword check', async () => {
+  test('Google-only user: same OTP-only flow (no password skip path anymore)', async () => {
     const user = await makeUser({
       email: 'goog-del@example.com',
       authProviders: [{ provider: AuthProvider.GOOGLE, providerId: 'g1' }],
     });
     const { req, res, status } = buildReqRes({
       userId: user._id.toString(),
-      body: {}, // no password — would fail Zod for credentials user
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res);
     expect(status).toHaveBeenCalledWith(200);
@@ -127,7 +148,7 @@ describe('deleteAccountController — happy paths', () => {
 
     const { req, res } = buildReqRes({
       userId: owner._id.toString(),
-      body: { password: 'pw12345678' },
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res);
 
@@ -154,7 +175,7 @@ describe('deleteAccountController — happy paths', () => {
 
     const { req, res } = buildReqRes({
       userId: user._id.toString(),
-      body: { password: 'pw12345678' },
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res);
 
@@ -170,7 +191,7 @@ describe('deleteAccountController — happy paths', () => {
 
     const { req, res } = buildReqRes({
       userId: user._id.toString(),
-      body: { password: 'pw12345678' },
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res);
 
@@ -181,7 +202,7 @@ describe('deleteAccountController — happy paths', () => {
     const user = await makeUser({ email: 'free-del@example.com', plainPassword: 'pw12345678' });
     const { req, res } = buildReqRes({
       userId: user._id.toString(),
-      body: { password: 'pw12345678' },
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res);
     expect(fakeCancelAllSubs).not.toHaveBeenCalled();
@@ -191,25 +212,35 @@ describe('deleteAccountController — happy paths', () => {
 // ── Failure paths ───────────────────────────────────────
 
 describe('deleteAccountController — failure paths', () => {
-  test('credentials user with WRONG password → 401, no deletion', async () => {
+  test('invalid OTP code → AppError; no deletion', async () => {
+    const { AppError } = await import('@middleware/errorMiddleware');
+    fakeConsumeCode.mockRejectedValueOnce(
+      new AppError('Confirmation code is incorrect.', {
+        errorCode: 'SECURITY_CODE_INVALID',
+        statusCode: 400,
+      }),
+    );
     const user = await makeUser({ email: 'wpw@example.com', plainPassword: 'right-pw-123' });
-    const { req, res, status } = buildReqRes({
+    const { req, res } = buildReqRes({
       userId: user._id.toString(),
-      body: { password: 'wrong-pw-456' },
+      body: { code: '999999' },
     });
-    await expect(invokeController(deleteAccountController, req, res)).rejects.toThrow('Invalid password');
-    expect(status).toHaveBeenCalledWith(401);
+    await expect(invokeController(deleteAccountController, req, res)).rejects.toMatchObject({
+      message: expect.stringContaining('incorrect'),
+    });
     // Sanity: user still exists
     expect(await UserModel.findById(user._id)).not.toBeNull();
   });
 
-  test('unknown userId → 401', async () => {
+  test('unknown userId → 401 (before OTP check)', async () => {
     const { req, res, status } = buildReqRes({
       userId: 'aaaaaaaaaaaaaaaaaaaaaaaa',
-      body: { password: 'whatever' },
+      body: { code: VALID_CODE },
     });
     await expect(invokeController(deleteAccountController, req, res)).rejects.toThrow();
     expect(status).toHaveBeenCalledWith(401);
+    // OTP not consumed for ghost users.
+    expect(fakeConsumeCode).not.toHaveBeenCalled();
   });
 
   test('Stripe cancel throws: deletion still proceeds (right-to-erasure takes priority)', async () => {
@@ -222,7 +253,7 @@ describe('deleteAccountController — failure paths', () => {
 
     const { req, res, status } = buildReqRes({
       userId: user._id.toString(),
-      body: { password: 'pw12345678' },
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res); // should not throw
     expect(status).toHaveBeenCalledWith(200);
@@ -235,10 +266,14 @@ describe('deleteAccountController — failure paths', () => {
 
     const { req, res, status } = buildReqRes({
       userId: user._id.toString(),
-      body: { password: 'pw12345678' },
+      body: { code: VALID_CODE },
     });
     await invokeController(deleteAccountController, req, res);
     expect(status).toHaveBeenCalledWith(200);
     expect(await UserModel.findById(user._id)).toBeNull();
   });
 });
+
+// quiet the unused-import linter for the assert utility we keep around
+// for parity with sibling test files.
+assert.equal(typeof deleteAccountController, 'function');

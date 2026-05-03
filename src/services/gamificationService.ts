@@ -331,18 +331,37 @@ const checkAchievements = async ({
 
   for (const achievement of candidates) {
     const earned = await isAchievementEarned({ achievement, userObjId, context });
-    if (earned) {
-      doc.earnedAchievements.push({
-        achievementId: achievement.id,
-        earnedAt: new Date(),
-        metadata: context as Record<string, unknown>,
-      });
+    if (!earned) continue;
+
+    // Atomic per-achievement insert with a "not yet earned" filter. This
+    // replaces the prior `doc.earnedAchievements.push()` + `doc.save()` flow,
+    // which had a race window between two concurrent `checkAchievements`
+    // calls for the same user — both would load the doc, both push the same
+    // achievement, the second save would clobber the first or persist a
+    // duplicate row in the array. The `$ne` filter here guarantees at most
+    // one writer wins per (user, achievementId).
+    const result = await UserGamificationModel.updateOne(
+      {
+        userId: userObjId,
+        'earnedAchievements.achievementId': { $ne: achievement.id },
+      },
+      {
+        $push: {
+          earnedAchievements: {
+            achievementId: achievement.id,
+            earnedAt: new Date(),
+            metadata: context as Record<string, unknown>,
+          },
+        },
+      },
+    );
+
+    // modifiedCount === 1 → we won the race; modifiedCount === 0 → another
+    // concurrent caller already inserted this achievement. Both outcomes
+    // are correct; we only emit `newlyEarned` for the one we actually wrote.
+    if (result.modifiedCount === 1) {
       newlyEarned.push(achievement);
     }
-  }
-
-  if (newlyEarned.length > 0) {
-    await doc.save();
   }
 
   return newlyEarned;

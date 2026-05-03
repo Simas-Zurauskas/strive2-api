@@ -34,6 +34,35 @@ import { getStripe, mapPriceIdToPlan } from './stripeService';
 import Stripe from 'stripe';
 
 /**
+ * Throw this from a handler when an error is transient — a Mongo replica-set
+ * blip, an outbound vendor 503, etc. The webhook controller treats it as
+ * "ask Stripe to retry us" (5xx response). Anything else thrown from a
+ * handler is treated as deterministic and acknowledged to break the retry
+ * loop (logged + captured to Sentry; reconciliation cron handles drift).
+ */
+export class RetryableWebhookError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = 'RetryableWebhookError';
+  }
+}
+
+/**
+ * Translate a low-level error into RetryableWebhookError when it looks
+ * transient. Mongoose drivers throw `MongoNetworkError`, `MongoServerError`
+ * with codes like 11600 (interrupted) etc. — all retryable.
+ */
+const isTransientError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  const name = (err as { name?: string }).name;
+  if (name === 'MongoNetworkError' || name === 'MongoTimeoutError' || name === 'MongoNotConnectedError') return true;
+  // Mongo "transient" labels surface as code or codeName depending on driver version.
+  const codeName = (err as { codeName?: string }).codeName;
+  if (codeName === 'NotWritablePrimary' || codeName === 'InterruptedAtShutdown') return true;
+  return false;
+};
+
+/**
  * Webhook event handler. Each branch is idempotent via the `stripeEventId`
  * unique-sparse index on `CreditLedger`: if a credit-mutating handler fires
  * twice for the same event id, the second ledger insert throws E11000 which
@@ -43,31 +72,39 @@ import Stripe from 'stripe';
  */
 export const handleStripeEvent = async (event: Stripe.Event): Promise<void> => {
   monetizationLog.info(`Webhook received: ${event.type} (${event.id})`);
-  switch (event.type) {
-    case 'checkout.session.completed':
-      await handleCheckoutSessionCompleted(event);
-      return;
-    case 'customer.subscription.updated':
-      await handleSubscriptionUpdated(event);
-      return;
-    case 'customer.subscription.deleted':
-      await handleSubscriptionDeleted(event);
-      return;
-    case 'invoice.paid':
-      await handleInvoicePaid(event);
-      return;
-    case 'invoice.payment_failed':
-      await handleInvoicePaymentFailed(event);
-      return;
-    case 'charge.refunded':
-      await handleChargeRefunded(event);
-      return;
-    case 'charge.dispute.created':
-      await handleChargeDisputeCreated(event);
-      return;
-    default:
-      // Stripe sends lots of event types; ignore the ones we don't subscribe to.
-      return;
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed':
+        await handleCheckoutSessionCompleted(event);
+        return;
+      case 'customer.subscription.updated':
+        await handleSubscriptionUpdated(event);
+        return;
+      case 'customer.subscription.deleted':
+        await handleSubscriptionDeleted(event);
+        return;
+      case 'invoice.paid':
+        await handleInvoicePaid(event);
+        return;
+      case 'invoice.payment_failed':
+        await handleInvoicePaymentFailed(event);
+        return;
+      case 'charge.refunded':
+        await handleChargeRefunded(event);
+        return;
+      case 'charge.dispute.created':
+        await handleChargeDisputeCreated(event);
+        return;
+      default:
+        // Stripe sends lots of event types; ignore the ones we don't subscribe to.
+        return;
+    }
+  } catch (err) {
+    if (err instanceof RetryableWebhookError) throw err;
+    if (isTransientError(err)) {
+      throw new RetryableWebhookError(`Transient handler failure: ${err instanceof Error ? err.message : String(err)}`, err);
+    }
+    throw err;
   }
 };
 
@@ -210,26 +247,60 @@ const onTopupCheckoutCompleted = async ({
     return;
   }
 
+  // Idempotency: pre-check the unique stripeEventId on CreditLedger BEFORE
+  // running the `$inc`. Stripe retries (and concurrent duplicate deliveries)
+  // would otherwise increment the bonus balance twice, with only the second
+  // ledger insert tripping E11000 — the first $inc would have already gone
+  // through. Mirrors `applyClawback` below.
+  const existing = await CreditLedgerModel.findOne({ stripeEventId: event.id }).select('_id').lean();
+  if (existing) {
+    monetizationLog.info(`Top-up: duplicate event ${event.id}, skipping`);
+    return;
+  }
+
   const user = await UserModel.findById(userId).select('credits').lean();
   if (!user) return;
 
   await UserModel.updateOne({ _id: userId }, { $inc: { 'credits.bonusBalance': credits } });
 
-  await writeLedger({
-    userId,
-    stripeEventId: event.id,
-    reason: 'topup_purchase',
-    allowanceDelta: 0,
-    bonusDelta: credits,
-    balanceBefore: user.credits.allowanceBalance,
-    balanceAfter: user.credits.allowanceBalance,
-    bonusBefore: user.credits.bonusBalance,
-    bonusAfter: user.credits.bonusBalance + credits,
-    // User-visible ledger row — credit count is intentionally omitted so
-    // the UI stays consistent with the "hide raw credits" policy. Dollar
-    // amount alone tells the user what they spent.
-    notes: `Top-up: $${amountUsd}`,
-  });
+  try {
+    await writeLedger({
+      userId,
+      stripeEventId: event.id,
+      reason: 'topup_purchase',
+      allowanceDelta: 0,
+      bonusDelta: credits,
+      balanceBefore: user.credits.allowanceBalance,
+      balanceAfter: user.credits.allowanceBalance,
+      bonusBefore: user.credits.bonusBalance,
+      bonusAfter: user.credits.bonusBalance + credits,
+      // User-visible ledger row — credit count is intentionally omitted so
+      // the UI stays consistent with the "hide raw credits" policy. Dollar
+      // amount alone tells the user what they spent.
+      notes: `Top-up: $${amountUsd}`,
+    });
+  } catch (err) {
+    // Concurrent racing duplicate that passed the pre-check above. The
+    // second writer's ledger insert hits E11000 here and we DON'T want to
+    // un-do the $inc — the first writer's $inc is the one we keep.
+    // Compensating action: roll back this writer's $inc to keep balance
+    // consistent. Bounded retry: a Mongo hiccup mid-rollback would leak
+    // a credit, but at this scale (~ms-wide race window) it's acceptable.
+    if (isDuplicateKeyError(err)) {
+      await UserModel.updateOne({ _id: userId }, { $inc: { 'credits.bonusBalance': -credits } }).catch((rollbackErr) => {
+        monetizationLog.error(
+          `Top-up race: failed to roll back duplicate $inc for user=${userId} event=${event.id} — credit balance may be off by ${credits}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+        );
+        Sentry.captureException(rollbackErr, {
+          tags: { area: 'stripe.webhook.topup.rollback' },
+          extra: { userId, eventId: event.id, credits },
+        });
+      });
+      monetizationLog.info(`Top-up: duplicate event race ${event.id}, rolled back $inc`);
+      return;
+    }
+    throw err;
+  }
 
   monetizationLog.info(
     `Top-up purchased: user=${userId} credits=+${credits} amount=$${amountUsd} bonus=${user.credits.bonusBalance}→${user.credits.bonusBalance + credits}`,
@@ -277,6 +348,19 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
     update['subscription.plan'] = newPlan;
     update['subscription.pendingPlan'] = null;
 
+    // Idempotency: pre-check stripeEventId BEFORE the `$inc`. Without this,
+    // a duplicate webhook delivery would double-credit the upgrade bonus
+    // (the first delivery's $inc is already applied; only the second's
+    // ledger-insert hits E11000). Mirrors `applyClawback`.
+    const existing = await CreditLedgerModel.findOne({ stripeEventId: event.id }).select('_id').lean();
+    if (existing) {
+      monetizationLog.info(`Duplicate subscription.updated event ${event.id}, skipping`);
+      // We still want the state-sync `$set` to be idempotently applied, so
+      // run the update without the $inc on duplicate.
+      await UserModel.updateOne({ _id: user._id }, { $set: update });
+      return;
+    }
+
     try {
       await UserModel.updateOne(
         { _id: user._id },
@@ -286,27 +370,47 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
         },
       );
       if (deltaAllowance > 0) {
-        await writeLedger({
-          userId: user._id,
-          stripeEventId: event.id,
-          reason: 'plan_upgrade_bonus',
-          allowanceDelta: deltaAllowance,
-          bonusDelta: 0,
-          balanceBefore: user.credits.allowanceBalance,
-          balanceAfter: user.credits.allowanceBalance + deltaAllowance,
-          bonusBefore: user.credits.bonusBalance,
-          bonusAfter: user.credits.bonusBalance,
-          notes: `Upgrade ${oldPlan} → ${newPlan}: +${deltaAllowance} allowance`,
-        });
+        try {
+          await writeLedger({
+            userId: user._id,
+            stripeEventId: event.id,
+            reason: 'plan_upgrade_bonus',
+            allowanceDelta: deltaAllowance,
+            bonusDelta: 0,
+            balanceBefore: user.credits.allowanceBalance,
+            balanceAfter: user.credits.allowanceBalance + deltaAllowance,
+            bonusBefore: user.credits.bonusBalance,
+            bonusAfter: user.credits.bonusBalance,
+            notes: `Upgrade ${oldPlan} → ${newPlan}: +${deltaAllowance} allowance`,
+          });
+        } catch (err) {
+          // Concurrent racing duplicate. Roll back the just-applied $inc so
+          // we don't double-credit the upgrade bonus.
+          if (isDuplicateKeyError(err)) {
+            await UserModel.updateOne(
+              { _id: user._id },
+              { $inc: { 'credits.allowanceBalance': -Math.max(0, deltaAllowance) } },
+            ).catch((rollbackErr) => {
+              monetizationLog.error(
+                `Upgrade race: failed to roll back duplicate $inc for user=${user._id} event=${event.id} — allowance off by ${deltaAllowance}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+              );
+              Sentry.captureException(rollbackErr, {
+                tags: { area: 'stripe.webhook.upgrade.rollback' },
+                extra: { userId: user._id.toString(), eventId: event.id, deltaAllowance },
+              });
+            });
+            monetizationLog.info(`Plan upgrade: duplicate event race ${event.id}, rolled back $inc`);
+            return;
+          }
+          throw err;
+        }
       }
       monetizationLog.info(`Plan upgraded: user=${user._id} ${oldPlan}→${newPlan} bonus=+${deltaAllowance} allowance`);
     } catch (err) {
-      // Duplicate-key on stripeEventId means we've already processed this
-      // exact event; state sync happens once, safe to swallow.
-      if (!isDuplicateKeyError(err)) {
-        throw err;
-      }
-      monetizationLog.info(`Duplicate subscription.updated event ${event.id}, skipping`);
+      // Bubble up — no $inc rollback needed because the outer updateOne is
+      // a single atomic update and either applied both $set and $inc or
+      // applied neither.
+      throw err;
     }
     return;
   }
