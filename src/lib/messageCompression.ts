@@ -1,6 +1,6 @@
 import { HumanMessage } from '@langchain/core/messages';
 import { getUtilityModel } from '@lib/langchain';
-import { chat } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 
 /**
  * Rolling-summary chat-history compression.
@@ -152,13 +152,13 @@ export const compressMessageHistory = async ({
   const priorSummaryDesc = priorSummary
     ? `yes(upTo=${priorSummary.upToMessageCount},${priorSummary.text.length}c,age=${summaryAgeMs !== null ? `${Math.round(summaryAgeMs / 1000)}s` : 'n/a'})`
     : 'no';
-  chat.info(
+  chatLog.info(
     `${scope}:compress state history=${history.length} priorSummary=${priorSummaryDesc} uncovered=${recentSlice.length} refresh-at=${refreshAt} until-refresh=${turnsUntilRefresh}`,
   );
 
   // No summary yet AND short enough → pass through unchanged.
   if (!priorSummary && recentSlice.length <= refreshAt) {
-    chat.info(
+    chatLog.info(
       `${scope}:compress passthrough — no summary needed yet (${recentSlice.length}/${refreshAt} messages)`,
     );
     return { history };
@@ -167,7 +167,7 @@ export const compressMessageHistory = async ({
   // Have a prior summary but uncovered slice is still inside the
   // refresh window → reuse it verbatim, no LLM call.
   if (priorSummary && recentSlice.length <= refreshAt) {
-    chat.info(
+    chatLog.info(
       `${scope}:compress reuse — ${recentSlice.length}/${refreshAt} uncovered, refresh in ${turnsUntilRefresh} message(s)`,
     );
     return {
@@ -180,7 +180,7 @@ export const compressMessageHistory = async ({
   const newToSummarise = recentSlice.slice(0, excessCount);
   const recentToKeep = recentSlice.slice(excessCount);
 
-  chat.info(
+  chatLog.info(
     `${scope}:compress REFRESHING uncovered=${recentSlice.length} > ${refreshAt}, folding ${newToSummarise.length} new message(s) into ${priorSummary ? 'existing' : 'fresh'} summary, keeping last ${recentToKeep.length} verbatim`,
   );
   const refreshStartMs = Date.now();
@@ -214,7 +214,7 @@ export const compressMessageHistory = async ({
     // messages away — roughly that many ÷ 2 chat turns.
     const messagesUntilNextRefresh = refreshThreshold + 1;
     const refreshMs = Date.now() - refreshStartMs;
-    chat.info(
+    chatLog.info(
       `${scope}:compress done ms=${refreshMs} folded=${newToSummarise.length} summary=${summaryText.length}c upTo=${newSummary.upToMessageCount}/${history.length} next-refresh-in=~${messagesUntilNextRefresh} message(s) (${Math.ceil(messagesUntilNextRefresh / 2)} turn(s))`,
     );
 
@@ -223,7 +223,7 @@ export const compressMessageHistory = async ({
       newSummary,
     };
   } catch (e) {
-    chat.warn(
+    chatLog.warn(
       `${scope}:compress summariser failed ms=${Date.now() - refreshStartMs} err=${e instanceof Error ? e.message : e}`,
     );
 
@@ -232,7 +232,7 @@ export const compressMessageHistory = async ({
     // hard-truncate to a safety window so a 200-message session never
     // gets sent uncompressed.
     if (priorSummary) {
-      chat.warn(
+      chatLog.warn(
         `${scope}:compress fallback reuse-prior + last ${recentToKeep.length} verbatim (stale by ${newToSummarise.length} message(s))`,
       );
       return {
@@ -241,7 +241,7 @@ export const compressMessageHistory = async ({
     }
     const SAFETY_WINDOW = 20;
     const truncated = history.slice(-SAFETY_WINDOW);
-    chat.warn(
+    chatLog.warn(
       `${scope}:compress fallback hard-truncate to last ${truncated.length}/${history.length} message(s)`,
     );
     return { history: truncated };

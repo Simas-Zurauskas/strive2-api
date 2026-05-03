@@ -4,7 +4,7 @@ import { EventEmitter } from 'events';
 import { ANTHROPIC_API_KEY } from '@conf/env';
 import { MODEL_IDS } from '@lib/langchain';
 import { logCacheUsage, usageFromAnthropic } from '@lib/ai/cacheLogger';
-import { chat as chatLog } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import {
   LESSON_MENTOR_SYSTEM_PROMPT,
   buildAttachmentsBlock,
@@ -49,7 +49,7 @@ const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: 'search_lesson_content',
     description:
-      "Search the course's indexed lesson content via vector similarity. Use when the learner references material from another lesson, asks something that might be in the broader course, or you need to verify a recall against the source material. Returns up to 5 ranked chunks with their lesson/module location.",
+      "Search the course's indexed lesson content via vector similarity. Use when the learner references material from another lesson, asks something that might be in the broader course, or you need to verify a recall against the source material. Returns up to 5 ranked chunks with their lesson/module location. NOTE: this tool searches COURSE content — for questions about Strive itself (billing, the spaced-review queue mechanic, achievements, narration, etc.) use search_product_kb instead.",
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -57,6 +57,21 @@ const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
         moduleIndex: {
           type: 'number',
           description: 'Optional: restrict search to a specific module index. Omit to search the entire course.',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'search_product_kb',
+    description:
+      "Search Strive's product help center via vector similarity. Use ONLY for product-meta questions: how Strive itself works (billing, allowance, course creation, lessons, mentor, narration, spaced review, mastery, achievements). DO NOT use for course-content questions — use search_lesson_content for those. Returns up to 3 ranked excerpts with article href; cite via inline markdown links in your reply.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Natural-language question about how Strive works as a product.',
         },
       },
       required: ['query'],

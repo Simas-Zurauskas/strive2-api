@@ -51,7 +51,7 @@ stub('STRIPE_PRICE_ID_STUDIO_ANNUAL', 'price_studio_yr');
 
 // Silence the domain loggers — production stdout is great for triage but
 // during tests the volume hides actual failures. Loggers can still be
-// re-enabled per-test via `monetization.enabled = true` if a test wants
+// re-enabled per-test via `monetizationLog.enabled = true` if a test wants
 // to assert on a log line.
-import { monetization } from '@lib/loggers';
-monetization.enabled = false;
+import { monetizationLog } from '@lib/loggers';
+monetizationLog.enabled = false;

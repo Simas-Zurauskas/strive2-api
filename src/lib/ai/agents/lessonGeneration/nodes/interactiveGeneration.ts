@@ -18,7 +18,9 @@ import {
 import { withRetry } from '@lib/retry';
 import { shuffleOptionsWithCorrectIndex } from '@lib/ai/shuffleOptions';
 import { lintDistractors, repairDistractors } from '@lib/ai/distractorLint';
+import { lintQuizIntegrity } from '@lib/ai/quizIntegrityLint';
 import type { LessonProgressWriter } from '@src/types/socketEvents';
+import { genLog } from '@lib/loggers';
 import { LessonState } from '../state';
 import { interactiveOutputSchema, buildInteractiveSystemPrompt } from '../prompts';
 
@@ -144,9 +146,10 @@ const actionableReasonsOf = (violation: QuizLintViolation): string[] =>
 const isActionableViolation = (violation: QuizLintViolation): boolean =>
   actionableReasonsOf(violation).length > 0;
 
-// Runs distractor-lint on every MCQ-shaped block. Pre-sanitize, pre-shuffle:
-// `correctIndex` still reflects generation order (required by length /
-// longest checks).
+// Runs distractor-style lint AND quiz-integrity lint on every MCQ-shaped
+// block. Pre-sanitize, pre-shuffle: `correctIndex` still reflects generation
+// order (required by length / longest checks). Style and integrity reasons
+// are unioned per block — a single block can carry violations from both.
 const lintQuizBlocks = (blocks: z.infer<typeof interactiveOutputSchema>['blocks']): QuizLintViolation[] => {
   const out: QuizLintViolation[] = [];
   for (const block of blocks) {
@@ -154,10 +157,17 @@ const lintQuizBlocks = (blocks: z.infer<typeof interactiveOutputSchema>['blocks'
     const meta = block.metadata as Record<string, unknown>;
     const options = meta.options;
     const correctIndex = meta.correctIndex;
+    const explanation = meta.explanation;
     if (!Array.isArray(options) || !options.every((o) => typeof o === 'string')) continue;
     if (typeof correctIndex !== 'number') continue;
-    const lint = lintDistractors({ options: options as string[], correctIndex });
-    if (lint.reasons.length > 0) out.push({ id: block.id, reasons: lint.reasons });
+    const styleLint = lintDistractors({ options: options as string[], correctIndex });
+    const integrityLint = lintQuizIntegrity({
+      options: options as string[],
+      correctIndex,
+      explanation: typeof explanation === 'string' ? explanation : '',
+    });
+    const merged = [...styleLint.reasons, ...integrityLint.reasons];
+    if (merged.length > 0) out.push({ id: block.id, reasons: merged });
   }
   return out;
 };
@@ -203,11 +213,20 @@ const repairQuizBlocks = ({
     meta.options = repair.options;
     block.metadata = meta;
 
-    const postLint = lintDistractors({ options: repair.options, correctIndex });
-    if (postLint.reasons.length === 0) {
+    // Re-lint with BOTH style and integrity. `repairDistractors` only
+    // addresses style violations; integrity violations (`duplicate-options`,
+    // `truncated-correct`, `explanation-mismatch`) survive any repair.
+    const postStyle = lintDistractors({ options: repair.options, correctIndex });
+    const postIntegrity = lintQuizIntegrity({
+      options: repair.options,
+      correctIndex,
+      explanation: typeof meta.explanation === 'string' ? meta.explanation : '',
+    });
+    const postReasons = [...postStyle.reasons, ...postIntegrity.reasons];
+    if (postReasons.length === 0) {
       repairedIds.push(v.id);
     } else {
-      residual.push({ id: v.id, reasons: postLint.reasons });
+      residual.push({ id: v.id, reasons: postReasons });
     }
   }
 
@@ -218,6 +237,9 @@ const LINT_REASON_HINT: Record<string, string> = {
   'length-uniformity': 'all four options must be within ±35% of the median character length — move the short/long outliers toward the median, preferably by lengthening short distractors with plausible elaboration rather than shortening the correct answer',
   'correct-is-longest': 'the correct answer cannot be strictly the longest option — tighten it or lengthen the distractors so at least one ties or exceeds it',
   'distractor-absolute-qualifier': 'distractors contain "always / never / only / all / none / every / any" while the correct answer does not — strip those absolute qualifiers from distractors (or add one to the correct answer)',
+  'duplicate-options': 'two or more options have identical text after trimming and casefolding — generate four distinct distractors with different misconceptions, no near-duplicates',
+  'truncated-correct': 'the correct option appears truncated (ends mid-clause / on a trailing conjunction / as an unbalanced quote / as a SQL fragment shorter than peers) — rewrite it as a complete self-contained answer',
+  'explanation-mismatch': 'the explanation argues for a different option than `correctIndex` points to (textual cite or signature-token overlap disagrees) — re-read the explanation and either (a) update correctIndex to match what the explanation actually justifies, or (b) rewrite the explanation to defend the option at correctIndex',
 };
 
 // Build a targeted retry message for the LLM. Names each offending block,
@@ -251,7 +273,8 @@ const buildDistractorLintFeedback = ({
 export const interactiveGeneration = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
   const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
-  console.log(`[interactiveGeneration] Generating quizzes + exercise...`.cyan);
+  const interactiveStart = Date.now();
+  genLog.info(`lesson:interactive start depth=${state.depth}`);
 
   const summaryBlock = state.contentBlocks.find((b) => b.type === 'summary');
   const maxContentOrder = Math.max(...state.contentBlocks.map((b) => b.order));
@@ -336,7 +359,7 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
         // Reset `lintFeedback` because its question-id references won't
         // apply to a fresh Sonnet generation.
         if (tier === 'haiku' && attempt < MAX_DISTRACTOR_LINT_ATTEMPTS) {
-          console.warn(`[interactiveGeneration] ⚠ Haiku attempt failed (${err instanceof Error ? err.message : err}) — escalating to Sonnet`.yellow);
+          genLog.warn(`lesson:interactive haiku-fail reason=${err instanceof Error ? err.message : err} — escalating to Sonnet`);
           lintFeedback = null;
           continue;
         }
@@ -360,7 +383,7 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
 
       if (actionableViolations.length === 0) {
         for (let i = 0; i < lengthOnlyIds.length; i++) bumpQuizDistractorLintLengthOnlyShipped();
-        console.log(`[interactiveGeneration] ℹ distractor-lint length-uniformity only on ${lengthOnlyIds.length} block(s) — shipping (correct-not-longest guard holds): ${lengthOnlyIds.join(', ')}`.gray);
+        genLog.info(`lesson:interactive lint-length-only count=${lengthOnlyIds.length} ids=${lengthOnlyIds.join(',')} — shipping (correct-not-longest holds)`);
         break;
       }
 
@@ -373,7 +396,7 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
       const repair = repairQuizBlocks({ blocks: attemptOutput.blocks, violations: actionableViolations });
       if (repair.repairedIds.length > 0) {
         for (let i = 0; i < repair.repairedIds.length; i++) bumpQuizDistractorLintRepaired();
-        console.log(`[interactiveGeneration] ✓ distractor-lint repair cleared ${repair.repairedIds.length} block(s): ${repair.repairedIds.join(', ')}`.green);
+        genLog.info(`lesson:interactive lint-repair-ok cleared=${repair.repairedIds.length} ids=${repair.repairedIds.join(',')}`);
       }
 
       const residualActionable = repair.residual.filter(isActionableViolation);
@@ -386,7 +409,7 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
         // Repair cleared every actionable reason — ship without a retry.
         if (residualLengthOnlyIds.length > 0) {
           for (let i = 0; i < residualLengthOnlyIds.length; i++) bumpQuizDistractorLintLengthOnlyShipped();
-          console.log(`[interactiveGeneration] ℹ distractor-lint length-uniformity only on ${residualLengthOnlyIds.length} block(s) — shipping: ${residualLengthOnlyIds.join(', ')}`.gray);
+          genLog.info(`lesson:interactive lint-length-only count=${residualLengthOnlyIds.length} ids=${residualLengthOnlyIds.join(',')} — shipping`);
         }
         break;
       }
@@ -398,16 +421,16 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
       if (attempt === MAX_DISTRACTOR_LINT_ATTEMPTS) {
         // Out of attempts. Ship with hard-fail log.
         bumpQuizDistractorLintHardFail();
-        console.warn(`[interactiveGeneration] ⚠ distractor-lint hard-fail after ${MAX_DISTRACTOR_LINT_ATTEMPTS} attempts + repair on ${residualActionable.length} block(s) — shipping anyway: ${residualSummary}`.yellow);
+        genLog.warn(`lesson:interactive lint-hardfail attempts=${MAX_DISTRACTOR_LINT_ATTEMPTS} stillFailing=${residualActionable.length} residual=${residualSummary} — shipping anyway`);
         if (residualLengthOnlyIds.length > 0) {
           for (let i = 0; i < residualLengthOnlyIds.length; i++) bumpQuizDistractorLintLengthOnlyShipped();
-          console.log(`[interactiveGeneration] ℹ distractor-lint length-uniformity only on ${residualLengthOnlyIds.length} block(s) — shipping: ${residualLengthOnlyIds.join(', ')}`.gray);
+          genLog.info(`lesson:interactive lint-length-only count=${residualLengthOnlyIds.length} ids=${residualLengthOnlyIds.join(',')} — shipping`);
         }
         break;
       }
 
       bumpQuizDistractorLintRetry();
-      console.warn(`[interactiveGeneration] ⚠ distractor-lint attempt ${attempt}/${MAX_DISTRACTOR_LINT_ATTEMPTS} after repair — ${residualSummary}; retrying with feedback`.yellow);
+      genLog.warn(`lesson:interactive lint-retry attempt=${attempt}/${MAX_DISTRACTOR_LINT_ATTEMPTS} residual=${residualSummary} — retrying with feedback`);
       lintFeedback = buildDistractorLintFeedback({ blocks: attemptOutput.blocks, violations: residualActionable });
     }
 
@@ -421,11 +444,11 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
     const sanitizedBlocks = result.blocks.map((b) => {
       const { block, failedSpans, artifactStrips, artifactGutted } = sanitizeInteractiveBlock(b);
       if (failedSpans > 0) {
-        console.warn(`[interactiveGeneration] LaTeX sanitize: ${block.id} had ${failedSpans} malformed span(s)`.yellow);
+        genLog.warn(`lesson:interactive latex-sanitize block=${block.id} failedSpans=${failedSpans}`);
         totalLatexFailures += failedSpans;
       }
       if (artifactStrips > 0) {
-        console.warn(`[interactiveGeneration] Artifact scrub: ${block.id} had ${artifactStrips} meta-phrase(s) removed${artifactGutted > 0 ? ` (${artifactGutted} field(s) gutted → fallback used)` : ''}`.yellow);
+        genLog.warn(`lesson:interactive artifact-scrub block=${block.id} strips=${artifactStrips}${artifactGutted > 0 ? ` gutted=${artifactGutted}` : ''}`);
         totalArtifactStrips += artifactStrips;
         totalArtifactGutted += artifactGutted;
       }
@@ -433,12 +456,12 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
     });
 
     if (totalLatexFailures > 0) {
-      console.warn(`[interactiveGeneration] ⚠ Total LaTeX parse failures: ${totalLatexFailures}`.yellow);
+      genLog.warn(`lesson:interactive latex-failures total=${totalLatexFailures}`);
     }
     if (totalArtifactStrips > 0) {
       bumpArtifactScrubStrips(totalArtifactStrips);
       for (let i = 0; i < totalArtifactGutted; i++) bumpArtifactScrubGutted();
-      console.warn(`[interactiveGeneration] ⚠ Total artifact strips: ${totalArtifactStrips}${totalArtifactGutted > 0 ? `, gutted explanations: ${totalArtifactGutted}` : ''}`.yellow);
+      genLog.warn(`lesson:interactive artifact-strips total=${totalArtifactStrips} gutted=${totalArtifactGutted}`);
     }
 
     // Shuffle MCQ options for any quiz blocks so the correct answer lands in
@@ -448,14 +471,14 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
 
     // Emit each shuffled interactive block
     for (const block of shuffledBlocks) {
-      console.log(`[interactiveGeneration] → ${block.id} (${block.type})`.gray);
       writer?.({ type: 'block', block });
     }
 
-    console.log(`[interactiveGeneration] ✓ ${shuffledBlocks.length} blocks`.green);
+    genLog.info(`lesson:interactive done blocks=${shuffledBlocks.length} ms=${Date.now() - interactiveStart}`);
     return { interactiveBlocks: shuffledBlocks };
   } catch (e) {
-    console.warn(`[interactiveGeneration] ✗ Failed: ${e instanceof Error ? e.message : e}`.yellow);
+    const reason = e instanceof Error ? e.message : String(e);
+    genLog.warn(`lesson:interactive fail reason=${reason} — lesson ships without quizzes/exercise`);
     return { interactiveBlocks: [] };
   }
 };

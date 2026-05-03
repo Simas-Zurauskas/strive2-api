@@ -148,7 +148,5 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
 
   await UserModel.findByIdAndDelete(userId);
 
-  console.log(`[API] Account deleted: ${userId}`.green);
-
   res.status(200).json({ data: { deleted: true } });
 });

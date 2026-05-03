@@ -39,17 +39,12 @@ export const withRetry = async <T>(fn: () => Promise<T>, options?: RetryOptions)
 
       if (attempt === maxRetries) break;
 
-      const reason = error instanceof Error ? error.message : String(error);
       const delay = Math.min(baseDelayMs * Math.pow(2, attempt) + Math.random() * 500, maxDelayMs);
 
-      // Structured retry log + per-label metric. The metric only fires
-      // when the caller opted in with a `label`; existing unlabelled
-      // call sites still log without contributing to the counter (so
-      // dashboards aren't polluted by anonymous retries).
-      const labelTag = label ? ` label=${label}` : '';
-      console.log(
-        `[Retry]${labelTag} Attempt ${attempt + 1}/${maxRetries} failed, retrying in ${Math.round(delay)}ms — ${reason}`.yellow,
-      );
+      // Per-label metric records every retry — `bumpWithRetry(label)` is the
+      // durable record dashboards slice on. Final-attempt failure rethrows
+      // and the caller's catch logs via its own domain logger, so a stdout
+      // line for each transient retry would just be noise.
       if (label) bumpWithRetry(label);
 
       await sleep(delay);

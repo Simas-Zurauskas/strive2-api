@@ -2,6 +2,7 @@ import { Pinecone, type Index, type RecordMetadata } from '@pinecone-database/pi
 import { PINECONE_API_KEY, PINECONE_INDEX_NAME } from '@conf/env';
 import { recordUsage } from '@services/usageService';
 import { priceFlatUnit } from '@lib/pricing';
+import { ragLog } from '@lib/loggers';
 
 /**
  * Pinecone client wrapper used by the lesson-RAG path.
@@ -110,13 +111,13 @@ export const upsertChunkVectors = async (records: ChunkVectorRecord[]): Promise<
     // Sample log of the first id so the operator can verify the namespacing
     // pattern (`${courseId}:${moduleIndex}:${lessonIndex}:${chunkIndex}`) at
     // a glance — useful when chasing isolation bugs.
-    console.log(
-      `[pinecone] upsert OK — ${records.length} records, ${wu} WU (${cost} μ¢ vendor), first id=${records[0]?.id}`.gray,
+    ragLog.info(
+      `pinecone:upsert ok records=${records.length} wu=${wu} cost=µ¢${cost} firstId=${records[0]?.id}`,
     );
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[pinecone] upsert FAILED (${records.length} records): ${message}`.red);
+    ragLog.error(`pinecone:upsert fail records=${records.length} msg=${message}`);
     return false;
   }
 };
@@ -138,11 +139,11 @@ export const deleteChunkVectorsByIds = async (ids: string[]): Promise<boolean> =
 
   try {
     await idx.deleteMany({ ids });
-    console.log(`[pinecone] delete OK — ${ids.length} ids`.gray);
+    ragLog.info(`pinecone:delete ok ids=${ids.length}`);
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[pinecone] delete FAILED (${ids.length} ids): ${message}`.red);
+    ragLog.error(`pinecone:delete fail ids=${ids.length} msg=${message}`);
     return false;
   }
 };
@@ -158,6 +159,153 @@ export interface VectorSearchHit {
     blockType: string;
   };
 }
+
+// ── Generic upsert/query (used by non-lesson corpora, e.g. product KB) ──
+//
+// The lesson-specific `upsertChunkVectors` / `queryChunks` above bake in the
+// course-scoped metadata shape. Other corpora (the product knowledge base,
+// future namespaces) need a more permissive contract: arbitrary scalar
+// metadata + arbitrary equality-filter shape on read. The two surfaces
+// share the same Pinecone client and the same cost-recording rules, but
+// keep their type contracts independent so a metadata-shape change in one
+// path can't quietly break the other.
+
+export interface GenericVectorRecord {
+  id: string;
+  embedding: number[];
+  metadata: Record<string, string | number | boolean>;
+}
+
+export interface GenericVectorHit {
+  id: string;
+  score: number;
+  metadata: Record<string, string | number | boolean | undefined>;
+}
+
+/**
+ * Upsert a batch of vectors with arbitrary metadata. Same Pinecone idempotency
+ * + cost-recording semantics as `upsertChunkVectors`. Pass an `action` label
+ * for cost-attribution analytics — typical values: `'upsert:product-kb'`,
+ * `'upsert:course-rag'`. Distinct labels keep the ledger separable per corpus.
+ */
+export const upsertVectors = async (
+  records: GenericVectorRecord[],
+  { action }: { action: string },
+): Promise<boolean> => {
+  if (records.length === 0) return true;
+  const idx = getIndex();
+  if (!idx) return false;
+
+  const payload = {
+    records: records.map((r) => ({
+      id: r.id,
+      values: r.embedding,
+      metadata: r.metadata,
+    })),
+  };
+
+  try {
+    await idx.upsert(payload);
+
+    const wu = estimateUpsertWUs(payload);
+    const cost = priceFlatUnit({ sku: 'pinecone_write_unit', units: wu });
+    recordUsage({
+      service: 'pinecone',
+      action,
+      costMicroCents: cost,
+      metadata: { wu, recordCount: records.length },
+    });
+
+    ragLog.info(
+      `pinecone:upsert(${action}) ok records=${records.length} wu=${wu} cost=µ¢${cost} firstId=${records[0]?.id}`,
+    );
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ragLog.error(`pinecone:upsert(${action}) fail records=${records.length} msg=${message}`);
+    return false;
+  }
+};
+
+/**
+ * Query the index with an arbitrary equality filter. Caller specifies the
+ * filter shape (e.g. `{ namespace: 'product-kb' }`); the helper handles
+ * cost recording + metadata typing. Defense-in-depth filtering should
+ * happen in the caller's service layer (re-verify metadata after the
+ * Pinecone response, just like `searchLessonContent` does).
+ */
+export const queryVectors = async ({
+  embedding,
+  filter,
+  topK = 5,
+  action,
+}: {
+  embedding: number[];
+  filter: Record<string, string | number | boolean>;
+  topK?: number;
+  action: string;
+}): Promise<GenericVectorHit[]> => {
+  const idx = getIndex();
+  if (!idx) return [];
+
+  try {
+    const result = await idx.query({
+      vector: embedding,
+      topK,
+      filter,
+      includeMetadata: true,
+    });
+
+    const ru = 0.25;
+    const cost = priceFlatUnit({ sku: 'pinecone_read_unit', units: ru });
+    recordUsage({
+      service: 'pinecone',
+      action,
+      costMicroCents: cost,
+      metadata: { ru, topK, filter },
+    });
+
+    const matches = (result.matches ?? [])
+      .filter((m) => m.metadata && typeof m.score === 'number')
+      .map((m) => ({
+        id: m.id,
+        score: m.score as number,
+        metadata: m.metadata as GenericVectorHit['metadata'],
+      }));
+    ragLog.info(
+      `pinecone:query(${action}) ok filter=${JSON.stringify(filter)} topK=${topK} hits=${matches.length} ru=${ru} cost=µ¢${cost}`,
+    );
+    return matches;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ragLog.error(`pinecone:query(${action}) fail msg=${message}`);
+    return [];
+  }
+};
+
+/**
+ * Delete a batch of vectors by id. Same wire contract as
+ * `deleteChunkVectorsByIds` but without the lesson-specific log tagging,
+ * so other corpora can reuse it without inheriting lesson-coloured logs.
+ */
+export const deleteVectorsByIds = async (
+  ids: string[],
+  { action }: { action: string },
+): Promise<boolean> => {
+  if (ids.length === 0) return true;
+  const idx = getIndex();
+  if (!idx) return false;
+
+  try {
+    await idx.deleteMany({ ids });
+    ragLog.info(`pinecone:delete(${action}) ok ids=${ids.length}`);
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ragLog.error(`pinecone:delete(${action}) fail ids=${ids.length} msg=${message}`);
+    return false;
+  }
+};
 
 /**
  * Query the index for the top-K most similar chunks within a course
@@ -213,13 +361,13 @@ export const queryChunks = async ({
         score: m.score as number,
         metadata: m.metadata as VectorSearchHit['metadata'],
       }));
-    console.log(
-      `[pinecone] query OK — filter=${JSON.stringify(filter)} topK=${topK} → ${matches.length} matches, ${ru} RU (${cost} μ¢ vendor)`.gray,
+    ragLog.info(
+      `pinecone:query ok filter=${JSON.stringify(filter)} topK=${topK} hits=${matches.length} ru=${ru} cost=µ¢${cost}`,
     );
     return matches;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[pinecone] query FAILED: ${message}`.red);
+    ragLog.error(`pinecone:query fail msg=${message}`);
     return [];
   }
 };

@@ -1,6 +1,7 @@
 import Mailjet from 'node-mailjet';
 import * as Sentry from '@sentry/node';
 import { MAILJET_API_KEY, MAILJET_API_SECRET, FRONTEND_URL } from '@conf/env';
+import { integrationLog } from '@lib/loggers';
 
 export const SENDER_EMAIL_ACCOUNT = 'accounts@strive-learning.com';
 
@@ -85,16 +86,14 @@ export const sendVerificationEmailAsync = (params: { to: string; token: string }
       try {
         await sendVerificationEmail(params);
         if (attempt > 0) {
-          console.log(
-            `[email] Verification email to ${params.to} succeeded on retry ${attempt}`.cyan,
-          );
+          integrationLog.info(`mailjet:send ok template=verify to=${params.to} attempt=${attempt}`);
         }
         return;
       } catch (err) {
         lastError = err;
         const message = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[email] Verification email attempt ${attempt + 1} to ${params.to} failed: ${message}`.yellow,
+        integrationLog.warn(
+          `mailjet:send fail template=verify to=${params.to} attempt=${attempt + 1}/${delays.length + 1} reason=${message}`,
         );
 
         if (attempt < delays.length) {
@@ -106,8 +105,8 @@ export const sendVerificationEmailAsync = (params: { to: string; token: string }
     // Exhausted retries — record as a breadcrumb so ops sees the trend.
     // The end user can still self-recover via the resend-verification
     // endpoint; we don't surface this failure to them.
-    console.error(
-      `[email] Verification email to ${params.to} failed after ${delays.length + 1} attempts`.red,
+    integrationLog.error(
+      `mailjet:send exhausted template=verify to=${params.to} attempts=${delays.length + 1}`,
     );
     Sentry.captureException(lastError, {
       tags: { email_delivery: 'verification' },
@@ -174,16 +173,14 @@ export const sendPasswordResetEmailAsync = (params: { to: string; token: string 
       try {
         await sendPasswordResetEmail(params);
         if (attempt > 0) {
-          console.log(
-            `[email] Password-reset email to ${params.to} succeeded on retry ${attempt}`.cyan,
-          );
+          integrationLog.info(`mailjet:send ok template=password-reset to=${params.to} attempt=${attempt}`);
         }
         return;
       } catch (err) {
         lastError = err;
         const message = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[email] Password-reset email attempt ${attempt + 1} to ${params.to} failed: ${message}`.yellow,
+        integrationLog.warn(
+          `mailjet:send fail template=password-reset to=${params.to} attempt=${attempt + 1}/${delays.length + 1} reason=${message}`,
         );
 
         if (attempt < delays.length) {
@@ -192,8 +189,8 @@ export const sendPasswordResetEmailAsync = (params: { to: string; token: string 
       }
     }
 
-    console.error(
-      `[email] Password-reset email to ${params.to} failed after ${delays.length + 1} attempts`.red,
+    integrationLog.error(
+      `mailjet:send exhausted template=password-reset to=${params.to} attempts=${delays.length + 1}`,
     );
     Sentry.captureException(lastError, {
       tags: { email_delivery: 'password_reset' },

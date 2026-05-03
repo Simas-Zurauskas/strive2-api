@@ -4,6 +4,7 @@ import { decodeAuthToken } from '@lib/auth';
 import UserModel from '@models/UserModel';
 import { AuthProvider } from '@lib/constants';
 import { ENVIRONMENT, FRONTEND_URL } from '@conf/env';
+import { lifecycleLog } from '@lib/loggers';
 
 /**
  * ⚠️ SINGLE-INSTANCE DEPLOY ONLY.
@@ -88,10 +89,10 @@ export const initSocketIO = (httpServer: HttpServer): SocketIOServer => {
   io.on('connection', (socket) => {
     const userId = socket.data.userId as string;
     socket.join(`user:${userId}`);
-    console.log(`[Socket.io] User ${userId} connected`.gray);
+    lifecycleLog.info(`socket:connect user=${userId} clients=${io.engine?.clientsCount ?? '?'}`);
 
-    socket.on('disconnect', () => {
-      console.log(`[Socket.io] User ${userId} disconnected`.gray);
+    socket.on('disconnect', (reason) => {
+      lifecycleLog.info(`socket:disconnect user=${userId} reason=${reason}`);
     });
   });
 

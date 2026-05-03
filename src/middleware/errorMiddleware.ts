@@ -1,6 +1,7 @@
 import { ENVIRONMENT } from '@conf/env';
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
+import { lifecycleLog } from '@lib/loggers';
 
 export const ERROR_CODES = [
   'CUSTOM_ERROR',
@@ -67,8 +68,6 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
   const message = err.message || 'Something went wrong';
   const errorCode = (err as AppError).errorCode;
 
-  // Essential error logging
-  const timestamp = new Date().toISOString();
   const method = req.method;
   const url = req.originalUrl;
   const userAgent = req.get('User-Agent');
@@ -78,14 +77,11 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
   // chain doesn't swallow the whole error handler.
   const requestIdVal = req.id ?? '-';
 
-  console.log(
-    `[ERROR ${timestamp}] ${statusCode} ${method} ${url}`.bgRed.bold,
-    `\nRequest: ${requestIdVal}`,
-    `\nUser: ${userId}`,
-    `\nMessage: ${message}`.red,
-    errorCode ? `\nCode: ${errorCode}` : '',
-    userAgent ? `\nUA: ${userAgent.substring(0, 100)}` : '',
-    ENVIRONMENT !== 'production' ? `\nStack: ${err.stack}` : '',
+  lifecycleLog.error(
+    `request:error ${statusCode} ${method} ${url} req=${requestIdVal} user=${userId} ` +
+      `code=${errorCode ?? '-'} msg="${message}" ` +
+      `ua="${userAgent?.substring(0, 100) ?? '-'}"` +
+      (ENVIRONMENT !== 'production' && err.stack ? `\n${err.stack}` : ''),
   );
 
   res.status(statusCode).json({

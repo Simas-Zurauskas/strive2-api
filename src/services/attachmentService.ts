@@ -1,4 +1,5 @@
 import { extractText, getDocumentProxy } from 'unpdf';
+import { integrationLog } from '@lib/loggers';
 
 /**
  * Single source of truth for extracting plain text from a learner's
@@ -74,7 +75,7 @@ const extractPdf = async (buffer: Buffer): Promise<{ ok: true; text: string } | 
     if (!trimmed) return { ok: false, error: 'pdf_no_text' };
     return { ok: true, text: trimmed };
   } catch (err) {
-    console.warn(`[attachment] pdf parse failed: ${err instanceof Error ? err.message : err}`.yellow);
+    integrationLog.warn(`pdf:parse fail reason=${err instanceof Error ? err.message : err}`);
     return { ok: false, error: 'pdf_parse_failed' };
   }
 };
@@ -115,8 +116,8 @@ export const extractAttachmentText = async ({
 
   const approxTokens = Math.ceil(text.length / 4);
 
-  console.log(
-    `[attachment] extracted ${filename} (${kind}) — ${buffer.length}b in → ${text.length}b out, ~${approxTokens} tokens${truncated ? ' (truncated)' : ''}`.gray,
+  integrationLog.info(
+    `attachment:extract ok name=${filename} kind=${kind} bytesIn=${buffer.length} bytesOut=${text.length} tokens~${approxTokens}${truncated ? ' truncated' : ''}`,
   );
 
   return {

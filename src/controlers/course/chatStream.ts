@@ -9,7 +9,7 @@ import { sanitizePromptInput } from '@lib/sanitize';
 import { getUtilityModel } from '@lib/langchain';
 import { debitActualSpend } from '@services/creditService';
 import { bgError } from '@lib/bg';
-import { chat } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 
 const formatAnswersFromCourse = (answers: Record<string, unknown> | null) =>
@@ -51,7 +51,7 @@ const compressHistory = async (
     );
 
     const summary = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
-    chat.info(
+    chatLog.info(
       `design:compress one-shot summary built — folded ${olderMessages.length} older messages into ${summary.length}c`,
     );
 
@@ -60,7 +60,7 @@ const compressHistory = async (
       ...recentMessages,
     ];
   } catch (e) {
-    chat.warn(
+    chatLog.warn(
       `design:compress summariser failed, using full history err=${e instanceof Error ? e.message : e}`,
     );
     return history;
@@ -137,7 +137,7 @@ export const chatStreamController = asyncHandler(async (req, res) => {
       return typeof m.content === 'string' && m.content.length > 0;
     });
     if (filtered.length !== original.length) {
-      chat.info(
+      chatLog.info(
         `design:turn dropped ${original.length - filtered.length} empty history message(s) before validation`,
       );
       req.body.messages = filtered;
@@ -182,7 +182,26 @@ export const chatStreamController = asyncHandler(async (req, res) => {
     ...(newUserMessage ? [new HumanMessage(newUserMessage.content)] : []),
   ];
 
-  // Build course context for tools
+  // Build course context for tools + agent state. The depth-recommendation
+  // fields below are pulled from `course.depthPreviews` (populated when the
+  // depth-previews job ran). All optional — legacy courses persisted before
+  // these fields existed leave them undefined and the agent's prompt
+  // handles absence gracefully (see prompts.ts § Depth Recommendation).
+  //
+  // Read defensively (the LLM-emitted fields are `optional()` in
+  // depthPreviewsOutputSchema) and pass through only well-typed values
+  // so the agent state's typed annotations stay clean.
+  const previews = course.depthPreviews as Record<string, unknown> | undefined;
+  const readRiskLevel = (v: unknown): 'low' | 'moderate' | 'high' | undefined =>
+    v === 'low' || v === 'moderate' || v === 'high' ? v : undefined;
+  const readStr = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 ? v : undefined;
+  const readRange = (v: unknown): [number, number] | undefined => {
+    if (!Array.isArray(v) || v.length !== 2) return undefined;
+    const [a, b] = v;
+    return typeof a === 'number' && typeof b === 'number' ? [a, b] : undefined;
+  };
+  const recommendedDepth = readStr(previews?.recommended);
   const courseContext = {
     courseId,
     userId,
@@ -190,6 +209,27 @@ export const chatStreamController = asyncHandler(async (req, res) => {
     answers: formatAnswersFromCourse(course.answers),
     depth: course.depth ?? 'comprehensive',
     currentStructure: course.structure,
+    // Optional depth-recommendation context — see prompts.ts.
+    recommendedDepth,
+    recommendationReason: readStr(previews?.recommendationReason),
+    overcommitRisk: readRiskLevel(previews?.overcommitRisk),
+    overcommitRationale: readStr(previews?.overcommitRationale),
+    undercommitRisk: readRiskLevel(previews?.undercommitRisk),
+    undercommitRationale: readStr(previews?.undercommitRationale),
+    // Recommended-tier scope ranges live nested under
+    // `depthPreviews[recommendedDepth].lessonCountRange / estimatedHoursRange`
+    // because the per-tier scope is enriched into each tier's preview
+    // object (see enrichDepthPreviewsWithScope in courseService.ts).
+    recommendedLessonCountRange: recommendedDepth
+      ? readRange(
+          (previews?.[recommendedDepth] as Record<string, unknown> | undefined)?.lessonCountRange,
+        )
+      : undefined,
+    recommendedHoursRange: recommendedDepth
+      ? readRange(
+          (previews?.[recommendedDepth] as Record<string, unknown> | undefined)?.estimatedHoursRange,
+        )
+      : undefined,
   };
 
   // ── SSE headers ──────────────────────────────────────────
@@ -206,7 +246,7 @@ export const chatStreamController = asyncHandler(async (req, res) => {
   let clientConnected = true;
   const turnStartedAt = Date.now();
 
-  chat.info(
+  chatLog.info(
     `design:turn start course=${courseId} historyMessages=${messages.length} structureSet=${course.structure ? 'yes' : 'no'}`,
   );
 
@@ -215,7 +255,7 @@ export const chatStreamController = asyncHandler(async (req, res) => {
     clientConnected = false;
     abortController.abort();
     if (tokenEmitter) tokenEmitter.removeAllListeners();
-    chat.warn(`design:stream client disconnect ms=${Date.now() - turnStartedAt}`);
+    chatLog.warn(`design:stream client disconnect ms=${Date.now() - turnStartedAt}`);
   });
 
   // ── Token streaming via EventEmitter ─────────────────────
@@ -260,17 +300,17 @@ export const chatStreamController = asyncHandler(async (req, res) => {
     );
   } catch (err) {
     if (!clientConnected) {
-      chat.warn(`design:turn aborted post-disconnect ms=${Date.now() - turnStartedAt}`);
+      chatLog.warn(`design:turn aborted post-disconnect ms=${Date.now() - turnStartedAt}`);
       return;
     }
-    chat.error(
+    chatLog.error(
       `design:turn agent error ms=${Date.now() - turnStartedAt} err=${err instanceof Error ? err.message : String(err)}`,
     );
     throw err;
   }
 
   if (!clientConnected) {
-    chat.warn(`design:turn done-but-client-gone ms=${Date.now() - turnStartedAt}`);
+    chatLog.warn(`design:turn done-but-client-gone ms=${Date.now() - turnStartedAt}`);
     return;
   }
 
@@ -286,7 +326,7 @@ export const chatStreamController = asyncHandler(async (req, res) => {
   res.write('data: [DONE]\n\n');
   res.end();
 
-  chat.info(`design:turn done ok=true ms=${Date.now() - turnStartedAt}`);
+  chatLog.info(`design:turn done ok=true ms=${Date.now() - turnStartedAt}`);
 
   // Debit credit spend accumulated during this chat turn. Mirrors
   // lessonChat.ts — without this the course-design chat is effectively

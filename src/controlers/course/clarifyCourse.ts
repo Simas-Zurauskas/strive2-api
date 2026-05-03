@@ -37,13 +37,11 @@ export const clarifyCourseController = asyncHandler(async (req, res) => {
   const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
-  console.log(`[API] Submitting clarify job, courseId: ${courseId}`.cyan);
   const jobId = await submitJob({
     userId,
     courseId,
     type: 'clarify',
   });
-  console.log(`[API] Clarify job submitted: ${jobId}`.green);
 
   res.status(202).json({ data: { jobId } });
 });

@@ -1,6 +1,6 @@
 import { OpenAPIV3 } from 'openapi-types';
 import { ERROR_CODES } from '@middleware/errorMiddleware';
-import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
+import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, GOAL_TYPES, GOAL_TYPE_CONFIDENCES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
 import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 import { INSIGHT_KINDS, INSIGHT_MODES, INSIGHT_RATINGS, INSIGHT_STATES } from '@lib/insightConstants';
@@ -46,6 +46,16 @@ export const schemas: SchemaMap = {
   CourseDomain: {
     type: 'string',
     enum: [...COURSE_DOMAINS],
+  },
+
+  GoalType: {
+    type: 'string',
+    enum: [...GOAL_TYPES],
+  },
+
+  GoalTypeConfidence: {
+    type: 'string',
+    enum: [...GOAL_TYPE_CONFIDENCES],
   },
 
   JobStatusEnum: {
@@ -321,6 +331,10 @@ export const schemas: SchemaMap = {
         type: 'array',
         items: { $ref: '#/components/schemas/ClarifyQuestion' },
       },
+      goalTypeNoun: {
+        type: 'string',
+        description: "Chip label noun phrase produced by the goalType classifier (e.g. 'your YouTube channel', 'the CPA exam'). The verb (e.g. 'monetize', 'pass') is a static client-side map keyed off course.goalType.",
+      },
     },
   },
 
@@ -417,12 +431,23 @@ export const schemas: SchemaMap = {
         type: 'string',
         enum: ['low', 'moderate', 'high'],
         description:
-          'Optional. LLM-emitted holistic judgment of how likely the learner is to over-commit if they pick a depth above `recommended`. Drives the depth-override gate as the primary cost signal — `high` triggers a confirmation dialog when combined with an expansion signal. Absent on courses persisted before this field was added; the gate falls back to phrase-regex softness/finish-pressure detection in that case.',
+          'Optional. LLM-emitted holistic judgment of how likely the learner is to over-commit if they pick a depth above `recommended`. Drives the depth-override gate as the primary cost signal — `high` triggers a confirmation dialog when combined with an expansion signal; `moderate` triggers when combined with a large-course expansion (>15 lessons). Absent on courses persisted before this field was added; the gate falls back to phrase-regex softness/finish-pressure detection in that case.',
       },
       overcommitRationale: {
         type: 'string',
         description:
           'Optional. One-sentence rationale for `overcommitRisk`, referencing specific answer content (e.g. "Mentioned \'just want to learn the basics\'"). Surfaced verbatim in the 409 confirmation dialog and gate-fire logs. Absent when `overcommitRisk` is absent.',
+      },
+      undercommitRisk: {
+        type: 'string',
+        enum: ['low', 'moderate', 'high'],
+        description:
+          'Optional. LLM-emitted judgment of how poorly served the learner will be if they pick a depth BELOW `recommended` — the symmetric coverage-gap signal to `overcommitRisk`. `moderate` or `high` triggers the undercommit half of the depth-override gate (separate 409 code DEPTH_UNDERCOMMIT_REQUIRES_ACK) so the learner is warned before committing to a tier that would skip practical applications they explicitly asked about. Absent on legacy courses; absence means no undercommit warning will fire (we have no regex fallback for deadline/professional-goal phrasing).',
+      },
+      undercommitRationale: {
+        type: 'string',
+        description:
+          'Optional. One-sentence rationale for `undercommitRisk`, referencing specific answer content (e.g. "You said the interview is in 3 weeks"). Surfaced verbatim in the 409 dialog and gate-fire logs. Absent when `undercommitRisk` is absent.',
       },
     },
   },
@@ -1135,6 +1160,8 @@ export const schemas: SchemaMap = {
       status: { $ref: '#/components/schemas/CourseStatus' },
       goal: { type: 'string' },
       domain: nullableRef('#/components/schemas/CourseDomain'),
+      goalType: nullableRef('#/components/schemas/GoalType'),
+      goalTypeConfidence: nullableRef('#/components/schemas/GoalTypeConfidence'),
       clarifyData: { $ref: '#/components/schemas/ClarifyResponse' },
       answers: { type: 'object' },
       depth: { $ref: '#/components/schemas/CourseDepth' },

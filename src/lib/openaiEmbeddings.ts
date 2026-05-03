@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { OPENAI_API_KEY } from '@conf/env';
 import { recordUsage } from '@services/usageService';
 import { priceLlmUsage } from '@lib/pricing';
+import { ragLog } from '@lib/loggers';
 
 /**
  * OpenAI embeddings client used by the lesson-RAG path.
@@ -69,15 +70,15 @@ export const embedBatch = async (
         costMicroCents: cost,
         metadata: { model: EMBEDDING_MODEL, tokens, batchSize: texts.length },
       });
-      console.log(
-        `[openaiEmbeddings] ${action} OK — ${texts.length} input(s), ${tokens} tokens, ${cost} μ¢`.gray,
+      ragLog.info(
+        `embed:${action} ok inputs=${texts.length} tokens=${tokens} cost=µ¢${cost}`,
       );
     }
 
     return response.data.map((d) => d.embedding);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[openaiEmbeddings] ${action} FAILED: ${message}`.red);
+    ragLog.error(`embed:${action} fail msg=${message}`);
     return null;
   }
 };

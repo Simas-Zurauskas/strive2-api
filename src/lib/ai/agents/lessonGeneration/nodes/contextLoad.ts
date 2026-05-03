@@ -1,5 +1,6 @@
 import { RunnableConfig } from '@langchain/core/runnables';
 import { sanitizePromptInput } from '@lib/sanitize';
+import { genLog } from '@lib/loggers';
 import LessonContentModel from '@models/LessonContentModel';
 import { LessonState } from '../state';
 
@@ -91,7 +92,9 @@ ${positionContext.length > 0 ? `## Position context\n\n${positionContext.join('\
 
 Generate the full lesson content as structured blocks.`;
 
-  console.log(`[contextLoad] ✓ Built prompts for "${lesson.name}"`.green);
+  genLog.info(
+    `lesson:context-load module=${moduleIndex} lesson=${lessonIndex} name="${lesson.name}" prevSummaryLoaded=${positionContext.length > 0}`,
+  );
 
   // Defensive sanitization of the state fields that later prompt nodes
   // interpolate directly (interactiveGeneration embeds lessonName,

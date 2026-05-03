@@ -19,6 +19,7 @@ import { billingRoutes } from '@routes/billingRoutes';
 import { courseRoutes } from '@routes/courseRoutes';
 import { gamificationRoutes } from '@routes/gamificationRoutes';
 import { insightRoutes } from '@routes/insightRoutes';
+import { productKbRoutes } from '@routes/productKbRoutes';
 import { usageRoutes } from '@routes/usageRoutes';
 import { stripeWebhookController } from '@controlers/billing';
 import mongoose from 'mongoose';
@@ -29,6 +30,7 @@ import { bumpRateLimitHit, renderMetrics } from '@lib/metrics';
 import { requestId } from '@middleware/requestId';
 import { jobLimit } from '@services/jobRunner';
 import { printGraphImages } from '@lib/ai/agents/printGraphImages';
+import { lifecycleLog } from '@lib/loggers';
 
 mt.tz.setDefault('UTC');
 
@@ -103,7 +105,7 @@ if (ENVIRONMENT !== 'development') {
         // uses `u:<userId>` and anon uses `i:<ip>`.
         bumpRateLimitHit();
         const key = (req as unknown as { rateLimit?: { key?: string } }).rateLimit?.key ?? 'unknown';
-        console.warn(`[rate_limit_hit] key=${key} path=${req.method} ${req.originalUrl}`.yellow);
+        lifecycleLog.warn(`rate-limit:hit key=${key} ${req.method} ${req.originalUrl}`);
         res.status(options.statusCode).json(options.message);
       },
     }),
@@ -194,6 +196,7 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/course', courseRoutes);
 app.use('/api/gamification', gamificationRoutes);
 app.use('/api/insight', insightRoutes);
+app.use('/api/product-kb', productKbRoutes);
 app.use('/api/usage', usageRoutes);
 
 app.get('/swagger.json', (req, res) => {
@@ -229,7 +232,7 @@ initJobSocketBridge();
 // traffic never sees a partially-initialized system.
 connectDB().then(() => {
   server.listen(PORT, () => {
-    console.log(`Server running on: ${API_URL}`.bgCyan);
+    lifecycleLog.info(`boot:ready url=${API_URL} env=${ENVIRONMENT} port=${PORT}`);
     // printGraphImages();
   });
 });
@@ -240,18 +243,18 @@ let shuttingDown = false;
 
 const gracefulShutdown = async (signal: string) => {
   if (shuttingDown) {
-    console.log(`\n[Shutdown] ${signal} received again, forcing exit`.red);
+    lifecycleLog.error(`shutdown:double-signal signal=${signal} — forcing exit`);
     process.exit(1);
   }
   shuttingDown = true;
 
-  console.log(`\n[Shutdown] ${signal} received, shutting down gracefully...`.yellow);
+  lifecycleLog.info(`shutdown:start signal=${signal}`);
 
   // Hard safety net: if anything below hangs (a driver op, a socket, a
   // background flush), kill the process anyway. `unref()` so the timer
   // itself does not keep the loop alive.
   const hardKill = setTimeout(() => {
-    console.log('[Shutdown] Hard timeout exceeded, killing process'.red);
+    lifecycleLog.error('shutdown:hard-timeout — killing process');
     process.exit(1);
   }, 130_000);
   hardKill.unref();
@@ -271,17 +274,18 @@ const gracefulShutdown = async (signal: string) => {
   const drainTimeout = 120_000; // Lesson generation takes 60-120s
   const start = Date.now();
   while (jobLimit.activeCount > 0 && Date.now() - start < drainTimeout) {
-    console.log(`[Shutdown] Waiting for ${jobLimit.activeCount} active job(s) to finish...`.yellow);
+    lifecycleLog.info(`shutdown:drain active=${jobLimit.activeCount} elapsed=${Date.now() - start}ms`);
     await new Promise((r) => setTimeout(r, 1000));
   }
 
   if (jobLimit.activeCount > 0) {
-    console.log(`[Shutdown] ${jobLimit.activeCount} job(s) still running after timeout, forcing exit`.red);
+    lifecycleLog.error(`shutdown:drain-timeout active=${jobLimit.activeCount} — forcing exit`);
   }
 
   await mongoose.connection.close();
-  console.log('[Shutdown] MongoDB connection closed'.cyan);
+  lifecycleLog.info('mongo:disconnect');
 
+  lifecycleLog.info(`shutdown:done signal=${signal} elapsed=${Date.now() - start}ms`);
   clearTimeout(hardKill);
   process.exit(0);
 };

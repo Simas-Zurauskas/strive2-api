@@ -88,7 +88,6 @@ export const generateLessonController = asyncHandler(async (req, res) => {
 
   // Image/links flags pass through to the agent unchanged. All plans get
   // full feature access — credits cost reflects what was used.
-  console.log(`[API] Submitting generate_lesson job, courseId: ${courseId}, module: ${moduleIndex}, lesson: ${lessonIndex}`.cyan);
   const jobId = await submitJob({
     userId,
     courseId,
@@ -101,8 +100,6 @@ export const generateLessonController = asyncHandler(async (req, res) => {
   // round-tripping through /course/job/:jobId to read the metadata.
   // Cleared alongside activeJobId in jobRunner.processJob's finally.
   await CourseModel.findByIdAndUpdate(courseId, { activeLesson: { moduleIndex, lessonIndex } });
-
-  console.log(`[API] Generate lesson job submitted: ${jobId}`.green);
 
   res.status(202).json({ data: { jobId } });
 });

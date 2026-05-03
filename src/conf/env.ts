@@ -1,8 +1,10 @@
+import { lifecycleLog } from '@lib/loggers';
+
 const getEnv = (key: string): string => {
   const value = process.env[key];
 
   if (!value) {
-    console.error(`Error: Required environment variable ${key} is missing`);
+    lifecycleLog.error(`env:missing key=${key} — refusing to boot`);
     process.exit(1);
   }
 

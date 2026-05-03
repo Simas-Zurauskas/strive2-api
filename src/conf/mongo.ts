@@ -1,4 +1,3 @@
-import colors from 'colors';
 import mongoose from 'mongoose';
 import * as Sentry from '@sentry/node';
 import CourseModel from '@models/CourseModel';
@@ -6,6 +5,7 @@ import JobModel from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
 import { deleteByPrefix } from '@services/s3Service';
 import { bgError } from '@lib/bg';
+import { lifecycleLog, jobLog } from '@lib/loggers';
 
 import { MONGO_URI } from './env';
 
@@ -27,7 +27,7 @@ export const cleanupOrphanedJobs = async () => {
       { $set: { status: 'failed', error: 'Server restarted during processing', completedAt: now } },
     );
     if (failed.modifiedCount > 0) {
-      console.log(`[Startup] Failed ${failed.modifiedCount} in-flight job(s) from previous run`.cyan);
+      jobLog.warn(`reaper:swept count=${failed.modifiedCount} reason=server_restart`);
     }
 
     // Step 2: clear every course.activeJobId + activeLesson. No in-flight
@@ -38,7 +38,7 @@ export const cleanupOrphanedJobs = async () => {
       { $set: { activeJobId: null, activeLesson: null } },
     );
     if (cleared.modifiedCount > 0) {
-      console.log(`[Startup] Cleared activeJobId + activeLesson on ${cleared.modifiedCount} course(s)`.cyan);
+      jobLog.info(`reaper:cleared-activeJob count=${cleared.modifiedCount}`);
     }
 
     // Delete partial content left by interrupted generations. Enumerate first so
@@ -57,10 +57,12 @@ export const cleanupOrphanedJobs = async () => {
 
     const deleted = await LessonContentModel.deleteMany({ completed: false });
     if (deleted.deletedCount > 0) {
-      console.log(`[Startup] Deleted ${deleted.deletedCount} incomplete lesson content document(s)`.cyan);
+      jobLog.info(`reaper:deleted-incomplete-content count=${deleted.deletedCount}`);
     }
   } catch (error: unknown) {
-    console.error('[Startup] Failed to clean up orphaned jobs:'.red, error);
+    const message = error instanceof Error ? error.message : String(error);
+    jobLog.error(`reaper:fail msg=${message}`);
+    Sentry.captureException(error);
   }
 };
 
@@ -72,22 +74,24 @@ const connectDB = async () => {
       maxPoolSize: 50,
       minPoolSize: 10,
     });
-    console.log(colors.cyan(`MongoDB Connected - ${conn.connection.host}`.bgCyan));
+    lifecycleLog.info(`mongo:connect host=${conn.connection.host} pool=10-50`);
 
     // Reconcile indexes whose spec has changed since last boot (Mongoose's
     // autoIndex only *adds* missing indexes; it won't drop an existing index
     // whose options have diverged, e.g. `sparse: true` → `partialFilterExpression`).
     try {
       await CourseModel.syncIndexes();
+      lifecycleLog.info('mongo:indexes-synced model=Course');
     } catch (error: unknown) {
-      console.error('[Startup] CourseModel.syncIndexes failed:'.red, error);
+      const message = error instanceof Error ? error.message : String(error);
+      lifecycleLog.error(`mongo:indexes-sync-fail model=Course msg=${message}`);
       Sentry.captureException(error);
     }
 
     await cleanupOrphanedJobs();
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    console.log(colors.red(`MongoDB Connection failed - ${message}`));
+    lifecycleLog.error(`mongo:connect-fail msg=${message} — refusing to boot`);
     Sentry.captureException(error);
     process.exit(1);
   }

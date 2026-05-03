@@ -1,5 +1,5 @@
-import 'colors';
 import type { UsageService } from '@lib/usageConstants';
+import { llmLog } from '@lib/loggers';
 
 /**
  * Single source of truth for how much every paid action costs us.
@@ -174,7 +174,7 @@ export const priceLlmUsage = ({
   if (!price) {
     if (!warnedMissingModels.has(model)) {
       warnedMissingModels.add(model);
-      console.warn(`[pricing] no LLM_PRICING entry for model "${model}" — cost tracking will return 0 for this model until added`.yellow);
+      llmLog.warn(`pricing:missing-model model="${model}" — cost tracking returns 0 until added to LLM_PRICING`);
     }
     return 0;
   }

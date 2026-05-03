@@ -4,7 +4,7 @@ import { EventEmitter } from 'events';
 import { ANTHROPIC_API_KEY } from '@conf/env';
 import { MODEL_IDS } from '@lib/langchain';
 import { logCacheUsage, usageFromAnthropic } from '@lib/ai/cacheLogger';
-import { chat as chatLog } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import { COURSE_MENTOR_SYSTEM_PROMPT } from '../prompts';
 import { EMIT_HANDOFF_ANTHROPIC_TOOL } from '../../shared/emitHandoffTool';
 import { toAnthropicMessages } from '../../shared/toAnthropicMessages';

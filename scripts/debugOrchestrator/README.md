@@ -60,7 +60,8 @@ The orchestrator opens Mongo via `mongoose.connect(MONGO_URI)` directly — **no
 For each AI-generated persona, the orchestrator runs the full learner journey:
 
 1. **Create Course** — submits the persona's learning goal
-2. **Clarify Questions** — triggers AI question generation, polls until complete
+2. **Clarify Questions** — triggers AI question generation, polls until complete. The clarify job *also* runs the pre-flight goal-type classifier (api `classifyGoalType`); the orchestrator captures `course.goalType`, `course.goalTypeConfidence`, and `course.clarifyData.goalTypeNoun` and surfaces them in a `### Goal Type Classification` block alongside the persona's predicted ground truth, so the assessment rubric can score classification accuracy + confidence calibration + clarify-question tilt.
+2b. **Goal-Type Override** — _(only fires for personas whose generator set `goalTypeOverrideTarget`)_ the persona toggles the goal-type chip: PATCH `/course/{id}` with the new `goalType`, re-submit a clarify job, capture before/after snapshots + question diff. Tests the chip-cascade end-to-end so a regression where the toggle fails to regenerate questions or persist the user-confirmed confidence flag is visible in the report. Always runs when the persona has a target — there's no opt-out flag.
 3. **Answer Questions** — AI answers as the persona would (Claude Sonnet 4.6)
 4. **Depth Previews** — triggers depth preview generation, polls until complete
 5. **Select Depth** — AI picks a depth level as the persona (overview/comprehensive/deep_dive)
@@ -91,8 +92,9 @@ output/2026-04-04T14-30-00_alex-career-switching-data-scientist.md
 Reports include:
 
 - Persona profile (name, background, goal, personality, priorities)
+- Predicted goal type — orchestrator's ground-truth bucket for the classifier (master / monetize / pass / build / fluency) plus a one-sentence rationale. When set, the persona's `goalTypeOverrideTarget` is also surfaced ("would switch to X via the chip if given the chance").
 - Predicted behavior for all five dimensions (survey / depth / structure / quiz / insight review)
-- Run summary (duration, status, course domain, lesson/quiz/insight counts)
+- Run summary (duration, status, course domain, **goal type predicted/final/confidence + match flag**, lesson/quiz/insight counts)
 - Each step with timing, API responses, AI reasoning
 - Generated lesson content: block breakdown by type, code, mermaid diagrams, exercises (collapsible)
 - Module quiz: per-module score, mastery tier, next-review interval, and every question with selected vs correct option + explanation (collapsible)
@@ -133,7 +135,7 @@ After a run, evaluate content quality and learner satisfaction with [`assessment
    - Cross-report synthesis + top-5 RICE-prioritized product roadmap
    - Confidence statement
 
-**Rubric structure:** 7 domains, 33 criteria, 4-point ordinal scale. Grounded in constructive alignment (Biggs), Bloom's revised taxonomy, Mayer's multimedia principles, CLT (Sweller), ICAP, Haladyna MCQ rules, SuperMemo 20 rules of knowledge formulation. Sub-agents are instructed to guard against leniency, position bias, halo effect, and self-preference.
+**Rubric structure:** 10 domains, 43 criteria, 4-point ordinal scale (rubric v7). Grounded in constructive alignment (Biggs), Bloom's revised taxonomy, Mayer's multimedia principles, CLT (Sweller), ICAP, Haladyna MCQ rules, SuperMemo 20 rules of knowledge formulation. Domain J (goal-type axis) scores classification accuracy, confidence calibration, and whether the clarify questions + structure shape reflect the classified `goalType` (J42/J43 are `n/a` when the classifier emitted `master` since that's the no-special-shape default). Sub-agents are instructed to guard against leniency, position bias, halo effect, and self-preference.
 
 **Signal discipline:** structural scores (alignment, MCQ quality, persona-grounding) are trusted; behavioral scores (would-continue, quiz scores) are treated as hypotheses because personas systematically over-perform on quizzes (they can see the lesson text). Confidence on synthetic-only evidence is capped at 80 % in the RICE roadmap.
 

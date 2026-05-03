@@ -2,7 +2,7 @@ import { HumanMessage, AIMessage, AIMessageChunk } from '@langchain/core/message
 import CourseMentorChatModel, {
   type ICourseMentorChatHandoff,
 } from '@models/CourseMentorChatModel';
-import { chat as chatLog } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import { extractHandoffsFromTurn } from '../../shared/extractHandoffsFromTurn';
 import { NodeFunction } from '../types';
 

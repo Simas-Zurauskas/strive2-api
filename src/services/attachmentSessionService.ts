@@ -4,6 +4,7 @@ import LessonMentorChatModel, {
   type ILessonMentorAttachment,
 } from '@models/LessonMentorChatModel';
 import { extractAttachmentText, type ExtractionError } from '@services/attachmentService';
+import { integrationLog } from '@lib/loggers';
 
 /**
  * Session-scoped attachment lifecycle for the lesson mentor chat.
@@ -164,8 +165,8 @@ export const attachToSession = async ({
     { upsert: true, new: true },
   );
 
-  console.log(
-    `[attachmentSession] attached ${newAttachment.id} (${newAttachment.kind}, ~${newAttachment.approxTokens} tok) to ${courseId}/${moduleIndex}/${lessonIndex}`.gray,
+  integrationLog.info(
+    `attachment:attached id=${newAttachment.id} kind=${newAttachment.kind} tokens~${newAttachment.approxTokens} lesson=${courseId}/${moduleIndex}/${lessonIndex}`,
   );
 
   return {

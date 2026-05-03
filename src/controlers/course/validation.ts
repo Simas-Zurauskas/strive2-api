@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES, LESSON_PROGRESS_STATUSES } from '@lib/constants';
+import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES, GOAL_TYPES, LESSON_PROGRESS_STATUSES } from '@lib/constants';
 import LessonContentModel from '@models/LessonContentModel';
 
 export const createCourseSchema = z.object({
@@ -11,6 +11,15 @@ export const updateCourseSchema = z.object({
   answers: z.record(z.string(), z.unknown()).optional(),
   depth: z.enum(COURSE_DEPTHS).optional(),
   status: z.enum(COURSE_STATUSES).optional(),
+  /**
+   * User-selected goalType from the ClarifyStep chip. Setting this field
+   * marks the value as user-confirmed (`goalTypeConfidence = 'high'`),
+   * which causes the next clarify job to skip the auto-classifier and
+   * use this value verbatim. The cascade — clearing clarifyData and
+   * triggering a clarify regen — is orchestrated by the client in
+   * `useWizardHandlers`, mirroring the goal-text overwrite path.
+   */
+  goalType: z.enum(GOAL_TYPES).optional(),
   /**
    * Client-side acknowledgement that the learner saw the "your answers
    * suggest a lighter-effort course" warning and still wants the deeper

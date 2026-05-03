@@ -12,7 +12,7 @@ import { sanitizePromptInput } from '@lib/sanitize';
 import { compressMessageHistory } from '@lib/messageCompression';
 import { debitActualSpend } from '@services/creditService';
 import { bgError } from '@lib/bg';
-import { chat } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import LessonContentModel from '@models/LessonContentModel';
 import CourseMentorChatModel from '@models/CourseMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
@@ -244,7 +244,7 @@ export const courseMentorChatController = asyncHandler(async (req, res) => {
     userId,
     courseId: course._id,
   }).catch((e) => {
-    chat.warn(`course:turn learnerContext fetch failed err=${e instanceof Error ? e.message : e}`);
+    chatLog.warn(`course:turn learnerContext fetch failed err=${e instanceof Error ? e.message : e}`);
     return '';
   });
 
@@ -306,7 +306,7 @@ export const courseMentorChatController = asyncHandler(async (req, res) => {
   let clientConnected = true;
   const turnStartedAt = Date.now();
 
-  chat.info(
+  chatLog.info(
     `course:turn start course=${courseId} historyMessages=${messages.length} hasSummary=${chatSession?.summary ? 'yes' : 'no'}`,
   );
 
@@ -315,7 +315,7 @@ export const courseMentorChatController = asyncHandler(async (req, res) => {
     clientConnected = false;
     abortController.abort();
     tokenEmitter.removeAllListeners();
-    chat.warn(`course:stream client disconnect ms=${Date.now() - turnStartedAt}`);
+    chatLog.warn(`course:stream client disconnect ms=${Date.now() - turnStartedAt}`);
   });
 
   const { ok } = await runMentorAgentStream({
@@ -334,10 +334,10 @@ export const courseMentorChatController = asyncHandler(async (req, res) => {
   });
 
   if (!ok) {
-    chat.warn(`course:turn done ok=false ms=${Date.now() - turnStartedAt}`);
+    chatLog.warn(`course:turn done ok=false ms=${Date.now() - turnStartedAt}`);
     return;
   }
-  chat.info(`course:turn done ok=true ms=${Date.now() - turnStartedAt}`);
+  chatLog.info(`course:turn done ok=true ms=${Date.now() - turnStartedAt}`);
 
   // Debit credit spend accumulated during this chat turn. Distinct
   // jobType keeps course-mentor traffic separable from lesson-mentor

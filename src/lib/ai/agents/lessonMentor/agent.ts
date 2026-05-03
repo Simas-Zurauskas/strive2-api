@@ -1,7 +1,7 @@
 import { AIMessage } from '@langchain/core/messages';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode } from '@langchain/langgraph/prebuilt';
-import { chat as chatLog } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import { chat, saveMessages } from './nodes';
 import { StateAnnotation, State } from './state';
 import { TOOLS } from './tools';

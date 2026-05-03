@@ -1,7 +1,7 @@
 import { HumanMessage, AIMessage, AIMessageChunk } from '@langchain/core/messages';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 import CourseModel from '@models/CourseModel';
-import { chat as chatLog } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import { NodeFunction } from '../types';
 
 /** Extract plain text from a message content field (string or Anthropic content blocks). */

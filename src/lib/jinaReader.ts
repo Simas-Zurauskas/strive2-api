@@ -1,6 +1,7 @@
 import { JINA_API_KEY } from '@conf/env';
 import { priceLlmUsage } from '@lib/pricing';
 import { recordUsage } from '@services/usageService';
+import { integrationLog } from '@lib/loggers';
 
 /**
  * Generic Jina Reader wrapper used by the mentor's `fetch_url` tool.
@@ -94,13 +95,13 @@ export const readUrl = async ({
     });
 
     if (!res.ok) {
-      console.warn(`[jinaReader] http_error ${res.status} for ${url}`.yellow);
+      integrationLog.warn(`jina:${action} http-error status=${res.status} url=${url}`);
       return { ok: false, error: 'http_error' };
     }
 
     const body = (await res.text()).trim();
     if (!body) {
-      console.warn(`[jinaReader] empty_body for ${url}`.yellow);
+      integrationLog.warn(`jina:${action} empty-body url=${url}`);
       return { ok: false, error: 'empty_body' };
     }
 
@@ -137,8 +138,8 @@ export const readUrl = async ({
 
     const trimmed = body.slice(0, maxChars);
     const truncated = body.length > maxChars;
-    console.log(
-      `[jinaReader] ${action} OK — ${url} (${body.length}b, ${tokens} tok${truncated ? `, trimmed to ${maxChars}` : ''})`.gray,
+    integrationLog.info(
+      `jina:${action} ok url=${url} bytes=${body.length} tokens=${tokens}${truncated ? ` trimmedTo=${maxChars}` : ''}`,
     );
 
     return {
@@ -153,7 +154,7 @@ export const readUrl = async ({
   } catch (err) {
     const isAbort = err instanceof Error && err.name === 'AbortError';
     const errorCode: ReadUrlError = isAbort ? 'timeout' : 'http_error';
-    console.warn(`[jinaReader] ${errorCode} for ${url}: ${err instanceof Error ? err.message : err}`.yellow);
+    integrationLog.warn(`jina:${action} ${errorCode} url=${url} reason=${err instanceof Error ? err.message : err}`);
     return { ok: false, error: errorCode };
   } finally {
     clearTimeout(timer);

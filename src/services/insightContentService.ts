@@ -3,6 +3,7 @@ import InsightModel, { IInsight } from '@models/InsightModel';
 import LessonContentModel from '@models/LessonContentModel';
 import UserInsightProgressModel from '@models/UserInsightProgressModel';
 import { InsightKind, normalizeConceptTag } from '@lib/insightConstants';
+import { genLog } from '@lib/loggers';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -78,7 +79,7 @@ export const persistLessonInsights = async (params: PersistInsightsParams): Prom
     .lean();
 
   if (!lesson) {
-    console.warn(`[insightContent] ✗ LessonContent not found for ${courseId}/${moduleIndex}/${lessonIndex} — skipping insight persistence`.yellow);
+    genLog.warn(`lesson:insights persist-skip lesson=${courseId}/${moduleIndex}/${lessonIndex} reason=lesson_content_not_found`);
     return [];
   }
 
@@ -113,7 +114,7 @@ export const persistLessonInsights = async (params: PersistInsightsParams): Prom
   }));
 
   const inserted = await InsightModel.insertMany(docs);
-  console.log(`[insightContent] ✓ Persisted ${inserted.length} insights for lesson ${courseId}/${moduleIndex}/${lessonIndex}`.green);
+  genLog.info(`lesson:insights persist-ok count=${inserted.length} lesson=${courseId}/${moduleIndex}/${lessonIndex}`);
 
   return inserted.map((d) => (d._id as Types.ObjectId).toString());
 };

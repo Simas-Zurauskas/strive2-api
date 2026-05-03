@@ -52,8 +52,6 @@ export const refineStructureController = asyncHandler(async (req, res) => {
   const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
-  console.log(`[API] Submitting refine structure job, courseId: ${courseId} feedback: ${parsed.feedback}`.cyan);
-
   await CourseModel.findByIdAndUpdate(courseId, { pendingFeedback: parsed.feedback });
 
   const jobId = await submitJob({
@@ -61,7 +59,6 @@ export const refineStructureController = asyncHandler(async (req, res) => {
     courseId,
     type: 'refine_structure',
   });
-  console.log(`[API] Refine structure job submitted: ${jobId}`.green);
 
   res.status(202).json({ data: { jobId } });
 });

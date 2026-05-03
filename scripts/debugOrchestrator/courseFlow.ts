@@ -28,6 +28,8 @@ import type {
   CourseMentorRecord,
   LessonMentorRecord,
   MentorTurn,
+  GoalTypeClassificationSnapshot,
+  GoalTypeOverrideRecord,
 } from './types';
 import type { GetInsightQueueResult, QueueInsightItem, InsightStats } from '@services/insightQueueService';
 import type { InsightMode, InsightRating } from '@lib/insightConstants';
@@ -90,10 +92,9 @@ async function aiJsonCall<T>({
   label: string;
 }): Promise<{ result: T }> {
   const model = getOrchestratorModel().withStructuredOutput(schema);
-  const result = await model.invoke(
-    [new SystemMessage(systemPrompt), new HumanMessage(userPrompt)],
-    { metadata: { llmLabel: label } },
-  );
+  const result = await model.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)], {
+    metadata: { llmLabel: label },
+  });
   return { result: result as T };
 }
 
@@ -198,7 +199,8 @@ Return JSON:
     const reason = err instanceof Error ? err.message : String(err);
     const recommended = depthPreviews.recommended as CourseDepth;
     console.warn(
-      `[selectDepthAsPersona] All retries exhausted, falling back to recommended depth (${recommended}). Cause: ${reason}`.yellow,
+      `[selectDepthAsPersona] All retries exhausted, falling back to recommended depth (${recommended}). Cause: ${reason}`
+        .yellow,
     );
     return {
       depth: recommended,
@@ -276,11 +278,13 @@ interface LlmQuizResponse {
  */
 const quizAnswerOutputSchema = z.object({
   responses: z.array(
-    z.object({
-      questionId: z.string(),
-      selectedOption: z.number(),
-      confidence: z.number(),
-    }).passthrough(),
+    z
+      .object({
+        questionId: z.string(),
+        selectedOption: z.number(),
+        confidence: z.number(),
+      })
+      .passthrough(),
   ),
   reasoning: z.string(),
 });
@@ -430,7 +434,12 @@ Return JSON:
   const userPrompt = `PROMPT (${insight.kind}):\n${insight.prompt}\n\nCANONICAL ANSWER:\n${insight.answer}`;
 
   const { result } = await withRetry(() =>
-    aiJsonCall({ systemPrompt, userPrompt, schema: insightTapRevealOutputSchema, label: 'orchestrator:insight-tap-reveal' }),
+    aiJsonCall({
+      systemPrompt,
+      userPrompt,
+      schema: insightTapRevealOutputSchema,
+      label: 'orchestrator:insight-tap-reveal',
+    }),
   );
 
   let rating = clampRating(result.rating);
@@ -480,7 +489,12 @@ Return JSON:
   const userPrompt = `PROMPT (${insight.kind}):\n${insight.prompt}`;
 
   const { result } = await withRetry(() =>
-    aiJsonCall({ systemPrompt, userPrompt, schema: insightTypedRecallOutputSchema, label: 'orchestrator:insight-typed-recall' }),
+    aiJsonCall({
+      systemPrompt,
+      userPrompt,
+      schema: insightTypedRecallOutputSchema,
+      label: 'orchestrator:insight-typed-recall',
+    }),
   );
 
   // If the persona's insight style flags indicate they struggle to articulate,
@@ -515,13 +529,7 @@ Return JSON:
  * degraded outputs as "partial" (0.4-0.85) instead of "correct" (≥0.85),
  * restoring a realistic grade distribution.
  */
-const degradeTypedRecallAnswer = ({
-  answer,
-  prng,
-}: {
-  answer: string;
-  prng: import('./prng').Prng;
-}): string => {
+const degradeTypedRecallAnswer = ({ answer, prng }: { answer: string; prng: import('./prng').Prng }): string => {
   const tokens = answer.split(/\s+/).filter(Boolean);
   if (tokens.length <= 2) return answer; // too short — don't touch
 
@@ -630,7 +638,9 @@ const followUpDecisionSchema = z.object({
     .describe('Required when decision=continue. Must reference what the mentor just said.'),
   reasoning: z
     .string()
-    .describe('One sentence: why continuing or stopping, and what the persona is hoping to get from this turn (or why they are done).'),
+    .describe(
+      'One sentence: why continuing or stopping, and what the persona is hoping to get from this turn (or why they are done).',
+    ),
 });
 
 function formatPriorTurns(turns: MentorTurnInput[], replies: string[]): string {
@@ -1057,7 +1067,7 @@ export async function runPersonaFlow({
     await client.pollJob({ jobId: clarifyJobId });
     const pollDuration2 = Date.now() - pollStart2;
     course = await client.getCourse(courseId);
-    const questions = (course.clarifyData?.questions ?? []) as ClarifyQuestion[];
+    let questions = (course.clarifyData?.questions ?? []) as ClarifyQuestion[];
 
     // Guard: the clarify-generation schema refinement requires ≥1 text
     // question, but belt-and-suspenders: the orchestrator fails loudly if
@@ -1073,10 +1083,123 @@ export async function runPersonaFlow({
       );
     }
 
-    const r2 = s2.finish(`${questions.length} questions (${textQuestionCount} text) generated`);
+    // Capture the pre-flight classifier's output. The clarify job (api
+    // services/courseService.ts:classifyGoalType) writes course.goalType,
+    // course.goalTypeConfidence, and course.clarifyData.goalTypeNoun
+    // before the question-generation Haiku runs — surface all three so
+    // the assessor can score classification accuracy + confidence
+    // calibration + chip-label quality against persona.predictedGoalType.
+    const classification: GoalTypeClassificationSnapshot = {
+      goalType: course.goalType ?? null,
+      confidence: course.goalTypeConfidence ?? null,
+      noun: course.clarifyData?.goalTypeNoun ?? null,
+    };
+    if (!classification.goalType || !classification.confidence) {
+      // Hard fail — the clarify job is contractually required to emit a
+      // classification (the classifier falls back to master/low on any
+      // error). Missing fields here imply the api change wasn't deployed
+      // or the schema lookup is silently dropping the value. Fail loudly
+      // so a deploy gap is visible in the run output, not in the
+      // assessment write-up.
+      throw new Error(
+        `Clarify guard: classifier output missing on course doc — goalType=${course.goalType ?? 'null'}, confidence=${course.goalTypeConfidence ?? 'null'}. Verify the clarify-job persistence path in jobRunner.ts.`,
+      );
+    }
+    const matchesPredicted = classification.goalType === persona.predictedGoalType;
+
+    const r2 = s2.finish(
+      `${questions.length} questions (${textQuestionCount} text); ` +
+        `classifier: ${classification.goalType}/${classification.confidence} ` +
+        `(predicted: ${persona.predictedGoalType}, ${matchesPredicted ? 'match' : 'MISMATCH'})`,
+    );
     steps.push(r2);
-    recorder.addStep2_Clarify({ result: r2, questions, pollDuration: pollDuration2 });
-    logDone(`Step 2 done → ${questions.length} questions (${textQuestionCount} text)`);
+    recorder.addStep2_Clarify({
+      result: r2,
+      questions,
+      pollDuration: pollDuration2,
+      classification,
+      predictedGoalType: persona.predictedGoalType,
+      predictedGoalTypeReasoning: persona.predictedGoalTypeReasoning,
+    });
+    logDone(
+      `Step 2 done → ${questions.length} questions (${textQuestionCount} text); ` +
+        `goalType=${classification.goalType}/${classification.confidence}` +
+        (matchesPredicted ? ` (${'match'.green})` : ` (${'MISMATCH'.yellow}, predicted ${persona.predictedGoalType})`),
+    );
+
+    // ── Step 2b: Goal-Type Override ─────────────────────
+    //
+    // Always runs when the persona has a non-null override target.
+    // Exercises the chip-toggle cascade end-to-end:
+    //   1. PATCH /course with the new goalType (api server marks
+    //      goalTypeConfidence='high').
+    //   2. Re-submit a clarify job (regenerates questions tilted to the
+    //      new goalType, classifier is skipped because confidence='high').
+    //   3. Re-fetch course; replace `questions` so Step 3 onward operates
+    //      on the post-override question set.
+    // The before/after snapshot is recorded for the assessor to diff —
+    // if the questions don't actually change shape, the tilt is broken.
+    let goalTypeOverride: GoalTypeOverrideRecord | null = null;
+    if (persona.goalTypeOverrideTarget) {
+      const target = persona.goalTypeOverrideTarget;
+      log(`Step 2b: Toggling goalType chip → ${target}...`);
+      const s2b = beginStep({ step: 2, name: `Goal-Type Override → ${target}` });
+      const overrideStart = Date.now();
+      const before: GoalTypeClassificationSnapshot = { ...classification };
+      const clarifyQuestionsBefore = questions;
+
+      // Step 1 of the override cascade — PATCH sets goalTypeConfidence='high'
+      // on the course doc; the next clarify job will skip the classifier.
+      await client.updateCourse({ courseId, updates: { goalType: target } });
+
+      // Step 2 — submit a fresh clarify job. Same job submission path as
+      // the initial Step 2 above; jobRunner reads course.goalTypeConfidence
+      // to decide whether to re-classify (it won't — confidence is high)
+      // and runs the question generator with the user-picked goalType.
+      const overrideJobId = await client.submitJob({ courseId, path: 'clarify' });
+      await client.pollJob({ jobId: overrideJobId });
+      course = await client.getCourse(courseId);
+      questions = (course.clarifyData?.questions ?? []) as ClarifyQuestion[];
+
+      const after: GoalTypeClassificationSnapshot = {
+        goalType: course.goalType ?? null,
+        confidence: course.goalTypeConfidence ?? null,
+        noun: course.clarifyData?.goalTypeNoun ?? null,
+      };
+      goalTypeOverride = {
+        before,
+        target,
+        after,
+        clarifyQuestionsBefore,
+        clarifyQuestionsAfter: questions,
+        durationMs: Date.now() - overrideStart,
+      };
+
+      // Cascade integrity guard — surface a server-side regression
+      // (PATCH didn't persist, clarify regen didn't honor the high
+      // confidence) immediately rather than letting it ride into the
+      // structure prompt. The assessor still gets the snapshot so the
+      // failure is visible in the report.
+      if (after.goalType !== target) {
+        throw new Error(
+          `Goal-type override cascade failed: after.goalType=${after.goalType ?? 'null'}, expected ${target}. Verify updateCourse controller cascade rules.`,
+        );
+      }
+      if (after.confidence !== 'high') {
+        throw new Error(
+          `Goal-type override cascade failed: after.confidence=${after.confidence ?? 'null'}, expected 'high'. Verify updateCourse controller cascade rules.`,
+        );
+      }
+
+      const r2b = s2b.finish(
+        `${before.goalType}→${after.goalType} (${after.confidence}); regenerated ${questions.length} questions`,
+      );
+      steps.push(r2b);
+      recorder.addStep2b_GoalTypeOverride(goalTypeOverride);
+      logDone(
+        `Step 2b done → switched ${before.goalType}→${after.goalType}, regenerated ${questions.length} questions in ${(goalTypeOverride.durationMs / 1000).toFixed(1)}s`,
+      );
+    }
 
     // ── Step 3: Answer Questions (AI as Persona) ────────
     log('Step 3: Answering questions as persona...');
@@ -1106,17 +1229,34 @@ export async function runPersonaFlow({
     log('Step 5: Selecting depth as persona...');
     const s5 = beginStep({ step: 5, name: 'Select Depth' });
     const { depth, reasoning: depthReasoning } = await selectDepthAsPersona({ persona, depthPreviews });
-    // First attempt: post the depth without acknowledgement. If the backend
-    // returns 409 DEPTH_OVERRIDE_REQUIRES_ACK (soft learner upgrading beyond
-    // recommendation), retry once with depthOverrideAcknowledged: true. This
-    // exercises the gate path — we WANT the orchestrator to surface the gate
-    // in reports when it fires, then continue so the rest of the flow runs.
+    // First attempt: post the depth without acknowledgement. The backend's
+    // bidirectional gate may return 409 with one of two codes:
+    //   - DEPTH_OVERRIDE_REQUIRES_ACK     — overcommit (picked too big)
+    //   - DEPTH_UNDERCOMMIT_REQUIRES_ACK  — undercommit (picked too small)
+    // Either way, retry once with depthOverrideAcknowledged: true (the same
+    // flag works for both — only one side fires per PATCH). The full 409
+    // payload is dumped to the terminal so an investigator sees the dialog
+    // copy + ranges + risk + rationale right next to the persona's pick.
+    // For the silent-pass case, tail the API server's stdout for the line
+    // `course:depth-gate outcome=...` to see the full predicate breakdown.
     try {
       await client.updateCourse({ courseId, updates: { depth } });
+      if (depth !== depthPreviews.recommended) {
+        logDetail(
+          `Step 5: depth-gate did NOT fire (selected=${depth}, recommended=${depthPreviews.recommended}). ` +
+            `See API server log "course:depth-gate outcome=..." for the predicate breakdown.`,
+        );
+      }
     } catch (e) {
-      const err = e as { status?: number; data?: { code?: string } };
-      if (err && err.status === 409 && err.data?.code === 'DEPTH_OVERRIDE_REQUIRES_ACK') {
-        logDetail('Step 5: depth-override gate fired, retrying with acknowledgement');
+      const err = e as { status?: number; data?: Record<string, unknown> & { code?: string } };
+      const code = err?.status === 409 ? err.data?.code : undefined;
+      if (code === 'DEPTH_OVERRIDE_REQUIRES_ACK' || code === 'DEPTH_UNDERCOMMIT_REQUIRES_ACK') {
+        const direction = code === 'DEPTH_OVERRIDE_REQUIRES_ACK' ? 'OVERCOMMIT' : 'UNDERCOMMIT';
+        const { code: _c, message: _m, ...diag } = err.data!;
+        logDetail(
+          `Step 5: depth-gate FIRED (${direction}) — ${err.data!.message ?? '(no message)'}\n` +
+            `         payload: ${JSON.stringify(diag)}`,
+        );
         await client.updateCourse({ courseId, updates: { depth, depthOverrideAcknowledged: true } });
       } else {
         throw e;
@@ -1124,8 +1264,18 @@ export async function runPersonaFlow({
     }
     const r5 = s5.finish(depthReasoning);
     steps.push(r5);
-    recorder.addStep5_DepthSelection({ result: r5, selected: depth, recommended: depthPreviews.recommended, aiReasoning: depthReasoning });
-    logDone(`Step 5 done → selected: ${depth}` + (depth !== depthPreviews.recommended ? ` (recommended: ${depthPreviews.recommended})`.yellow : ` (recommended: ${depthPreviews.recommended})`));
+    recorder.addStep5_DepthSelection({
+      result: r5,
+      selected: depth,
+      recommended: depthPreviews.recommended,
+      aiReasoning: depthReasoning,
+    });
+    logDone(
+      `Step 5 done → selected: ${depth}` +
+        (depth !== depthPreviews.recommended
+          ? ` (recommended: ${depthPreviews.recommended})`.yellow
+          : ` (recommended: ${depthPreviews.recommended})`),
+    );
 
     // ── Step 6: Generate Structure ──────────────────────
     log('Step 6: Generating course structure...');
@@ -1180,7 +1330,9 @@ export async function runPersonaFlow({
     const r7 = s7.finish(feedback ? `Feedback: ${feedback}` : 'Accepted as-is');
     steps.push(r7);
     recorder.addStep7_Review({ result: r7, feedback, aiResponse: chatResponse, structureChanged });
-    logDone(`Step 7 done → ${feedback ? `feedback sent, structure ${structureChanged ? 'changed'.green : 'unchanged'.yellow}` : 'accepted as-is'}`);
+    logDone(
+      `Step 7 done → ${feedback ? `feedback sent, structure ${structureChanged ? 'changed'.green : 'unchanged'.yellow}` : 'accepted as-is'}`,
+    );
 
     // ── Step 8: Accept Course ───────────────────────────
     log('Step 8: Accepting course...');
@@ -1227,6 +1379,22 @@ export async function runPersonaFlow({
       stats: LessonContentStats | null;
       mentorProbe: LessonMentorRecord | null;
     }[] = [];
+
+    if (config.maxLessons > 0) {
+      // Refetch the course to pick up any structure mutations that
+      // happened after the last refetch in Step 8. The course-mentor
+      // probe (Step 8b) shares the design-chat endpoint with Step 7,
+      // so the agent has access to `modify_structure` and CAN mutate
+      // the course mid-conversation when the persona signs off on a
+      // tweak ("yes, add that setup lesson before module 1"). Iterating
+      // from stale `course.structure` would underrun the server's
+      // assertPreviousLessonGenerated guard several lessons later — a
+      // 400 surfaces as `Generate the previous lesson first (module
+      // N, lesson M)` and aborts the persona run after some lessons
+      // were already generated. Cheap (single GET) and a no-op when
+      // no upstream mutation happened.
+      course = await client.getCourse(courseId);
+    }
 
     if (config.maxLessons > 0 && course.structure?.modules) {
       const modules = course.structure.modules;
@@ -1308,7 +1476,9 @@ export async function runPersonaFlow({
             mentorProbe,
           });
 
-          logDone(`Generated lesson ${lessonLabel} (${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s)`);
+          logDone(
+            `Generated lesson ${lessonLabel} (${content.blocks.length} blocks, ${(generationMs / 1000).toFixed(1)}s)`,
+          );
 
           // ── Step 10: Complete Lesson ────────────
           const s10 = beginStep({ step: 10, name: `Complete Lesson ${mi}/${li}` });
@@ -1349,7 +1519,12 @@ export async function runPersonaFlow({
       if (eligibleModuleIndices.length > 0) {
         log(`Step 11: Generating quizzes for ${eligibleModuleIndices.length} module(s)...`);
 
-        const generatedQuizzes: { moduleIndex: number; moduleName: string; quiz: ModuleQuizForLearner; generationMs: number }[] = [];
+        const generatedQuizzes: {
+          moduleIndex: number;
+          moduleName: string;
+          quiz: ModuleQuizForLearner;
+          generationMs: number;
+        }[] = [];
 
         for (const mi of eligibleModuleIndices) {
           const moduleName = modules[mi].name;
@@ -1368,7 +1543,9 @@ export async function runPersonaFlow({
 
           steps.push(s11.finish(`${quiz.questions.length} questions, ${(generationMs / 1000).toFixed(1)}s`));
           generatedQuizzes.push({ moduleIndex: mi, moduleName, quiz, generationMs });
-          logDone(`Step 11: Generated quiz for [${mi}] ${moduleName} (${quiz.questions.length} q, ${(generationMs / 1000).toFixed(1)}s)`);
+          logDone(
+            `Step 11: Generated quiz for [${mi}] ${moduleName} (${quiz.questions.length} q, ${(generationMs / 1000).toFixed(1)}s)`,
+          );
         }
 
         recorder.addStep11_ModuleQuizGeneration({ quizzes: generatedQuizzes });
@@ -1434,9 +1611,15 @@ export async function runPersonaFlow({
       log('Step 13: Fetching insight queue...');
       const s13 = beginStep({ step: 13, name: 'Fetch Insight Queue' });
       const queue: GetInsightQueueResult = await client.getInsightQueue();
-      steps.push(s13.finish(`due ${queue.counts.dueTotal}, fresh ${queue.counts.freshAvailable}, learned ${queue.counts.learned}`));
+      steps.push(
+        s13.finish(
+          `due ${queue.counts.dueTotal}, fresh ${queue.counts.freshAvailable}, learned ${queue.counts.learned}`,
+        ),
+      );
       recorder.addStep13_InsightQueue({ queue });
-      logDone(`Step 13: queue → due ${queue.counts.dueTotal}, fresh ${queue.counts.freshAvailable}, learned ${queue.counts.learned}`);
+      logDone(
+        `Step 13: queue → due ${queue.counts.dueTotal}, fresh ${queue.counts.freshAvailable}, learned ${queue.counts.learned}`,
+      );
 
       // Due-first, then fresh. Review everything the server returned — the
       // queue is already bounded server-side (`INSIGHT_QUEUE_DUE_LIMIT` +
@@ -1465,7 +1648,9 @@ export async function runPersonaFlow({
               aiReasoning: 'Style indicates skipping a hard fresh card',
             });
             steps.push(s14.finish('skipped'));
-            logDetail(`  [skip] ${item.kind} — ${item.prompt.length > 60 ? item.prompt.slice(0, 60) + '...' : item.prompt}`);
+            logDetail(
+              `  [skip] ${item.kind} — ${item.prompt.length > 60 ? item.prompt.slice(0, 60) + '...' : item.prompt}`,
+            );
             continue;
           }
 
@@ -1494,7 +1679,12 @@ export async function runPersonaFlow({
             steps.push(s14.finish(`tap-reveal → ${rating}`));
             logDetail(`  [tap] ${item.kind} → ${rating} (box ${rated.box})`);
           } else {
-            const { userAnswer, reasoning } = await reviewInsightTypedRecall({ persona, insight: item, runId, personaSlug });
+            const { userAnswer, reasoning } = await reviewInsightTypedRecall({
+              persona,
+              insight: item,
+              runId,
+              personaSlug,
+            });
             const grade = await client.gradeInsight({ insightId: item.insightId, userAnswer });
             const rating = mapGradeToRating(grade.score);
             const rated = await client.rateInsight({
@@ -1530,7 +1720,9 @@ export async function runPersonaFlow({
         }
 
         recorder.addStep14_InsightReviews({ reviews: insightReviews, statsAfter });
-        logDone(`Step 14: reviewed ${insightReviews.filter((r) => r.action === 'rated').length}, skipped ${insightReviews.filter((r) => r.action === 'skipped').length}`);
+        logDone(
+          `Step 14: reviewed ${insightReviews.filter((r) => r.action === 'rated').length}, skipped ${insightReviews.filter((r) => r.action === 'skipped').length}`,
+        );
       } else {
         logDetail('Step 14: Queue empty, nothing to review');
       }

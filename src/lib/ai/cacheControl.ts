@@ -36,8 +36,8 @@
  * the silent no-op surfaces instead of hiding.
  */
 
-import 'colors';
 import { SystemMessage } from '@langchain/core/messages';
+import { llmLog } from '@lib/loggers';
 
 /** Conservative char→token estimate (Anthropic BPE averages ~3.5-4 chars/token). */
 const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
@@ -69,9 +69,8 @@ export const cachedSystemMessage = ({
     const key = text.slice(0, 64);
     if (!warnedSubMin.has(key)) {
       warnedSubMin.add(key);
-      console.warn(
-        `[cacheControl] system prompt ~${estimated} tok is below the 1024-tok Sonnet minimum — cache_control is a silent no-op. Either drop the caching here or pad the prompt.`
-          .yellow,
+      llmLog.warn(
+        `cacheControl:sub-min tokens~${estimated} threshold=${SONNET_MIN_CACHE_TOKENS} — cache_control is a silent no-op for this prompt`,
       );
     }
   }

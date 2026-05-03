@@ -398,10 +398,20 @@ export const bumpStructureThinFreeTextInput = () => {
 // acknowledgement. `depth_override_acknowledged_total` tracks the follow-up
 // success path so dashboards can compare first-attempt-blocked vs. final-
 // accepted to gauge how often the gate is hit vs. bounced.
+//
+// `depth_undercommit_gate_fired_total` is the symmetric counter for the
+// undercommit half of the depth-override gate — fires when the learner
+// picks BELOW the recommended tier and the LLM judges the coverage gap is
+// meaningful (undercommitRisk = 'moderate' or 'high'). Tracked separately
+// from the overcommit counter because the two failure modes are
+// qualitatively different (cost-of-completion vs. coverage-gap) and want
+// to be charted independently.
 
 export let structureCapExceeded = 0;
 export let depthOverrideGateFired = 0;
 export let depthOverrideAcknowledged = 0;
+export let depthUndercommitGateFired = 0;
+export let depthUndercommitAcknowledged = 0;
 
 export const bumpStructureCapExceeded = () => {
   structureCapExceeded += 1;
@@ -413,6 +423,14 @@ export const bumpDepthOverrideGateFired = () => {
 
 export const bumpDepthOverrideAcknowledged = () => {
   depthOverrideAcknowledged += 1;
+};
+
+export const bumpDepthUndercommitGateFired = () => {
+  depthUndercommitGateFired += 1;
+};
+
+export const bumpDepthUndercommitAcknowledged = () => {
+  depthUndercommitAcknowledged += 1;
 };
 
 // ── LLM cache + token usage (per-label) ─────────────────────
@@ -756,6 +774,18 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
     'Times a depth override was explicitly acknowledged and accepted after the 409 gate fired',
     'counter',
     depthOverrideAcknowledged,
+  );
+  metric(
+    'depth_undercommit_gate_fired_total',
+    'Times updateCourse returned 409 DEPTH_UNDERCOMMIT_REQUIRES_ACK (learner picked a depth below recommended and the LLM flagged a meaningful coverage gap)',
+    'counter',
+    depthUndercommitGateFired,
+  );
+  metric(
+    'depth_undercommit_acknowledged_total',
+    'Times the undercommit warning was explicitly acknowledged and accepted after the 409 gate fired',
+    'counter',
+    depthUndercommitAcknowledged,
   );
 
   // ── LLM cache + token usage (per-label) ──────────────────

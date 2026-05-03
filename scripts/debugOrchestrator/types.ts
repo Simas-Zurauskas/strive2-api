@@ -1,5 +1,5 @@
 import type { ICourse } from '@models/CourseModel';
-import type { CourseDepth, QuestionType } from '@lib/constants';
+import type { CourseDepth, GoalType, GoalTypeConfidence, QuestionType } from '@lib/constants';
 import type { InsightKind, InsightMode, InsightRating } from '@lib/insightConstants';
 
 // ── Persona (orchestrator-only) ──────────────────────────
@@ -62,6 +62,30 @@ export interface Persona {
    */
   quizStyleFlags: QuizStyleFlags;
   insightStyleFlags: InsightStyleFlags;
+  /**
+   * Ground-truth goalType for this persona's goal — what the pre-flight
+   * classifier *should* emit if it works correctly. Set by the persona
+   * generator based on the goal text + stated intent. The orchestrator
+   * records the actual classifier output alongside, so the assessor can
+   * score classification accuracy. Independent of `domain`; orthogonal axis.
+   */
+  predictedGoalType: GoalType;
+  /**
+   * One-sentence rationale for why the persona's goal maps to that
+   * goalType. Surfaces ground truth in the report so a misclassification
+   * has something to argue against.
+   */
+  predictedGoalTypeReasoning: string;
+  /**
+   * Optional override-test target. When set AND the orchestrator was
+   * launched with --goal-type-override, the orchestrator runs an extra
+   * "chip-toggle" cycle after Step 2: PATCH /course with this goalType,
+   * re-submits clarify, and proceeds with the new questions. Tests the
+   * cascade end-to-end. Personas where this is set should be ones who
+   * would realistically change their mind (Skeptic, Anxious Learner).
+   * Null on personas who would accept the classification as-is.
+   */
+  goalTypeOverrideTarget: GoalType | null;
 }
 
 export interface OrchestratorConfig {
@@ -124,12 +148,53 @@ export type CourseStructure = NonNullable<ICourse['structure']>;
 /** The API response shape for GET /api/course/:id (subset of ICourse relevant to the orchestrator) */
 export type CourseData = Pick<
   ICourse,
-  'name' | 'goal' | 'status' | 'domain' | 'clarifyData' | 'answers' | 'depth' | 'depthPreviews' | 'structure' | 'feedbackHistory'
+  | 'name'
+  | 'goal'
+  | 'status'
+  | 'domain'
+  | 'goalType'
+  | 'goalTypeConfidence'
+  | 'clarifyData'
+  | 'answers'
+  | 'depth'
+  | 'depthPreviews'
+  | 'structure'
+  | 'feedbackHistory'
 > & { _id: string };
 
 // Re-export for convenience
-export type { CourseDepth };
+export type { CourseDepth, GoalType, GoalTypeConfidence };
 export type { ILessonContent, ILessonBlock } from '@models/LessonContentModel';
+
+// ── Goal-type classification & override (orchestrator-only) ───
+//
+// Captured per-run so the assessment rubric can score:
+//  - classification accuracy (predicted vs classified),
+//  - confidence calibration (high on clear cases, low on garbage),
+//  - clarify-question tilt to the classified goalType,
+//  - override cascade integrity (when --goal-type-override fires).
+
+/** Snapshot of the classifier's output as persisted on the course doc. */
+export interface GoalTypeClassificationSnapshot {
+  goalType: GoalType | null;
+  confidence: GoalTypeConfidence | null;
+  noun: string | null;
+}
+
+export interface GoalTypeOverrideRecord {
+  /** What the classifier emitted before the override (Step 2 baseline). */
+  before: GoalTypeClassificationSnapshot;
+  /** Target goalType the persona switched to via the chip. */
+  target: GoalType;
+  /** Server state after PATCH + clarify regen completed. */
+  after: GoalTypeClassificationSnapshot;
+  /** Question set the classifier-driven clarify produced (for diff). */
+  clarifyQuestionsBefore: ClarifyQuestion[];
+  /** Question set after the override-driven clarify regen. */
+  clarifyQuestionsAfter: ClarifyQuestion[];
+  /** Wall-clock for the whole override cycle (PATCH → poll). */
+  durationMs: number;
+}
 
 /** Response shape from the dev-only /lesson-content/:m/:l/stats endpoint. */
 export interface LessonContentStats {

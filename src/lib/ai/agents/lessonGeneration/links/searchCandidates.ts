@@ -5,6 +5,7 @@ import { bgError } from '@lib/bg';
 import { priceFlatUnit } from '@lib/pricing';
 import { bumpTavilySearchDedupHit } from '@lib/metrics';
 import { recordUsage } from '@services/usageService';
+import { genLog, integrationLog } from '@lib/loggers';
 import { TopicPlan, SearchCandidate } from './schemas';
 import { getCachedSearch, setCachedSearch } from './searchCache';
 
@@ -129,7 +130,7 @@ export const searchCandidates = async ({
       const cached = getCachedSearch({ courseId, query });
       if (cached) {
         bumpTavilySearchDedupHit();
-        console.log(`[links.searchCandidates]   ↺ cached hit for "${query}" (${cached.length} candidate(s))`.gray);
+        genLog.info(`links:search-cache-hit q="${query}" candidates=${cached.length}`);
         return cached;
       }
 
@@ -149,16 +150,17 @@ export const searchCandidates = async ({
           .map((r, i) => toCandidate(r, topic, idPrefix, i))
           .filter((c): c is SearchCandidate => c !== null);
         setCachedSearch({ courseId, query, candidates });
-        console.log(`[links.searchCandidates]   ${candidates.length} hit(s) for "${query}"`.gray);
+        genLog.info(`links:search-ok q="${query}" candidates=${candidates.length}`);
         return candidates;
       } catch (e) {
         bgError('linksGeneration.tavilySearch')(e);
-        console.warn(`[links.searchCandidates]   ✗ Tavily failed for "${query}"`.yellow);
+        const reason = e instanceof Error ? e.message : String(e);
+        integrationLog.error(`tavily:search fail q="${query}" reason=${reason}`);
         return [];
       }
     }),
   );
   const flat = perQuery.flat();
-  console.log(`[links.searchCandidates] ✓ ${flat.length} raw candidate(s) across ${topics.length} topic(s) (target ~${TARGET_TOTAL_CANDIDATES})`.cyan);
+  genLog.info(`links:search-done topics=${topics.length} raw=${flat.length} target~${TARGET_TOTAL_CANDIDATES}`);
   return flat;
 };

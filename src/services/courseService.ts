@@ -1,27 +1,152 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { HumanMessage } from '@langchain/core/messages';
-import { getStructureModel, getUtilityModel, MODEL_IDS } from '@lib/langchain';
+import { getStructureModel, MODEL_IDS } from '@lib/langchain';
 import { cachedSystemMessage } from '@lib/ai/cacheControl';
 import { logCacheUsage, usageFromAnthropic } from '@lib/ai/cacheLogger';
 import { withRetry } from '@lib/retry';
 import { jsonish } from '@lib/zodHelpers';
 import { ANTHROPIC_API_KEY } from '@conf/env';
-import { COURSE_DEPTHS, COURSE_DOMAINS, CourseDepth, CourseDomain, QUESTION_TYPES } from '@lib/constants';
+import {
+  COURSE_DEPTHS,
+  COURSE_DOMAINS,
+  CourseDepth,
+  CourseDomain,
+  GOAL_TYPES,
+  GOAL_TYPE_CONFIDENCES,
+  GoalType,
+  GoalTypeConfidence,
+  QUESTION_TYPES,
+} from '@lib/constants';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { bumpClarifyRefinementRetry, bumpStructureCapExceeded } from '@lib/metrics';
+import { genLog } from '@lib/loggers';
 import { detectSoftnessHint, getLessonCountHint, getEstimatedHoursRange, SoftnessHint } from './softness';
 import {
   clarifyOutputSchema,
   ClarifyOutput,
   CLARIFY_TEXT_QUESTION_REFINEMENT_MARKER,
 } from './clarifyValidation';
+import {
+  goalTypeClassificationSchema,
+  GoalTypeClassification,
+  GOAL_TYPE_GUIDANCE,
+  fallbackClassification,
+} from './goalTypeClassification';
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // Re-export from the validation module so existing importers (jobRunner.ts)
 // continue working without a mechanical import refactor.
 export { clarifyOutputSchema, isThinFreeText } from './clarifyValidation';
+export { goalTypeClassificationSchema, GoalTypeClassification } from './goalTypeClassification';
+
+// ── Classify goalType ───────────────────────────────────
+//
+// One-shot Haiku call run inside the `clarify` job, BEFORE the clarifying
+// questions are generated. The output (`goalType`) tilts the clarify
+// question set and later steers the structure prompt's curriculum-shape
+// rules. Failure mode is graceful: any error or schema-validation miss
+// returns the safe default `{ goalType: 'master', confidence: 'low', ... }`
+// so a Haiku hiccup never fails the clarify job.
+
+const GOAL_TYPE_GUIDANCE_BULLETS = GOAL_TYPES.map(
+  (t) => `- "${t}": ${GOAL_TYPE_GUIDANCE[t]}`,
+).join('\n');
+
+const GOAL_TYPE_CLASSIFIER_PROMPT = `You classify a learning goal into ONE of: master | monetize | pass | build | fluency. Your classification steers downstream curriculum shape, so be precise.
+
+Definitions:
+${GOAL_TYPE_GUIDANCE_BULLETS}
+
+Apply a primary-activity test for multi-intent goals (when a goal could plausibly fit two types, pick the one whose deliverable IS the goal):
+- "Learn React deeply to ship a SaaS" → build (the SaaS is the deliverable; React is the means).
+- "Become a YouTuber making React tutorials" → monetize (the channel is the goal; React is the topic of the channel).
+- "Master React" → master (no project, no channel, no exam).
+- "Learn Spanish before my Madrid trip" → fluency (NOT pass — no exam).
+- "Pass AWS Solutions Architect by November" → pass (named cert + date).
+- "Build a Chrome extension to track tabs" → build (the extension is the project).
+- "Run Meta ads for my silver-jewelry ecomm store" → monetize (revenue is the goal).
+- "Become fluent in conversational Japanese for travel" → fluency.
+- "Gasu" / "fre fire" / unparseable fragments → master with confidence: low.
+
+Also extract a short, learner-facing NOUN PHRASE for chip display (4-10 words, concrete, quotes the learner's own phrasing when present):
+- "become a YouTuber making cooking videos" → "your cooking YouTube channel"
+- "pass the CPA audit exam in October" → "the CPA audit exam"
+- "build a real-time chat app in React" → "your real-time chat app"
+- "become fluent in Japanese" → "Japanese"
+- "master functional programming in Haskell" → "functional programming in Haskell"
+
+Confidence:
+- high: the primary-activity signal is explicit in the goal text.
+- medium: the signal is implied but not stated.
+- low: vague, garbled, non-English, OR could plausibly be 2+ types.
+
+Return your output via the classify_goal_type tool.`;
+
+const GOAL_TYPE_CLASSIFIER_TOOL: Anthropic.Messages.Tool = {
+  name: 'classify_goal_type',
+  description: "Classify the learner's goal into a goalType axis with a chip noun phrase.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      goalType: { type: 'string', enum: [...GOAL_TYPES] },
+      confidence: { type: 'string', enum: [...GOAL_TYPE_CONFIDENCES] },
+      noun: { type: 'string', description: '4-10 word noun phrase for the goal-type chip on the ClarifyStep.' },
+    },
+    required: ['goalType', 'confidence', 'noun'],
+  },
+};
+
+export const classifyGoalType = async (params: { goal: string }): Promise<GoalTypeClassification> => {
+  const goal = sanitizePromptInput(params.goal);
+  try {
+    const result = await anthropic.messages.create({
+      model: MODEL_IDS.HAIKU,
+      max_tokens: 256,
+      temperature: 0,
+      system: [
+        {
+          type: 'text',
+          text: GOAL_TYPE_CLASSIFIER_PROMPT,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      messages: [{ role: 'user', content: goal }],
+      tools: [GOAL_TYPE_CLASSIFIER_TOOL],
+      tool_choice: { type: 'tool', name: GOAL_TYPE_CLASSIFIER_TOOL.name },
+    });
+
+    logCacheUsage({
+      label: 'clarify:goalType',
+      usage: usageFromAnthropic(result),
+      model: MODEL_IDS.HAIKU,
+    });
+
+    const toolUse = result.content.find(
+      (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use',
+    );
+    if (!toolUse) {
+      genLog.warn('classifyGoalType: model emitted no tool_use; falling back to master/low');
+      return fallbackClassification(goal);
+    }
+    const parsed = goalTypeClassificationSchema.safeParse(toolUse.input);
+    if (!parsed.success) {
+      genLog.warn(
+        `classifyGoalType: schema parse failed (${parsed.error.message}); falling back to master/low`,
+      );
+      return fallbackClassification(goal);
+    }
+    genLog.info(
+      `classifyGoalType result goalType=${parsed.data.goalType} confidence=${parsed.data.confidence}`,
+    );
+    return parsed.data;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    genLog.warn(`classifyGoalType failed (${msg}); falling back to master/low`);
+    return fallbackClassification(goal);
+  }
+};
 
 // ── Clarify course ──────────────────────────────────────
 
@@ -51,7 +176,16 @@ Question types — pick the best type for each question:
 - "multiple_choice": One option only. ONLY for truly mutually exclusive choices (experience level, primary learning format preference). Provide 3-5 options. Set options array.
 - "text": Free-form answer. Use for open-ended answers where a concrete phrase from the learner — a project name, a specific tool, a stakeholder, a constraint — will materially improve curriculum design. Set options to null.
 
-Each question must have a unique id (q1, q2, q3, etc).`;
+Each question must have a unique id (q1, q2, q3, etc).
+
+Goal-type tilt — the learner's goal has been pre-classified into one of master | monetize | pass | build | fluency, and the goalType is included in the user message. Adjust your questions so they elicit information specific to that intent shape:
+- master — keep the questions general (background, prior tools, focus areas, learning format). This is the default behavior.
+- monetize — at least one question must elicit the learner's PRODUCT, NICHE, AUDIENCE, or CHANNELS. Other questions can ask about current revenue, marketing budget, or stage. Wrong: "What topics interest you most?" Right: "What's your product or niche, and who are you trying to reach?"
+- pass — at least one question must elicit the EXAM NAME and (if not already in the goal) the DATE or DEADLINE. Other questions can ask about weak topics, past papers available, target score. Wrong: "How experienced are you?" Right: "Which exam, and what's your test date?"
+- build — at least one question must elicit the PROJECT SCOPE or specific deliverable detail. Other questions can ask about tech-stack constraints, MVP deadline, or target users. Wrong: "What concepts interest you?" Right: "What's the simplest version of your project that you'd ship first?"
+- fluency — at least one question must elicit the TARGET CEFR LEVEL or fluency target (conversational, business, academic, etc.) and the learner's CURRENT level. Other questions can ask about practice time, immersion context, or specific scenarios.
+
+The hard contract — at least one text question — still applies for every goalType.`;
 
 // Tool schema for the clarify generation. Mirrors `clarifyOutputSchema` so
 // the tool_use payload passes Zod validation after parsing. Hand-written
@@ -92,8 +226,15 @@ const CLARIFY_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-export const clarifyCourse = async (params: { goal: string }): Promise<ClarifyOutput> => {
+export const clarifyCourse = async (params: { goal: string; goalType?: GoalType }): Promise<ClarifyOutput> => {
   const goal = sanitizePromptInput(params.goal);
+  const goalType = params.goalType ?? 'master';
+
+  // The user message carries goal + goalType so the system prompt's tilt
+  // section can act on it. Pre-feature courses that don't pass `goalType`
+  // default to `master`, which the prompt explicitly maps to current
+  // behavior — no regression on the working path.
+  const userMessage = `Learning goal: ${goal}\n\nGoal type: ${goalType}`;
 
   // Raw Anthropic SDK (not LangChain `.withStructuredOutput`) so we keep the
   // explicit tool_use contract and targeted cache breakpoint.
@@ -118,7 +259,7 @@ export const clarifyCourse = async (params: { goal: string }): Promise<ClarifyOu
             cache_control: { type: 'ephemeral' },
           },
         ],
-        messages: [{ role: 'user', content: goal }],
+        messages: [{ role: 'user', content: userMessage }],
         tools: [CLARIFY_TOOL],
         tool_choice: { type: 'tool', name: CLARIFY_TOOL.name },
       });
@@ -189,6 +330,21 @@ const formatSoftnessSection = (softness: SoftnessHint): string => {
 export const OVERCOMMIT_RISK_LEVELS = ['low', 'moderate', 'high'] as const;
 export type OvercommitRisk = (typeof OVERCOMMIT_RISK_LEVELS)[number];
 
+/**
+ * `undercommitRisk` is the symmetric companion to `overcommitRisk`. Where
+ * overcommit measures the cost-of-completion (will the learner burn out?),
+ * undercommit measures the coverage gap (will the picked depth fail to
+ * deliver what the learner explicitly asked for?). Drives the new
+ * undercommit half of the depth-override gate — fires on a 409 when the
+ * learner picks BELOW the recommended tier and the LLM judges the gap is
+ * meaningful.
+ *
+ * Same value semantics as overcommitRisk so the gate logic, dialog
+ * rationale plumbing, and metrics counters mirror cleanly.
+ */
+export const UNDERCOMMIT_RISK_LEVELS = ['low', 'moderate', 'high'] as const;
+export type UndercommitRisk = (typeof UNDERCOMMIT_RISK_LEVELS)[number];
+
 const depthPreviewsOutputSchema = z.object({
   overview: z.object({
     summary: z.string(),
@@ -204,17 +360,20 @@ const depthPreviewsOutputSchema = z.object({
   }),
   recommended: z.enum(COURSE_DEPTHS),
   recommendationReason: z.string(),
-  // Best-effort LLM signal — `.optional()` is load-bearing. Haiku
-  // occasionally drops these fields under structured-output pressure
-  // (especially when the schema grows and the prompt gets longer).
-  // Marking them required would invalidate an otherwise-correct
+  // Best-effort LLM signals — `.optional()` is load-bearing on all four.
+  // Haiku occasionally drops these fields under structured-output
+  // pressure (especially when the schema grows and the prompt gets
+  // longer). Marking them required would invalidate an otherwise-correct
   // depth-previews response and force a retry storm. Instead, missing
-  // values fall through to the phrase-regex cost signal in the gate
-  // — same behaviour as for legacy courses persisted before this
-  // field existed. The LLM signal is upgrade-only; the regex is the
-  // floor.
+  // values fall through to:
+  //   - overcommit gate: phrase-regex cost signal (same as legacy)
+  //   - undercommit gate: silent pass (no warning — undercommit gating
+  //     is opt-in via the LLM signal; we don't have a regex fallback
+  //     because deadline/professional-goal phrasing is too varied).
   overcommitRisk: z.enum(OVERCOMMIT_RISK_LEVELS).optional(),
   overcommitRationale: z.string().optional(),
+  undercommitRisk: z.enum(UNDERCOMMIT_RISK_LEVELS).optional(),
+  undercommitRationale: z.string().optional(),
 });
 
 type DepthPreviewsLLMOutput = z.infer<typeof depthPreviewsOutputSchema>;
@@ -312,7 +471,98 @@ Also emit two optional fields: \`overcommitRisk\` ("low" | "moderate" | "high") 
 - "moderate" — some hedging, hobbyist framing, or competing commitments.
 - "high" — explicit softness, deadline pressure, or commitment uncertainty (paraphrase counts; the regex misses many cases).
 
-The rationale should reference specific answer content (no invented quotes). Skip both fields if you're unsure rather than guessing.`;
+The rationale should reference specific answer content (no invented quotes). Skip both fields if you're unsure rather than guessing.
+
+Symmetrically, emit two more optional fields: \`undercommitRisk\` ("low" | "moderate" | "high") and \`undercommitRationale\` (one short sentence). These rate how poorly served the learner will be if they pick a depth BELOW your recommendation — i.e., the COVERAGE-GAP risk, not the cost risk:
+- "low" — a lighter tier than recommended would still satisfy the stated goal. Curiosity-driven or exploratory learners often score here.
+- "moderate" — a lighter tier would skip practical applications they specifically asked about, but they'd still get useful foundations. Hobbyists with named projects often score here.
+- "high" — explicit deadline / exam / interview / professional-grade goal that demands the recommended tier or above. Going below would leave the learner unprepared for what they actually said they need.
+
+Calibration guidance:
+- A SOFT=YES learner who picks Overview is almost never undercommitting (their stated goal IS the lighter coverage). Default to "low".
+- A learner with a named professional artifact (interview, deadline, project shipping next month) who picks below the recommended tier is almost always at least "moderate", often "high".
+- Avoid "high" on both overcommit AND undercommit for the same learner — the recommendation should already split the difference. If you find yourself wanting both, recheck whether the recommendation itself is right.
+
+The undercommit rationale should reference specific answer content (no invented quotes). Skip both undercommit fields if you're unsure rather than guessing — silent fields produce no warning, which is the safer default.`;
+
+// Hand-written tool schema for depth previews. Mirrors `depthPreviewsOutputSchema`
+// so the tool_use payload passes Zod validation after parsing. The schema is
+// hand-written (not derived from Zod via `z.toJSONSchema`) for two reasons:
+//   1. Fewer anyOf wrappers — the LangChain conversion adds noise around the
+//      `jsonish()` wrappers on `bullets` arrays which has been correlated with
+//      the model collapsing nested structure into strings.
+//   2. We control the exact tool contract the model sees, which improves
+//      adherence to the per-tier `{ summary, bullets[] }` nesting that has
+//      been the regression site (model emitting `overview` as a string with
+//      embedded `<parameter name="summary">` XML instead of as an object).
+const DEPTH_PREVIEWS_TOOL: Anthropic.Messages.Tool = {
+  name: 'depth_previews_output',
+  description:
+    "Return the three depth-tier previews, the recommended depth + reason, and optional overcommit/undercommit risk signals.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      overview: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          bullets: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['summary', 'bullets'],
+      },
+      comprehensive: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          bullets: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['summary', 'bullets'],
+      },
+      deep_dive: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          bullets: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['summary', 'bullets'],
+      },
+      recommended: { type: 'string', enum: [...COURSE_DEPTHS] },
+      recommendationReason: { type: 'string' },
+      overcommitRisk: { type: 'string', enum: [...OVERCOMMIT_RISK_LEVELS] },
+      overcommitRationale: { type: 'string' },
+      undercommitRisk: { type: 'string', enum: [...UNDERCOMMIT_RISK_LEVELS] },
+      undercommitRationale: { type: 'string' },
+    },
+    required: ['overview', 'comprehensive', 'deep_dive', 'recommended', 'recommendationReason'],
+  },
+};
+
+/**
+ * Strip Anthropic tool-use XML residue (`<parameter name="X">value</parameter>`)
+ * that occasionally bleeds into structured-output payloads when the model
+ * conflates JSON nesting with internal tool-call syntax. Recursively walks
+ * every string in the value; arrays/objects/nullish pass through. Idempotent
+ * on clean input.
+ *
+ * The tool_use contract should make this leak rare in practice — we still
+ * sanitize defensively because the failure mode it guards against (a
+ * `Failed to parse` storm that exhausts retries and aborts the persona
+ * run) is more expensive than the regex pass.
+ */
+const stripXmlParameterTags = (input: unknown): unknown => {
+  if (typeof input === 'string') {
+    return input.replace(/<\/?parameter\b[^>]*>/g, '').trim();
+  }
+  if (Array.isArray(input)) return input.map(stripXmlParameterTags);
+  if (input && typeof input === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+      out[k] = stripXmlParameterTags(v);
+    }
+    return out;
+  }
+  return input;
+};
 
 interface DepthPreviewsInput {
   goal: string;
@@ -322,12 +572,6 @@ interface DepthPreviewsInput {
 export const generateDepthPreviews = async (params: DepthPreviewsInput): Promise<DepthPreviewsOutput> => {
   const goal = sanitizePromptInput(params.goal);
   const softness = detectSoftnessHint({ answers: params.answers });
-  // Depth previews are 3 short outline previews (Bloom-labelled bullets) —
-  // structured extraction, low reasoning load. Downshifted Sonnet → Haiku
-  // (5× cheaper per token) as part of the 2026-04-21 cost audit; retry
-  // covers the occasional parse miss.
-  const model = getUtilityModel();
-  const structuredModel = model.withStructuredOutput(depthPreviewsOutputSchema);
 
   const humanMessage = `Learning goal: ${goal}
 
@@ -338,17 +582,56 @@ ${formatSoftnessSection(softness)}
 
 Generate personalized depth previews for each tier.`;
 
-  // Labelled retries: `clarify:depth-previews` is a known structured-
-  // output drift point (the LLM occasionally drops the optional
-  // `overcommitRisk` / `overcommitRationale` fields). Tagging here so
-  // the `with_retry_total{label=...}` metric surfaces drift-rate
-  // per call site.
+  // Migrated from LangChain `withStructuredOutput` → raw Anthropic SDK +
+  // explicit tool_use after a recurring "Failed to parse" regression where
+  // Haiku leaked tool-use-style XML (`<parameter name="summary">...</parameter>`)
+  // into the JSON output, collapsing `overview` from an object into a
+  // string. The hand-written `input_schema` above is a stronger contract
+  // for the model than the LangChain-converted Zod schema, and we own the
+  // parse step (sanitize + Zod) so a future leak surfaces as a clean
+  // retry rather than an unrecoverable parse failure. Same model (Haiku) —
+  // the migration is about robustness, not capability.
+  //
+  // Retry label `clarify:depth-previews` keeps the `with_retry_total{label=...}`
+  // dashboard slice intact so retry rates remain comparable across the
+  // refactor.
   const response = await withRetry(
-    () =>
-      structuredModel.invoke(
-        [cachedSystemMessage({ text: DEPTH_PREVIEWS_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
-        { metadata: { llmLabel: 'clarify:depth-previews' } },
-      ),
+    async () => {
+      const result = await anthropic.messages.create({
+        model: MODEL_IDS.HAIKU,
+        max_tokens: 4096,
+        temperature: 0.7,
+        system: [
+          {
+            type: 'text',
+            text: DEPTH_PREVIEWS_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [{ role: 'user', content: humanMessage }],
+        tools: [DEPTH_PREVIEWS_TOOL],
+        tool_choice: { type: 'tool', name: DEPTH_PREVIEWS_TOOL.name },
+      });
+
+      logCacheUsage({
+        label: 'clarify:depth-previews',
+        usage: usageFromAnthropic(result),
+        model: MODEL_IDS.HAIKU,
+      });
+
+      const toolUse = result.content.find(
+        (b): b is Anthropic.Messages.ToolUseBlock => b.type === 'tool_use',
+      );
+      if (!toolUse) {
+        throw new Error('depth-previews: model did not emit a tool_use block');
+      }
+      // Defense-in-depth: strip any `<parameter ...>` XML residue before
+      // Zod validates the shape. If the leak is subtler than this regex
+      // catches (e.g., the model emits a string-where-an-object-belongs),
+      // Zod will throw and `withRetry` will re-invoke.
+      const sanitized = stripXmlParameterTags(toolUse.input);
+      return depthPreviewsOutputSchema.parse(sanitized);
+    },
     { label: 'clarify:depth-previews' },
   );
 
@@ -441,6 +724,7 @@ const STRUCTURE_DOMAIN_GUIDANCE: Record<CourseDomain, string> = {
   creative: 'visual art, music, writing craft, design, photography, performance — production-oriented courses where the learner MAKES something in a medium.',
   business: 'management, marketing, product management, sales, strategy, negotiation, personal finance, entrepreneurship, operations, and economics applied to real-world decisions. Includes Agile/Scrum, leadership, and applied econ/finance.',
   practical: 'hands-on physical skills — cooking, baking, home repair, gardening, trades (plumbing, carpentry, electrical), crafts, fitness and training routines, outdoor skills. Courses where practice requires tools, materials, or physical action in a real environment.',
+  'practical-ai': 'operating AI tools and writing prompts as the primary skill — prompt engineering, no-code/low-code AI workflows (n8n, Zapier, Make), agent recipes (custom GPTs, Claude Projects, LangChain/LangGraph used as a configuration surface), RAG and chatbot assembly via off-the-shelf platforms, AI for marketing/sales/research/ops AS TOOL USE, and creative-AI tooling (Midjourney, Runway, Suno, ElevenLabs) when the lesson is about prompt craft and tool operation rather than artistic intent. Choose this when the learner\'s primary activity is OPERATING A TOOL OR CRAFTING A PROMPT, not WRITING SOFTWARE WITH AI LIBRARIES — that is `programming`. Domain-of-application (marketing, customer support, recruiting) does NOT override: an AI workflow course wins over `business`/`practical`/`creative` when the lesson-level content is about model choice, prompt shape, tool wiring, eval, and failure modes.',
   'life-skills': 'personal effectiveness and communication in the learner\'s own language — public speaking, interpersonal communication, productivity systems, career development, habit-building, emotional intelligence, soft skills. Distinct from creative writing (which is creative) and from language acquisition (which is language).',
   other: "anything that genuinely doesn't fit any of the categories above. Rare after the introduction of business, practical, and life-skills — before picking this, re-check whether the course actually fits one of those three.",
 };
@@ -473,6 +757,16 @@ Programming-vs-stem disambiguator — use the PRIMARY-ACTIVITY test:
   - "Bioinformatics with Biopython" → \`programming\` (code-first application of bio).
   - "Molecular biology: central dogma, transcription regulation" → \`stem\` (no code).
   - "Blockchain with Solidity" is \`programming\` (code-heavy); "the math behind zero-knowledge proofs" is \`stem\`.
+
+Practical-AI-vs-neighbors disambiguator — apply the primary-activity test:
+- "n8n agent for inbound lead-gen" → \`practical-ai\` (no-code wiring, prompts).
+- "Build a RAG chatbot in Python with LangChain + pgvector" → \`programming\` (writing software).
+- "Prompt library for cold outreach as a B2B SDR" → \`practical-ai\` (prompt craft is the skill).
+- "Sales playbook for outbound at a Series B SaaS" → \`business\` (no AI tool operation at the core).
+- "Midjourney for product photography" → \`practical-ai\` (lesson-level content is prompts, parameters, upscaling workflow).
+- "Composition and lighting for product photography" → \`creative\` (medium craft, gear-independent).
+- "Fine-tune a Llama model on customer support tickets" → \`programming\` (training-loop code, infra).
+- "ChatGPT for ad copy as a solo marketer" → \`practical-ai\` (prompt patterns + tool operation, not marketing strategy).
 
 "Business writing" is \`business\` (the aim is business communication); "writing short fiction" is \`creative\`. Before defaulting to \`other\`, re-read the \`business\`, \`practical\`, and \`life-skills\` scopes — most non-STEM/non-code courses fit one of those three.
 
@@ -523,14 +817,39 @@ interface StructureInput {
   goal: string;
   answers: { questionId: string; answer: string }[];
   depth: CourseDepth;
+  // Pre-classified during the clarify job (and overridable by the user via
+  // the ClarifyStep chip). Defaults to `master` for pre-feature courses
+  // re-entering the structure pipeline — the `master` branch in the
+  // structure prompt is explicitly the no-op path.
+  goalType: GoalType;
 }
+
+// How `goalType` reshapes the curriculum. Single source of truth — one
+// sentence per type, surfaced in the structure prompt's human message so
+// it's part of the request, not the cached system prompt (the rules vary
+// per course; the overall framework belongs in the system prompt).
+const GOAL_TYPE_STRUCTURE_GUIDANCE: Record<GoalType, string> = {
+  master:
+    'Default behavior — comprehensive ladder, foundations included unless the learner reported intermediate or advanced experience. No special structural constraint.',
+  monetize:
+    "Every module must end in a TACTICAL ACTION lesson the learner can execute the same week (\"Run your first 3-day Meta ad test\", \"Publish your channel-trailer reel\"). Quote the learner's named PRODUCT, NICHE, AUDIENCE, or CHANNEL verbatim in module names — no generic \"fundamentals of X\" titles. Defer abstract theory in favor of playbook-style content. The capstone module ships a public, revenue-relevant artifact (a launched campaign, a posted content series, a closed first sale).",
+  pass:
+    "Modules must map to the exam's SYLLABUS sections (use the official syllabus structure when known — CPA's four sections, JEE's Physics/Chem/Math, BITSAT's PCM-E). Lessons within each module include retrieval-practice quizzes early and past-paper-style problems often. The FINAL MODULE must be a timed mock exam under realistic conditions plus a weak-topic retarget pass. If the learner's goal text mentions a date or deadline (\"by October\", \"BITSAT 2025\"), note it explicitly in `scopeDecisions` and trim toward the LOW end of the lesson-count target — the cap matters more than depth here.",
+  build:
+    "The course is a project SPINE. Module 1 always sets up the project (skeleton repo, dev env, the simplest version that runs). Each subsequent module ships a CHECKPOINT — a feature that builds on the previous module and is testable on its own. The CAPSTONE is polish + deploy (or equivalent for non-software builds). No \"theory only\" modules — every concept enters the curriculum at the moment the project needs it.",
+  fluency:
+    "Progressive exposure with retrieval emphasis. Modules organize around CONVERSATIONAL DOMAINS (greetings + small talk, ordering food, asking for directions, work/study scenarios) when the target is conversational fluency, or around SKILL TRACKS (listening, speaking, reading, writing) when the target is broader. Lessons emphasize active recall over passive reading. (Block-type tuning — vocab cards, cloze, listening prompts — is deferred to lesson generation.)",
+};
+
+const formatGoalTypeStructureSection = (goalType: GoalType): string =>
+  `Goal type: ${goalType}\nGoal-type curriculum guidance: ${GOAL_TYPE_STRUCTURE_GUIDANCE[goalType]}`;
 
 /** Count total lessons across all modules in a generated structure. */
 const totalLessonCount = (structure: StructureOutput): number =>
   structure.modules.reduce((sum, m) => sum + m.lessons.length, 0);
 
 export const generateCourseStructure = async (params: StructureInput): Promise<StructureOutput> => {
-  const { answers, depth } = params;
+  const { answers, depth, goalType } = params;
   const goal = sanitizePromptInput(params.goal);
   const softness = detectSoftnessHint({ answers });
   const [capMin, capMax] = getLessonCountHint({ depth, isSoft: softness.isSoft });
@@ -545,6 +864,8 @@ ${formatAnswers(answers)}
 Chosen course depth: ${depth}
 
 ${formatSoftnessSection(softness)}
+
+${formatGoalTypeStructureSection(goalType)}
 
 Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules). Do not exceed ${capMax} unless the topic genuinely cannot be taught at this scale.
 
@@ -568,8 +889,8 @@ Fill in the reasoning fields first, then design the course structure.`;
   const lessonCount = totalLessonCount(response);
   if (lessonCount > capMax) {
     bumpStructureCapExceeded();
-    console.warn(
-      `[generateCourseStructure] ⚠ Cap exceeded: ${lessonCount} lessons vs cap ${capMax} (depth=${depth}, soft=${softness.isSoft}). Accepting the result — cap is a suggestion, not a hard rule.`.yellow,
+    genLog.warn(
+      `course:structure cap-exceeded lessons=${lessonCount} cap=${capMax} depth=${depth} soft=${softness.isSoft} — accepted (cap is advisory)`,
     );
   }
 
@@ -588,7 +909,7 @@ interface RefineInput extends StructureInput {
 }
 
 export const refineCourseStructure = async (params: RefineInput): Promise<StructureOutput> => {
-  const { answers, depth, currentStructure, currentDomain } = params;
+  const { answers, depth, goalType, currentStructure, currentDomain } = params;
   const goal = sanitizePromptInput(params.goal);
   const feedback = sanitizePromptInput(params.feedback);
   const feedbackHistory = params.feedbackHistory.map(sanitizePromptInput);
@@ -612,6 +933,8 @@ ${formatAnswers(answers)}
 Chosen course depth: ${depth}
 
 ${formatSoftnessSection(softness)}
+
+${formatGoalTypeStructureSection(goalType)}
 
 Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules). The current structure may be inside or outside this range; respect the cap unless the learner's CURRENT REQUEST below explicitly asks to expand beyond it.
 

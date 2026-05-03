@@ -1,5 +1,6 @@
 import { RunnableConfig } from '@langchain/core/runnables';
 import { ILessonBlock } from '@models/LessonContentModel';
+import { genLog } from '@lib/loggers';
 import { LessonState } from '../state';
 
 export const merge = async (state: LessonState, _config?: RunnableConfig): Promise<Partial<LessonState>> => {
@@ -12,7 +13,9 @@ export const merge = async (state: LessonState, _config?: RunnableConfig): Promi
     allBlocks.push(state.linksBlock);
   }
 
-  console.log(`[merge] ✓ ${allBlocks.length} total blocks (${state.contentBlocks.length} content + ${state.interactiveBlocks.length} interactive + ${state.linksBlock ? 1 : 0} links)`.green);
+  genLog.info(
+    `lesson:merge total=${allBlocks.length} content=${state.contentBlocks.length} interactive=${state.interactiveBlocks.length} links=${state.linksBlock ? 1 : 0}`,
+  );
 
   return {
     contentBlocks: allBlocks, // Overwrite with merged set

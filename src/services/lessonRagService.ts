@@ -10,6 +10,7 @@ import {
   type ChunkVectorRecord,
 } from '@lib/pinecone';
 import { bgError } from '@lib/bg';
+import { ragLog } from '@lib/loggers';
 
 /**
  * Lesson-level RAG orchestration.
@@ -109,10 +110,10 @@ export const indexLessonContent = async ({
   lessonIndex: number;
   blocks: ILessonBlock[];
 }): Promise<void> => {
-  const tag = `[lessonRag:index ${courseId}/${moduleIndex}/${lessonIndex}]`;
+  const coord = `${courseId}/${moduleIndex}/${lessonIndex}`;
 
   if (!isEmbeddingsEnabled() || !isPineconeEnabled()) {
-    console.log(`${tag} RAG disabled (missing OPENAI/PINECONE keys), skipping indexing`.gray);
+    ragLog.info(`index:skip lesson=${coord} reason=disabled (missing OPENAI/PINECONE keys)`);
     return;
   }
 
@@ -125,12 +126,12 @@ export const indexLessonContent = async ({
     .sort((a, b) => a.order - b.order)
     .flatMap(splitBlockIntoChunks);
 
-  console.log(
-    `${tag} starting — ${blocks.length} blocks total, ${indexableBlocks.length} indexable → ${chunkInputs.length} chunks`.cyan,
+  ragLog.info(
+    `index:start lesson=${coord} blocks=${blocks.length} indexable=${indexableBlocks.length} chunks=${chunkInputs.length}`,
   );
 
   if (chunkInputs.length === 0) {
-    console.log(`${tag} no indexable content, skipping`.gray);
+    ragLog.info(`index:skip lesson=${coord} reason=no_indexable_content`);
     return;
   }
 
@@ -145,7 +146,7 @@ export const indexLessonContent = async ({
     .lean();
 
   if (priorChunks.length > 0) {
-    console.log(`${tag} wiping ${priorChunks.length} prior chunks (Mongo + Pinecone)`.gray);
+    ragLog.info(`index:wipe-prior lesson=${coord} chunks=${priorChunks.length}`);
     await Promise.all([
       LessonChunkModel.deleteMany({ courseId: courseObjectId, moduleIndex, lessonIndex }).catch(
         bgError('lessonRag.deleteMongoChunks'),
@@ -160,18 +161,17 @@ export const indexLessonContent = async ({
   // typical lesson produces 5-20 chunks. If we ever exceed the limit,
   // chunking the API request itself goes here.
   const totalChars = chunkInputs.reduce((sum, c) => sum + c.text.length, 0);
-  console.log(`${tag} embedding ${chunkInputs.length} chunks (~${totalChars} chars)`.gray);
   const embedT0 = Date.now();
   const embeddings = await embedBatch(
     chunkInputs.map((c) => c.text),
     { action: 'embedding:index' },
   );
   if (!embeddings) {
-    console.warn(`${tag} embedding failed — skipping`.yellow);
+    ragLog.warn(`index:embed-fail lesson=${coord} chunks=${chunkInputs.length} chars=${totalChars}`);
     return;
   }
-  console.log(
-    `${tag} embeddings ready — ${embeddings.length} vectors of dim ${embeddings[0]?.length ?? 0} (${Date.now() - embedT0}ms)`.gray,
+  ragLog.info(
+    `index:embed-ok lesson=${coord} vectors=${embeddings.length} dim=${embeddings[0]?.length ?? 0} chars=${totalChars} ms=${Date.now() - embedT0}`,
   );
 
   const now = new Date();
@@ -208,25 +208,19 @@ export const indexLessonContent = async ({
   // Upsert vectors first; if Pinecone fails we don't want orphan Mongo
   // chunks (they'd point at non-existent vectorIds). Mongo write is
   // committed only on Pinecone success.
-  const pineconeT0 = Date.now();
   const upserted = await upsertChunkVectors(records);
   if (!upserted) {
-    console.warn(`${tag} Pinecone upsert failed — skipping Mongo write`.yellow);
+    ragLog.warn(`index:abort lesson=${coord} reason=pinecone_upsert_failed`);
     return;
   }
-  console.log(`${tag} Pinecone upsert OK — ${records.length} vectors (${Date.now() - pineconeT0}ms)`.gray);
 
-  const mongoT0 = Date.now();
   const inserted = await LessonChunkModel.insertMany(chunkDocs).catch((e) => {
     bgError('lessonRag.insertMongoChunks')(e);
     return null;
   });
-  if (inserted) {
-    console.log(`${tag} Mongo insert OK — ${inserted.length} chunks (${Date.now() - mongoT0}ms)`.gray);
-  }
 
-  console.log(
-    `${tag} ✓ indexed ${chunkInputs.length} chunks in ${Date.now() - t0}ms`.green,
+  ragLog.info(
+    `index:done lesson=${coord} chunks=${chunkInputs.length} mongo=${inserted ? inserted.length : 'fail'} ms=${Date.now() - t0}`,
   );
 };
 
@@ -267,8 +261,8 @@ export const deleteLessonChunksForCourse = async (
     deleteChunkVectorsByIds(vectorIds),
   ]);
 
-  console.log(
-    `[lessonRag:cleanup ${courseId}] removed ${mongoResult.deletedCount} chunks, ${pineconeOk ? vectorIds.length : 0} Pinecone vectors`.gray,
+  ragLog.info(
+    `cleanup:course course=${courseId} chunks=${mongoResult.deletedCount} vectors=${pineconeOk ? vectorIds.length : 0}`,
   );
 
   return {
@@ -302,25 +296,25 @@ export const searchLessonContent = async ({
   moduleIndex?: number;
   topK?: number;
 }): Promise<LessonRagSearchResult[]> => {
-  const tag = `[lessonRag:search ${courseId}${moduleIndex !== undefined ? `/m${moduleIndex}` : ''}]`;
+  const scope = `${courseId}${moduleIndex !== undefined ? `/m${moduleIndex}` : ''}`;
 
   if (!isEmbeddingsEnabled() || !isPineconeEnabled()) {
-    console.log(`${tag} RAG disabled, returning empty`.gray);
+    ragLog.info(`query:skip scope=${scope} reason=disabled`);
     return [];
   }
 
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
-    console.log(`${tag} empty query, returning empty`.gray);
+    ragLog.info(`query:skip scope=${scope} reason=empty_query`);
     return [];
   }
 
   const t0 = Date.now();
-  console.log(`${tag} query="${trimmedQuery.slice(0, 80)}${trimmedQuery.length > 80 ? '…' : ''}" topK=${topK}`.cyan);
+  ragLog.info(`query:start scope=${scope} q="${trimmedQuery.slice(0, 80)}${trimmedQuery.length > 80 ? '…' : ''}" topK=${topK}`);
 
   const queryEmbedding = await embedQuery(trimmedQuery);
   if (!queryEmbedding) {
-    console.warn(`${tag} embedQuery failed`.yellow);
+    ragLog.warn(`query:embed-fail scope=${scope}`);
     return [];
   }
 
@@ -331,7 +325,7 @@ export const searchLessonContent = async ({
     topK,
   });
   if (hits.length === 0) {
-    console.log(`${tag} no Pinecone hits (${Date.now() - t0}ms total)`.gray);
+    ragLog.info(`query:miss scope=${scope} ms=${Date.now() - t0}`);
     return [];
   }
 
@@ -341,8 +335,8 @@ export const searchLessonContent = async ({
   // a critical isolation bug — make it visible.
   const stray = hits.filter((h) => h.metadata.courseId !== courseId);
   if (stray.length > 0) {
-    console.error(
-      `${tag} ⚠ ISOLATION VIOLATION — Pinecone returned ${stray.length} hits with foreign courseId. Dropping. ids=${stray.map((s) => s.id).join(',')}`.red,
+    ragLog.error(
+      `query:isolation-violation scope=${scope} foreign=${stray.length} ids=${stray.map((s) => s.id).join(',')}`,
     );
   }
   const safeHits = hits.filter((h) => h.metadata.courseId === courseId);
@@ -368,8 +362,8 @@ export const searchLessonContent = async ({
     .filter((r): r is LessonRagSearchResult => r !== null);
 
   const topScore = results[0]?.score ?? 0;
-  console.log(
-    `${tag} ✓ ${results.length}/${hits.length} hits hydrated, top score=${topScore.toFixed(3)} (${Date.now() - t0}ms total)`.green,
+  ragLog.info(
+    `query:hits scope=${scope} hits=${results.length}/${hits.length} topScore=${topScore.toFixed(3)} ms=${Date.now() - t0}`,
   );
 
   return results;

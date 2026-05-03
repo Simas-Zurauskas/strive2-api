@@ -11,7 +11,7 @@ import { sanitizePromptInput } from '@lib/sanitize';
 import { compressMessageHistory } from '@lib/messageCompression';
 import { debitActualSpend } from '@services/creditService';
 import { bgError } from '@lib/bg';
-import { chat } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 import LessonMentorChatModel from '@models/LessonMentorChatModel';
 import LessonContentModel from '@models/LessonContentModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
@@ -112,7 +112,7 @@ export const lessonChatController = asyncHandler(async (req, res) => {
       return typeof m.content === 'string' && m.content.length > 0;
     });
     if (filtered.length !== original.length) {
-      chat.info(
+      chatLog.info(
         `lesson:turn dropped ${original.length - filtered.length} empty history message(s) before validation`,
       );
       req.body.messages = filtered;
@@ -158,7 +158,7 @@ export const lessonChatController = asyncHandler(async (req, res) => {
     moduleIndex,
     lessonIndex,
   }).catch((e) => {
-    chat.warn(`lesson:turn learnerContext fetch failed err=${e instanceof Error ? e.message : e}`);
+    chatLog.warn(`lesson:turn learnerContext fetch failed err=${e instanceof Error ? e.message : e}`);
     return '';
   });
 
@@ -226,7 +226,7 @@ export const lessonChatController = asyncHandler(async (req, res) => {
   const knownAttachmentIds = new Set(sessionAttachments.map((a) => a.id));
   const pendingAttachmentIds = (rawAttachmentIds ?? []).filter((id) => knownAttachmentIds.has(id));
   if ((rawAttachmentIds?.length ?? 0) > 0 && pendingAttachmentIds.length === 0) {
-    chat.warn(
+    chatLog.warn(
       `lesson:turn dropping ${rawAttachmentIds?.length} attachmentId(s) — all unknown for this session`,
     );
   }
@@ -287,7 +287,7 @@ export const lessonChatController = asyncHandler(async (req, res) => {
   let clientConnected = true;
   const turnStartedAt = Date.now();
 
-  chat.info(
+  chatLog.info(
     `lesson:turn start course=${courseId} module=${moduleIndex} lesson=${lessonIndex} historyMessages=${messages.length} attachments=${sessionAttachments.length} hasSummary=${chatSession?.summary ? 'yes' : 'no'} pendingAttachments=${pendingAttachmentIds.length}`,
   );
 
@@ -296,7 +296,7 @@ export const lessonChatController = asyncHandler(async (req, res) => {
     clientConnected = false;
     abortController.abort();
     tokenEmitter.removeAllListeners();
-    chat.warn(`lesson:stream client disconnect ms=${Date.now() - turnStartedAt}`);
+    chatLog.warn(`lesson:stream client disconnect ms=${Date.now() - turnStartedAt}`);
   });
 
   const { ok } = await runMentorAgentStream({
@@ -315,10 +315,10 @@ export const lessonChatController = asyncHandler(async (req, res) => {
   });
 
   if (!ok) {
-    chat.warn(`lesson:turn done ok=false ms=${Date.now() - turnStartedAt}`);
+    chatLog.warn(`lesson:turn done ok=false ms=${Date.now() - turnStartedAt}`);
     return;
   }
-  chat.info(`lesson:turn done ok=true ms=${Date.now() - turnStartedAt}`);
+  chatLog.info(`lesson:turn done ok=true ms=${Date.now() - turnStartedAt}`);
 
   // Debit credit spend accumulated during this chat turn
   await debitActualSpend({

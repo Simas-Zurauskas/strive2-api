@@ -15,6 +15,9 @@ import type {
   InsightReviewResult,
   CourseMentorRecord,
   LessonMentorRecord,
+  GoalTypeClassificationSnapshot,
+  GoalTypeOverrideRecord,
+  GoalType,
 } from './types';
 import type { GetInsightQueueResult, InsightStats } from '@services/insightQueueService';
 
@@ -35,6 +38,9 @@ export class MarkdownRecorder {
 
   addHeader(): void {
     const p = this.persona!;
+    const overrideLine = p.goalTypeOverrideTarget
+      ? ` → would switch to **${p.goalTypeOverrideTarget}** via the chip if given the chance`
+      : '';
     this.sections.push(`# Debug Orchestrator Report: ${p.name}
 Generated: ${new Date().toISOString()}
 
@@ -44,6 +50,10 @@ Generated: ${new Date().toISOString()}
 - **Goal:** "${p.goal}"
 - **Personality:** ${p.personality}
 - **Priorities:** ${p.priorities}
+
+### Predicted Goal Type (ground truth for the classifier)
+- **predictedGoalType:** \`${p.predictedGoalType}\`${overrideLine}
+- **Reasoning:** ${p.predictedGoalTypeReasoning}
 
 ### Predicted Behavior
 - **Survey style:** ${p.wizardBehavior.surveyStyle}
@@ -63,12 +73,39 @@ Generated: ${new Date().toISOString()}
 `);
   }
 
-  addStep2_Clarify({ result, questions, pollDuration }: { result: StepResult; questions: ClarifyQuestion[]; pollDuration: number }): void {
+  addStep2_Clarify({
+    result,
+    questions,
+    pollDuration,
+    classification,
+    predictedGoalType,
+    predictedGoalTypeReasoning,
+  }: {
+    result: StepResult;
+    questions: ClarifyQuestion[];
+    pollDuration: number;
+    classification: GoalTypeClassificationSnapshot;
+    predictedGoalType: GoalType;
+    predictedGoalTypeReasoning: string;
+  }): void {
     let questionsTable = '| # | Question | Type | Options |\n|---|----------|------|---------|';
     for (const q of questions) {
       const opts = q.options ? q.options.join(', ') : '_free text_';
       questionsTable += `\n| ${q.id} | ${q.question} | ${q.type} | ${opts} |`;
     }
+
+    // Classifier output sub-section. Surfaces the three orthogonal signals
+    // the assessor scores: classification accuracy (predicted vs classified),
+    // confidence calibration (high on clear cases, low on garbage), and
+    // chip-label noun quality.
+    const match = classification.goalType === predictedGoalType ? 'YES' : 'NO';
+    const classifierBlock = `### Goal Type Classification
+- **Predicted (ground truth):** \`${predictedGoalType}\`
+- **Predicted reasoning:** ${predictedGoalTypeReasoning}
+- **Classified (api):** \`${classification.goalType ?? 'null'}\`
+- **Confidence:** \`${classification.confidence ?? 'null'}\`
+- **Chip-label noun:** ${classification.noun ? `"${classification.noun}"` : '_none_'}
+- **Match:** ${match}`;
 
     this.sections.push(`---
 
@@ -76,7 +113,54 @@ Generated: ${new Date().toISOString()}
 **Job poll duration:** ${fmtDuration(pollDuration)}
 **Questions generated:** ${questions.length}
 
+${classifierBlock}
+
 ${questionsTable}
+`);
+  }
+
+  addStep2b_GoalTypeOverride(rec: GoalTypeOverrideRecord): void {
+    const fmtSnapshot = (s: GoalTypeClassificationSnapshot): string =>
+      `goalType=\`${s.goalType ?? 'null'}\`, confidence=\`${s.confidence ?? 'null'}\`, noun=${s.noun ? `"${s.noun}"` : '_none_'}`;
+
+    let questionsBefore = '| # | Question | Type |\n|---|----------|------|';
+    for (const q of rec.clarifyQuestionsBefore) {
+      questionsBefore += `\n| ${q.id} | ${escapeCell(q.question)} | ${q.type} |`;
+    }
+    let questionsAfter = '| # | Question | Type |\n|---|----------|------|';
+    for (const q of rec.clarifyQuestionsAfter) {
+      questionsAfter += `\n| ${q.id} | ${escapeCell(q.question)} | ${q.type} |`;
+    }
+
+    // Diff signal — the assessor needs to know whether the questions
+    // actually changed shape (the whole point of the chip override). A
+    // post-override clarify that re-emits identical questions implies
+    // the goalType tilt isn't load-bearing inside the api prompt.
+    const beforeJoined = rec.clarifyQuestionsBefore.map((q) => q.question).join('|');
+    const afterJoined = rec.clarifyQuestionsAfter.map((q) => q.question).join('|');
+    const questionsChanged = beforeJoined !== afterJoined ? 'YES' : 'NO (regression — chip toggle did not regenerate questions)';
+
+    this.sections.push(`---
+
+## Step 2b: Goal-Type Override (${fmtDuration(rec.durationMs)})
+**Target:** \`${rec.target}\`
+**Before:** ${fmtSnapshot(rec.before)}
+**After:** ${fmtSnapshot(rec.after)}
+**Questions regenerated:** ${questionsChanged}
+
+<details>
+<summary>Clarify questions BEFORE override (${rec.clarifyQuestionsBefore.length})</summary>
+
+${questionsBefore}
+
+</details>
+
+<details>
+<summary>Clarify questions AFTER override (${rec.clarifyQuestionsAfter.length})</summary>
+
+${questionsAfter}
+
+</details>
 `);
   }
 
@@ -422,6 +506,21 @@ ${modulesList}
   }): void {
     const totalLessons = course?.structure?.modules.reduce((sum, m) => sum + m.lessons.length, 0) ?? 0;
 
+    // Goal-type row: surfaces predicted vs classified + confidence at-a-
+    // glance so an inventory pass over `output/` can flag mismatches
+    // without reading every Step 2 section. Final goalType reflects
+    // post-override state when the chip was toggled (course.goalType is
+    // updated by the cascade); the persona's predictedGoalType is the
+    // ground truth for the *original* classification.
+    const finalGoalType = course?.goalType ?? null;
+    const finalConfidence = course?.goalTypeConfidence ?? null;
+    const goalTypeMatch =
+      this.persona && finalGoalType
+        ? finalGoalType === this.persona.predictedGoalType
+          ? 'match'
+          : 'MISMATCH'
+        : 'N/A';
+
     // Insert summary right after header
     const summary = `## Run Summary
 | Metric | Value |
@@ -431,6 +530,7 @@ ${modulesList}
 | Status | ${status} |
 | Course Name | ${course?.name ?? 'N/A'} |
 | Domain | ${course?.domain ?? 'N/A'} |
+| Goal Type (predicted / final / confidence) | ${this.persona?.predictedGoalType ?? 'N/A'} / ${finalGoalType ?? 'N/A'} / ${finalConfidence ?? 'N/A'} (${goalTypeMatch}) |
 | Depth Selected | ${course?.depth ?? 'N/A'} |
 | Modules | ${course?.structure?.modules.length ?? 'N/A'} |
 | Total Lessons | ${totalLessons || 'N/A'} |

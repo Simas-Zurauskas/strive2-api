@@ -9,6 +9,7 @@ import UserInsightProgressModel from '@models/UserInsightProgressModel';
 import { deleteByPrefix } from '@services/s3Service';
 import { deleteLessonChunksForCourse } from '@services/lessonRagService';
 import { bgError } from '@lib/bg';
+import { jobLog, integrationLog } from '@lib/loggers';
 
 export interface CleanupResult {
   chatSessionsDeleted: number;
@@ -67,7 +68,7 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
   // S3 cleanup (hero images, future assets) — fire and forget
   deleteByPrefix(`lessons/${courseId}/`)
     .then((count) => {
-      if (count > 0) console.log(`[Cleanup] S3: deleted ${count} objects for course ${courseId}`.gray);
+      if (count > 0) integrationLog.info(`s3:deletePrefix prefix=lessons/${courseId}/ deleted=${count}`);
     })
     .catch(bgError('courseCleanup.s3'));
 
@@ -86,7 +87,14 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
 
   const total = Object.values(result).reduce((a, b) => a + b, 0);
   if (total > 0) {
-    console.log(`[Cleanup] Course ${courseId}: ${JSON.stringify(result)}`.cyan);
+    jobLog.info(
+      `cleanup:course course=${courseId} total=${total} ` +
+        `chats=${result.chatSessionsDeleted} mentor=${result.mentorChatsDeleted} ` +
+        `lessons=${result.lessonContentDeleted} progress=${result.lessonProgressDeleted} ` +
+        `quiz=${result.quizContentDeleted}/${result.quizProgressDeleted} ` +
+        `insights=${result.insightsDeleted}/${result.insightProgressDeleted} ` +
+        `rag=${result.ragChunksDeleted}/${result.ragVectorsDeleted}`,
+    );
   }
 
   return result;

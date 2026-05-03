@@ -8,6 +8,7 @@ import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import UserInsightProgressModel from '@models/UserInsightProgressModel';
 import InsightModel from '@models/InsightModel';
 import { searchLessonContent } from '@services/lessonRagService';
+import { searchProductKb } from '@services/productKbRagService';
 import { readUrl } from '@lib/jinaReader';
 import { emitHandoffTool } from '../shared/emitHandoffTool';
 
@@ -309,6 +310,48 @@ export const searchLessonContentTool = tool(
   },
 );
 
+// ── search_product_kb ─────────────────────────────────────
+//
+// Vector search over Strive's product help center. Use when the learner
+// asks a *meta* question — about Strive itself, billing, account,
+// teaching techniques, mastery measurement, the Insights queue, the
+// streak, etc. — rather than a question about the course content. The
+// distinction matters: search_lesson_content is for "what does the
+// lesson say about X?", search_product_kb is for "how does Strive's
+// X work?". Returns up to 3 ranked excerpts with article href so the
+// mentor can cite via inline markdown links.
+
+export const searchProductKbTool = tool(
+  async (input) => {
+    const results = await searchProductKb({ query: input.query, topK: 3 });
+    if (results.length === 0) {
+      return JSON.stringify({
+        results: [],
+        note: 'No help-center match. The product KB may not cover this topic — say so honestly rather than inventing details.',
+      });
+    }
+    return JSON.stringify({
+      results: results.map((r) => ({
+        articleTitle: r.articleTitle,
+        sectionPath: r.sectionPath,
+        href: r.href,
+        score: Math.round(r.score * 1000) / 1000,
+        text: r.text.length > 1200 ? r.text.slice(0, 1200) + '…' : r.text,
+      })),
+    });
+  },
+  {
+    name: 'search_product_kb',
+    description:
+      "Search Strive's product help center via vector similarity. Use ONLY for product-meta questions: how Strive itself works (billing, allowance, course creation, lessons, mentor, narration, spaced review, mastery, achievements). DO NOT use for course-content questions — use search_lesson_content for those. Returns up to 3 ranked excerpts with the article href; cite via inline markdown links.",
+    schema: z.object({
+      query: z
+        .string()
+        .describe('Natural-language question about how Strive works as a product.'),
+    }),
+  },
+);
+
 // ── fetch_url ─────────────────────────────────────────────
 //
 // Given a URL the learner pasted (or one the agent decides is worth
@@ -357,4 +400,4 @@ export const fetchUrlTool = tool(
 
 // ── Export all tools ──────────────────────────────────────
 
-export const TOOLS = [webSearch, getUserProgress, searchLessonContentTool, fetchUrlTool, emitHandoffTool];
+export const TOOLS = [webSearch, getUserProgress, searchLessonContentTool, searchProductKbTool, fetchUrlTool, emitHandoffTool];

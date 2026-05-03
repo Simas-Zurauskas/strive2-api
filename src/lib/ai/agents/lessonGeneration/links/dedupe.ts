@@ -1,3 +1,4 @@
+import { genLog } from '@lib/loggers';
 import { SearchCandidate } from './schemas';
 
 // Wikipedia namespaces and similar meta pages that Tavily sometimes surfaces
@@ -251,6 +252,6 @@ export const dedupeCandidates = ({
     perHost.set(c.hostname, count + 1);
     out.push(c);
   }
-  console.log(`[links.dedupe] ✓ ${out.length} of ${candidates.length} survived (URL canonical + title fingerprint, host cap ${hostnameCap}, max ${maxOut})`.cyan);
+  genLog.info(`links:dedupe survived=${out.length}/${candidates.length} hostCap=${hostnameCap} max=${maxOut}`);
   return out;
 };

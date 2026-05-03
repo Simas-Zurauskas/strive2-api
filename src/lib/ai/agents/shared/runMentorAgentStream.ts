@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import type { Response } from 'express';
-import { chat } from '@lib/loggers';
+import { chatLog } from '@lib/loggers';
 
 /**
  * SSE orchestration shared between the course-mentor and lesson-mentor
@@ -133,7 +133,7 @@ export const runMentorAgentStream = async <
     pendingToolCalls.push({ toolCallId, toolName });
     anyToolEmitted = true;
     totalToolEvents += 1;
-    chat.info(`${scope}:stream tool emit name=${toolName} id=${toolCallId}`);
+    chatLog.info(`${scope}:stream tool emit name=${toolName} id=${toolCallId}`);
   });
 
   let finalState: AgentLikeState | undefined;
@@ -143,21 +143,21 @@ export const runMentorAgentStream = async <
     })) as AgentLikeState;
   } catch (err) {
     if (!isClientConnected()) {
-      chat.warn(`${scope}:stream agent invoke aborted post-disconnect ms=${Date.now() - streamStart}`);
+      chatLog.warn(`${scope}:stream agent invoke aborted post-disconnect ms=${Date.now() - streamStart}`);
       return { ok: false };
     }
     const message = err instanceof Error ? err.message : 'Agent error';
     writeSSE(res, { type: 'error', error: message });
     res.write('data: [DONE]\n\n');
     res.end();
-    chat.error(
+    chatLog.error(
       `${scope}:stream agent error after SSE flush ms=${Date.now() - streamStart} err=${message}`,
     );
     return { ok: false };
   }
 
   if (!isClientConnected()) {
-    chat.warn(`${scope}:stream client gone before tool-result flush ms=${Date.now() - streamStart}`);
+    chatLog.warn(`${scope}:stream client gone before tool-result flush ms=${Date.now() - streamStart}`);
     return { ok: false };
   }
 
@@ -206,12 +206,12 @@ export const runMentorAgentStream = async <
     writeSSE(res, { type: 'text-start', id: fallbackId });
     writeSSE(res, { type: 'text-delta', delta: fallbackText, id: fallbackId });
     writeSSE(res, { type: 'text-end', id: fallbackId });
-    chat.warn(`${scope}:fallback agent emitted no text and no tools — sent fallback`);
+    chatLog.warn(`${scope}:fallback agent emitted no text and no tools — sent fallback`);
   }
   res.write('data: [DONE]\n\n');
   res.end();
 
-  chat.info(
+  chatLog.info(
     `${scope}:stream done ms=${Date.now() - streamStart} text=${totalTextChars}c tokens=${totalTokenEvents} toolEmits=${totalToolEvents} toolResults=${toolResults.size}`,
   );
 

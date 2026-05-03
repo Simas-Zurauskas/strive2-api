@@ -14,10 +14,22 @@ export const COURSE_DOMAINS = [
   'creative',
   'business',
   'practical',
+  'practical-ai',
   'life-skills',
   'other',
 ] as const;
 export type CourseDomain = (typeof COURSE_DOMAINS)[number];
+
+// Orthogonal to `domain` — describes the learner's INTENT shape, which steers
+// module/lesson scope decisions (action checklists vs. mock exams vs. project
+// spine vs. comprehensive ladder). Classified by a pre-flight Haiku call inside
+// the `clarify` job; user-overridable via the chip on the ClarifyStep. Existing
+// pre-feature courses persist `null` and read as `master` semantics.
+export const GOAL_TYPES = ['master', 'monetize', 'pass', 'build', 'fluency'] as const;
+export type GoalType = (typeof GOAL_TYPES)[number];
+
+export const GOAL_TYPE_CONFIDENCES = ['high', 'medium', 'low'] as const;
+export type GoalTypeConfidence = (typeof GOAL_TYPE_CONFIDENCES)[number];
 
 // ── Jobs ──────────────────────────────────────────────────
 

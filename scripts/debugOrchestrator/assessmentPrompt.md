@@ -2,7 +2,7 @@
 
 Feed this to a dispatcher agent with read + Agent-spawn access in `api/scripts/debugOrchestrator/output/`. The dispatcher fans out one sub-agent per persona file **in parallel** (all tool calls in a single message), then synthesizes the scorecards into `_ASSESSMENT_<timestamp>.md`.
 
-Rubric version: **v6**. Echo it in every scorecard.
+Rubric version: **v7**. Echo it in every scorecard.
 
 ## Harness context (read this first)
 
@@ -32,9 +32,9 @@ Decide — grounded in quotes — whether the generated artifacts would keep a r
 - **Stamp** every scorecard with `run_id` (file basename) and `judge_model` (exact snapshot string).
 - **Trust structural signals** (alignment, correctness, domain fit, MCQ quality, persona grounding). **Treat behavioral signals as hypothesis** (would-continue, satisfaction, quiz scores — synthetic personas over-perform). **Don't grade infrastructure** (latency, block counts, plumbing).
 
-## Rubric — 39 criteria across 9 domains
+## Rubric — 43 criteria across 10 domains
 
-Maps to Strive's pillars: course generation [A, B, C], lessons [E], assessment mastery [F, H], spaced review [G, H], conversational support [I]. Domain averages exclude `n/a` rows.
+Maps to Strive's pillars: course generation [A, B, C, J], lessons [E], assessment mastery [F, H], spaced review [G, H], conversational support [I], goal-type axis [J]. Domain averages exclude `n/a` rows.
 
 ### A. Constructive alignment (3)
 1. **Outcome verbs are measurable.** Module objectives use Bloom verbs with a behavioral anchor. "Understand / learn / be aware" fails.
@@ -107,6 +107,17 @@ Both probes are **multi-turn**. Score across all turns of every probe; cite the 
 38. **Pedagogical posture.** Lesson mentor follows its own brief: ≤3 sentences by default, asks before telling, acknowledges partial correctness when relevant, avoids tool-use narration ("Let me search…", "I'll look that up…"). Long lecture in response to a short question, or "I'll search the web for that" in the visible reply, caps at 2. Multi-turn caveat: if a single turn is appropriately long (e.g. learner explicitly asks for elaboration), don't penalize length — judge brief-following on the default-question case.
 39. **Persona usefulness.** Reading the conversation in full, would *this* persona find the exchange actionable for their stated goal/artifact? Generic on-topic prose (correct but persona-blind) is 3; persona-anchored replies that name the artifact / goal / declared constraint are 4; off-topic or evasive is ≤2. Use the worst single turn across both scopes; quote the strongest hook (or its absence). The persona's `Ended:` reason is signal — "satisfied at turn 2" is good, "ran out of useful follow-ups at turn 1" is a soft negative.
 
+### J. Goal-type axis (4)
+
+The pre-flight goalType classifier (api `classifyGoalType` in `services/courseService.ts`) runs inside the clarify job and emits `{ goalType, confidence, noun }` into the course doc *before* the question generator. Its output drives clarify-question tilt and downstream structure-shape rules. Each persona report includes a `### Goal Type Classification` block under Step 2 with `Predicted (ground truth)`, `Predicted reasoning`, `Classified (api)`, `Confidence`, `Chip-label noun`, and `Match`. When the persona's generator set a `goalTypeOverrideTarget`, a `## Step 2b: Goal-Type Override` block also appears with before/after snapshots and the regenerated clarify question set (no opt-out — the override always runs for personas marked for it).
+
+40. **Classification accuracy.** Did the api classifier emit the same goalType the persona generator predicted? Score 4 on `Match: YES`. Score 2 if `Match: NO` and the persona's reasoning is a clear, unambiguous mapping (e.g. persona explicitly stated an exam name, classifier returned `master` — that's a regression). Score 3 if `Match: NO` but the goal text was genuinely multi-intent (e.g. "learn React deeply to ship a SaaS" → predicted `build`, classified `master` is debatable). Quote both `Predicted (ground truth)` and `Classified (api)` cells.
+41. **Confidence calibration.** Does the classifier's `Confidence` value track the goal text's clarity? Score 4 when an obviously-clear goal (named exam, named product, named project) is classified `high` or an obviously-vague goal is classified `low`. Score 2 when a clear-cut goal is classified `medium` or `low` without justification, OR when a vague/garbled goal is classified `high`. The classifier's own fallback (`master/low` on parse failure) is correct behavior — score 4 if the goal really is unparseable. Quote the `Confidence` cell.
+42. **Clarify-question tilt to goalType.** The api clarify-question prompt has goalType-specific instructions: `monetize` → at least one question MUST elicit product/niche/audience/channels; `pass` → at least one MUST elicit exam name + date; `build` → at least one MUST elicit project scope; `fluency` → at least one MUST elicit target CEFR level + current level; `master` → unchanged (general). Score 4 when the right tilt is visibly present in the Step 2 questions table. Score ≤2 when a `monetize` goal gets generic "What topics interest you?" questions, or a `pass` goal never asks about exam date / weak topics. Quote the strongest tilt-evidence question (or its absence). `n/a` if classified goalType is `master` (no special tilt expected).
+43. **Structure shape matches goalType.** The structure prompt branches on goalType: `monetize` → every module ends in a tactical-action lesson + module names quote the learner's named product/niche; `pass` → modules map to syllabus sections + final module is a timed mock exam under realistic conditions; `build` → Module 1 sets up the project, every module ships a checkpoint, capstone is polish + deploy; `fluency` → modules organize around conversational domains or skill tracks; `master` → comprehensive ladder (no special shape). Score 4 when the Step 6 modules visibly reflect the expected shape — quote a module name + description. Score ≤2 when a `pass` course has no mock exam, or a `build` course is theory-only with no project spine, or a `monetize` course reads like generic "fundamentals of X". `n/a` if classified goalType is `master`.
+
+**Override-cascade integrity (when Step 2b present):** add a fifth signal to J42/J43 — does the post-override question set actually shift to the new goalType's tilt, AND does the structure (if generated after the override) reflect the *new* goalType? If `Questions regenerated: NO` appears in Step 2b, that is a hard cap-at-1 on J42 (the chip toggle is non-load-bearing in the api prompt). The override block's snapshot diff is your evidence.
+
 ## Satisfaction verdict
 
 After the rubric, answer three questions with quotes: **(1)** Would they continue after lesson 1? **(2)** After 5 lessons + a module quiz, is the product working for *their* goal? Cite highest + lowest moments. **(3)** Would they recommend it? If not, the single most fixable blocker?
@@ -128,6 +139,7 @@ Summarize as:
 - Reliability silence (true-failure signal but marked `completed` — NOT harness cap).
 - Hallucinated citations.
 - Domain misroute (STEM → ASCII math; programming → no code; non-canonical tag).
+- GoalType misroute or chip-toggle non-load-bearing (clear `pass` / `monetize` / `build` goal classified as `master`; or post-override clarify regenerates the same questions).
 - Grading inversion (harsh on partial, lenient on near-miss).
 - Mastery-tier inversion.
 - Scheduler stall.
@@ -147,7 +159,7 @@ Summarize as:
 ```markdown
 # Strive Quality Assessment — <date>
 
-**Rubric:** v5 | **Judge model:** <snapshot> | **Content generator:** Anthropic | **Self-preference risk:** <low|medium|high>
+**Rubric:** v7 | **Judge model:** <snapshot> | **Content generator:** Anthropic | **Self-preference risk:** <low|medium|high>
 **Runs:** <n completed> / <n failed> / <n total>
 
 ## Inventory
@@ -171,6 +183,7 @@ Summarize as:
 | Retention / insights (G) | | | | |
 | Mastery & scheduling (H) | | | | |
 | Mentor experience (I) | | | | |
+| Goal-type axis (J) | | | | |
 | **Overall** (all non-n/a rows, criterion-weighted) | | | | — |
 
 Scale: 10.0 excellent / 7.5 at bar / 5.0 below bar / ≤5.0 blocking. High aggregates can mask severity — cross-check the Main weakness column and red flags.
@@ -209,17 +222,17 @@ You are one of N parallel evaluators. You score exactly one persona run and retu
 
 Persona slug: {{PERSONA_SLUG}}
 File: {{FILE_PATH}}
-Rubric: v5
+Rubric: v7
 Your judge_model: <exact snapshot>
 
-<PASTE: §Harness context, §Scoring, §Rubric (all 35), §Satisfaction verdict, §Red flags>
+<PASTE: §Harness context, §Scoring, §Rubric (all 43), §Satisfaction verdict, §Red flags>
 
 Steps:
 1. Read {{FILE_PATH}} in full. No other files.
 2. Apply the §Harness-context true-failure check. Do not flag lesson caps as failure.
 3. E-band sampling: first / middle / last of the generated set. Note single-module collapse in provenance.
-4. Score all 35 criteria. Each row: `{score 1–4, one-sentence rationale, quote-or-n/a, severity, frequency}`. No row skipped — `n/a` with explanation is valid.
-5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state; **I36–I39 all `n/a` if no mentor probes (no Step 8b AND no `🎓 Lesson Mentor probe` blocks).** Not a "reliability silence" red flag unless §Harness-context true-failure fires.
+4. Score all 43 criteria. Each row: `{score 1–4, one-sentence rationale, quote-or-n/a, severity, frequency}`. No row skipped — `n/a` with explanation is valid.
+5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state; **I36–I39 all `n/a` if no mentor probes (no Step 8b AND no `🎓 Lesson Mentor probe` blocks).** **J42/J43 `n/a` if classified goalType is `master` (no special tilt/shape expected).** **All J40–J43 `n/a` if Step 2 lacks the `### Goal Type Classification` block (pre-feature run, run before the api classifier was deployed).** Not a "reliability silence" red flag unless §Harness-context true-failure fires.
 6. Leniency self-check: if >70% of non-n/a ≥3, re-examine lowest items.
 7. Self-preference adjustment (medium risk, same family): E17/E18/E19=4 on polish alone drops to 3.
 8. Answer §Satisfaction with quotes.
@@ -233,7 +246,7 @@ Steps:
 
 **run_id:** {{file basename}}
 **judge_model:** <snapshot>
-**Rubric:** v5
+**Rubric:** v7
 **Status:** completed | failed — <reason if failed>
 **Verdict:** 🟢 | 🟡 | 🔴 | ⚪ — <one sentence>
 
@@ -280,8 +293,12 @@ Steps:
 | I37 | Mentor grounded in source | | | | | |
 | I38 | Mentor pedagogical posture | | | | | |
 | I39 | Mentor persona usefulness | | | | | |
+| J40 | GoalType classification accuracy | | | | | |
+| J41 | GoalType confidence calibration | | | | | |
+| J42 | Clarify-question tilt to goalType | | | | | |
+| J43 | Structure shape matches goalType | | | | | |
 
-**Domain averages (exclude n/a):** A | B | C | D | E | F | G | H | I
+**Domain averages (exclude n/a):** A | B | C | D | E | F | G | H | I | J
 
 #### Satisfaction
 

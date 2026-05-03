@@ -3,6 +3,7 @@ import { getUtilityModel } from '@lib/langchain';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { CourseDomain } from '@lib/constants';
 import { bgError } from '@lib/bg';
+import { genLog } from '@lib/loggers';
 import { FetchedCandidate, JudgedCandidate, judgeOutputSchema } from './schemas';
 
 // How many characters of fetched content to show the judge per candidate.
@@ -138,11 +139,12 @@ Score every candidate.`;
         suggestedDescription: verdict.suggestedDescription.trim(),
       });
     }
-    console.log(`[links.rerank] ✓ Judged ${out.length} of ${candidates.length} candidate(s)`.cyan);
+    genLog.info(`links:rerank judged=${out.length}/${candidates.length}`);
     return out;
   } catch (e) {
     bgError('linksGeneration.rerank')(e);
-    console.warn(`[links.rerank] ✗ Judge LLM failed — returning 0 judged candidates`.yellow);
+    const reason = e instanceof Error ? e.message : String(e);
+    genLog.error(`links:rerank-fail reason=${reason} — judge LLM failed, returning 0`);
     return [];
   }
 };

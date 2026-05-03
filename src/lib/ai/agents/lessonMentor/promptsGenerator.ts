@@ -1,5 +1,6 @@
 import { HumanMessage } from '@langchain/core/messages';
 import { getUtilityModel } from '@lib/langchain';
+import { genLog } from '@lib/loggers';
 
 /**
  * One-shot Haiku call that produces 3 lesson-specific opening prompts
@@ -120,17 +121,15 @@ ${truncatedContent || '(no content)'}`;
       typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
     const prompts = tryParsePrompts(content);
     if (!prompts) {
-      console.warn(`[mentor:promptsGen] malformed response, returning null. Raw: ${content.slice(0, 200)}`.yellow);
+      genLog.warn(`lesson:mentor-prompts malformed-response raw="${content.slice(0, 200)}"`);
       return null;
     }
 
-    console.log(
-      `[mentor:promptsGen] ✓ generated ${prompts.length} prompts for "${lessonTitle}"`.green,
-    );
+    genLog.info(`lesson:mentor-prompts ok count=${prompts.length} lesson="${lessonTitle}"`);
     return prompts;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[mentor:promptsGen] failed: ${message}`.yellow);
+    genLog.warn(`lesson:mentor-prompts fail reason=${message}`);
     return null;
   }
 };

@@ -11,7 +11,7 @@ import {
 } from '@lib/creditPricing';
 import { getUsageContext } from '@lib/usageContext';
 import { bumpCreditDebitExhausted } from '@lib/metrics';
-import { monetization } from '@lib/loggers';
+import { monetizationLog } from '@lib/loggers';
 
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -156,7 +156,7 @@ const applyFreePeriodReset = async ({
     },
   });
 
-  monetization.info(
+  monetizationLog.info(
     `Free period reset: user=${String(userId)} allowance=${oldAllowance}→${plan.monthlyAllowance} next=${periodEnd.toISOString()}`,
   );
 };
@@ -269,7 +269,7 @@ export const debitActualSpend = async ({
       const clamped = totalDebit < credits
         ? ` (clamped from ${credits} — ${credits - totalDebit} absorbed)`
         : '';
-      monetization.info(
+      monetizationLog.info(
         `Debited: user=${String(userId)} job=${jobType} credits=−${totalDebit} (allowance=−${allowanceDebit} bonus=−${bonusDebit}) spent=${microCents}μ¢${clamped} balance=${newAllowance + newBonus}`,
       );
 
@@ -284,7 +284,7 @@ export const debitActualSpend = async ({
   // Escalate to Sentry + bump the `credit_debit_exhausted_total` metric so
   // a climbing rate is visible in dashboards — at a certain volume this
   // stops being bounded-loss and starts being a reconciliation problem.
-  monetization.warn(
+  monetizationLog.warn(
     `Debit retries exhausted: user=${String(userId)} job=${String(jobId)} type=${jobType} spent=${microCents}μ¢ — user got free work`,
   );
   bumpCreditDebitExhausted();

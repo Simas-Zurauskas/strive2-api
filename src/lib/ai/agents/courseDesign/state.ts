@@ -14,6 +14,45 @@ export const StateAnnotation = Annotation.Root({
   answers: Annotation<{ questionId: string; answer: string }[]>(),
   depth: Annotation<string>(),
 
+  // Depth-recommendation context from depthPreviews. All optional — legacy
+  // courses persisted before these fields existed leave them undefined and
+  // the system prompt instructs the agent to proceed without them.
+  // Surfaced so the mentor can ground depth/scope/fit answers in the
+  // model's actual recommendation when the learner asks (the agent does
+  // NOT raise depth proactively — see prompts.ts).
+  recommendedDepth: Annotation<string | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  recommendationReason: Annotation<string | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  overcommitRisk: Annotation<'low' | 'moderate' | 'high' | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  overcommitRationale: Annotation<string | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  undercommitRisk: Annotation<'low' | 'moderate' | 'high' | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  undercommitRationale: Annotation<string | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  recommendedLessonCountRange: Annotation<[number, number] | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  recommendedHoursRange: Annotation<[number, number] | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+
   // Current structure — replace-reducer so modify_structure tool can update it
   currentStructure: Annotation<{
     reasoning: {

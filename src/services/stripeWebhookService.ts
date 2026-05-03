@@ -29,7 +29,7 @@ import UserModel from '@models/UserModel';
 import CreditLedgerModel, { CreditLedgerReason } from '@models/CreditLedgerModel';
 import { PLANS, PlanKey } from '@lib/creditPricing';
 import { emitCreditsUpdated } from '@lib/creditSocket';
-import { monetization } from '@lib/loggers';
+import { monetizationLog } from '@lib/loggers';
 import { getStripe, mapPriceIdToPlan } from './stripeService';
 import Stripe from 'stripe';
 
@@ -42,7 +42,7 @@ import Stripe from 'stripe';
  * idempotent because the source of truth is the incoming Stripe object.
  */
 export const handleStripeEvent = async (event: Stripe.Event): Promise<void> => {
-  monetization.info(`Webhook received: ${event.type} (${event.id})`);
+  monetizationLog.info(`Webhook received: ${event.type} (${event.id})`);
   switch (event.type) {
     case 'checkout.session.completed':
       await handleCheckoutSessionCompleted(event);
@@ -98,7 +98,7 @@ const onSubscriptionCheckoutCompleted = async ({
 }): Promise<void> => {
   const userId = session.metadata?.userId;
   if (!userId) {
-    monetization.warn(`Subscription checkout without userId metadata, event ${event.id}`);
+    monetizationLog.warn(`Subscription checkout without userId metadata, event ${event.id}`);
     return;
   }
 
@@ -110,7 +110,7 @@ const onSubscriptionCheckoutCompleted = async ({
   const priceId = subscription.items.data[0]?.price?.id;
   const planInfo = mapPriceIdToPlan(priceId);
   if (!planInfo) {
-    monetization.warn(`Unknown priceId ${priceId} on new subscription ${subscriptionId}`);
+    monetizationLog.warn(`Unknown priceId ${priceId} on new subscription ${subscriptionId}`);
     return;
   }
 
@@ -150,7 +150,7 @@ const onSubscriptionCheckoutCompleted = async ({
     notes: `Subscription checkout → ${planInfo.plan} ${planInfo.cadence}`,
   });
 
-  monetization.info(
+  monetizationLog.info(
     `Subscription activated: user=${userId} plan=${planInfo.plan}/${planInfo.cadence} allowance=${plan.monthlyAllowance}`,
   );
 
@@ -165,7 +165,7 @@ const onSubscriptionCheckoutCompleted = async ({
   if (replacingId && replacingId !== subscriptionId) {
     try {
       await stripe.subscriptions.cancel(replacingId);
-      monetization.info(`Replaced subscription ${replacingId} → ${subscriptionId} for user=${userId}`);
+      monetizationLog.info(`Replaced subscription ${replacingId} → ${subscriptionId} for user=${userId}`);
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (code !== 'resource_missing') {
@@ -187,7 +187,7 @@ const onTopupCheckoutCompleted = async ({
 }): Promise<void> => {
   const userId = session.metadata?.userId;
   if (!userId) {
-    monetization.warn(`Top-up checkout without userId metadata, event ${event.id}`);
+    monetizationLog.warn(`Top-up checkout without userId metadata, event ${event.id}`);
     return;
   }
 
@@ -204,7 +204,7 @@ const onTopupCheckoutCompleted = async ({
   const credits = Number(creditsRaw);
   const amountUsd = Number(amountUsdRaw);
   if (!Number.isInteger(credits) || credits <= 0 || !Number.isInteger(amountUsd) || amountUsd <= 0) {
-    monetization.warn(
+    monetizationLog.warn(
       `Top-up checkout with invalid metadata (credits=${creditsRaw}, amountUsd=${amountUsdRaw}), event ${event.id}`,
     );
     return;
@@ -231,7 +231,7 @@ const onTopupCheckoutCompleted = async ({
     notes: `Top-up: $${amountUsd}`,
   });
 
-  monetization.info(
+  monetizationLog.info(
     `Top-up purchased: user=${userId} credits=+${credits} amount=$${amountUsd} bonus=${user.credits.bonusBalance}→${user.credits.bonusBalance + credits}`,
   );
 };
@@ -299,16 +299,14 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
           notes: `Upgrade ${oldPlan} → ${newPlan}: +${deltaAllowance} allowance`,
         });
       }
-      monetization.info(
-        `Plan upgraded: user=${user._id} ${oldPlan}→${newPlan} bonus=+${deltaAllowance} allowance`,
-      );
+      monetizationLog.info(`Plan upgraded: user=${user._id} ${oldPlan}→${newPlan} bonus=+${deltaAllowance} allowance`);
     } catch (err) {
       // Duplicate-key on stripeEventId means we've already processed this
       // exact event; state sync happens once, safe to swallow.
       if (!isDuplicateKeyError(err)) {
         throw err;
       }
-      monetization.info(`Duplicate subscription.updated event ${event.id}, skipping`);
+      monetizationLog.info(`Duplicate subscription.updated event ${event.id}, skipping`);
     }
     return;
   }
@@ -317,7 +315,7 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
     // Defer downgrade until next invoice.paid applies the new plan. Keep
     // current plan + credits intact so the user has what they paid for.
     update['subscription.pendingPlan'] = newPlan;
-    monetization.info(`Downgrade scheduled: user=${user._id} ${oldPlan}→${newPlan} (applies at next renewal)`);
+    monetizationLog.info(`Downgrade scheduled: user=${user._id} ${oldPlan}→${newPlan} (applies at next renewal)`);
   }
 
   await UserModel.updateOne({ _id: user._id }, { $set: update });
@@ -367,12 +365,10 @@ const handleSubscriptionDeleted = async (event: Stripe.Event): Promise<void> => 
       bonusAfter: user.credits.bonusBalance,
       notes: 'Subscription ended — downgraded to Free',
     });
-    monetization.info(
-      `Subscription canceled: user=${user._id} → Free (allowance reset to ${freeAllowance})`,
-    );
+    monetizationLog.info(`Subscription canceled: user=${user._id} → Free (allowance reset to ${freeAllowance})`);
   } catch (err) {
     if (!isDuplicateKeyError(err)) throw err;
-    monetization.info(`Duplicate subscription.deleted event ${event.id}, skipping`);
+    monetizationLog.info(`Duplicate subscription.deleted event ${event.id}, skipping`);
   }
 };
 
@@ -436,12 +432,12 @@ const handleInvoicePaid = async (event: Stripe.Event): Promise<void> => {
       bonusAfter: user.credits.bonusBalance,
       notes: `Renewal — ${effectivePlan} (${invoice.billing_reason})`,
     });
-    monetization.info(
+    monetizationLog.info(
       `Period reset: user=${user._id} plan=${effectivePlan} allowance=${user.credits.allowanceBalance}→${plan.monthlyAllowance} (${invoice.billing_reason})`,
     );
   } catch (err) {
     if (!isDuplicateKeyError(err)) throw err;
-    monetization.info(`Duplicate invoice.paid event ${event.id}, skipping`);
+    monetizationLog.info(`Duplicate invoice.paid event ${event.id}, skipping`);
   }
 };
 
@@ -454,7 +450,7 @@ const handleInvoicePaymentFailed = async (event: Stripe.Event): Promise<void> =>
     { 'subscription.stripeSubscriptionId': subscriptionId },
     { $set: { 'subscription.status': 'past_due' } },
   );
-  monetization.warn(`Invoice payment failed: subscription=${subscriptionId} → past_due`);
+  monetizationLog.warn(`Invoice payment failed: subscription=${subscriptionId} → past_due`);
   // No credit mutation here — user keeps current balance; Stripe's dunning
   // retries the payment over the next few days. A grace-period sweep job
   // (Phase 5) downgrades to free if dunning exhausts without success.
@@ -493,7 +489,7 @@ const handleChargeRefunded = async (event: Stripe.Event): Promise<void> => {
   const userId = metadata.userId;
   const creditsGranted = Number(metadata.credits);
   if (!userId || !Number.isInteger(creditsGranted) || creditsGranted <= 0) {
-    monetization.warn(`charge.refunded for topup PI ${paymentIntentId} with invalid metadata, event ${event.id}`);
+    monetizationLog.warn(`charge.refunded for topup PI ${paymentIntentId} with invalid metadata, event ${event.id}`);
     return;
   }
 
@@ -528,7 +524,8 @@ const handleChargeRefunded = async (event: Stripe.Event): Promise<void> => {
  */
 const handleChargeDisputeCreated = async (event: Stripe.Event): Promise<void> => {
   const dispute = event.data.object as Stripe.Dispute;
-  const paymentIntentId = typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id;
+  const paymentIntentId =
+    typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id;
   if (!paymentIntentId) return;
 
   const stripe = getStripe();
@@ -544,9 +541,8 @@ const handleChargeDisputeCreated = async (event: Stripe.Event): Promise<void> =>
   // does expose `amount` — scale proportionally just like refunds.
   const disputeAmount = dispute.amount;
   const chargeAmount = typeof dispute.charge === 'string' ? 0 : (dispute.charge?.amount ?? 0);
-  const clawbackCredits = chargeAmount > 0
-    ? Math.ceil((creditsGranted * disputeAmount) / chargeAmount)
-    : creditsGranted;
+  const clawbackCredits =
+    chargeAmount > 0 ? Math.ceil((creditsGranted * disputeAmount) / chargeAmount) : creditsGranted;
   if (clawbackCredits <= 0) return;
 
   await applyClawback({
@@ -581,7 +577,7 @@ const applyClawback = async ({
   // `$inc` if this event already landed.
   const existing = await CreditLedgerModel.findOne({ stripeEventId }).select('_id').lean();
   if (existing) {
-    monetization.info(`${logLabel} — duplicate event, skipping`);
+    monetizationLog.info(`${logLabel} — duplicate event, skipping`);
     return;
   }
 
@@ -594,10 +590,7 @@ const applyClawback = async ({
   const actualClawback = Math.min(clawbackCredits, user.credits.bonusBalance);
 
   if (actualClawback > 0) {
-    await UserModel.updateOne(
-      { _id: userId },
-      { $inc: { 'credits.bonusBalance': -actualClawback } },
-    );
+    await UserModel.updateOne({ _id: userId }, { $inc: { 'credits.bonusBalance': -actualClawback } });
   }
 
   const bonusAfter = user.credits.bonusBalance - actualClawback;
@@ -613,15 +606,17 @@ const applyClawback = async ({
       balanceAfter: user.credits.allowanceBalance,
       bonusBefore: user.credits.bonusBalance,
       bonusAfter,
-      notes: actualClawback < clawbackCredits
-        ? `${notes} (intended −${clawbackCredits}, clamped to −${actualClawback})`
-        : notes,
+      notes:
+        actualClawback < clawbackCredits
+          ? `${notes} (intended −${clawbackCredits}, clamped to −${actualClawback})`
+          : notes,
     });
-    const clamped = actualClawback < clawbackCredits
-      ? ` (clamped from ${clawbackCredits} — ${clawbackCredits - actualClawback} absorbed)`
-      : '';
+    const clamped =
+      actualClawback < clawbackCredits
+        ? ` (clamped from ${clawbackCredits} — ${clawbackCredits - actualClawback} absorbed)`
+        : '';
     const level = reason === 'dispute_clawback' ? 'warn' : 'info';
-    monetization[level](
+    monetizationLog[level](
       `${logLabel} → clawback=−${actualClawback} credits${clamped} bonus=${user.credits.bonusBalance}→${bonusAfter}`,
     );
   } catch (err) {
@@ -629,7 +624,7 @@ const applyClawback = async ({
     // pre-check above, the second insert will E11000 here — the first
     // webhook already debited. Swallow; rare and bounded.
     if (!isDuplicateKeyError(err)) throw err;
-    monetization.info(`${logLabel} — duplicate event race, skipping`);
+    monetizationLog.info(`${logLabel} — duplicate event race, skipping`);
   }
 };
 

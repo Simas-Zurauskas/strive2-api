@@ -1,5 +1,6 @@
 import { sanitizePromptInput } from '@lib/sanitize';
 import LessonContentModel from '@models/LessonContentModel';
+import { genLog } from '@lib/loggers';
 import { QuizState } from '../state';
 
 const formatAnswers = (answers: { questionId: string; answer: string }[]) =>
@@ -72,7 +73,7 @@ ${interleavingContext}
 
 Generate 5-8 quiz questions that test synthesis and application across the lessons in this module.`;
 
-  console.log(`[quizContextLoad] ✓ Built prompts for module "${mod.name}" (${lessonDocs.length} lessons loaded)`.green);
+  genLog.info(`quiz:context-load module=${moduleIndex} name="${mod.name}" lessons=${lessonDocs.length}`);
 
   return {
     moduleName: mod.name,

@@ -5,6 +5,8 @@ import { withRetry } from '@lib/retry';
 import { MODEL_IDS } from '@lib/langchain';
 import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
 import { ANTHROPIC_API_KEY } from '@conf/env';
+import { GOAL_TYPES } from '@lib/constants';
+import type { GoalType } from '@lib/constants';
 import type { Persona } from './types';
 
 const PERSONA_SYSTEM_PROMPT = `You are generating realistic test personas for an AI-powered course creation platform. These personas will walk through the wizard (clarifying questions → depth choice → structure → optional chat refinement → accept), then through the learning experience (lessons → module quizzes → spaced-repetition insight reviews).
@@ -85,6 +87,27 @@ Return a JSON object with a "personas" array. Each persona has:
     - \`generous\`: self-rates tap-reveal high (Good/Easy) even when hazy.
     - \`harsh\`: self-rates tap-reveal low (Again/Hard) even when mostly correct.
 
+## Goal Type axis (orthogonal to topic / domain)
+
+The course-creation pipeline classifies each goal into one of FIVE goalType buckets and uses that to tilt clarify questions and structure decisions. Your personas must span these buckets — and you must annotate each persona with the correct bucket as ground truth.
+
+- **master** — "deeply learn / become an expert in / understand X". Default when the persona names a SUBJECT but no project, channel, deliverable, or exam.
+- **monetize** — "become a YouTuber / run ads / freelance / sell / launch a side hustle / grow my audience". The deliverable is revenue, channel, audience, or clients.
+- **pass** — exam, certification, school grade, professional license, driving manual. Usually mentions a NAMED test (CPA, JEE, NEET, BITSAT, AWS-SAA, GMAT, MCAT) or a deadline ("by October", "before finals").
+- **build** — "build / ship / launch / create" a SPECIFIC NAMED PROJECT. The deliverable is the project (chat app, SaaS, portfolio site, game, Chrome extension), not the topic.
+- **fluency** — natural-language acquisition (Spanish, Japanese, Mandarin, German, ASL, etc.). NOT communication skills in the learner's own language.
+
+When a goal could plausibly fit two types, pick the one whose deliverable IS the goal (primary-activity test):
+- "Learn React deeply to ship a SaaS" → build (the SaaS is the deliverable).
+- "Become a YouTuber making React tutorials" → monetize (the channel is the goal).
+- "Master React" → master.
+- "Learn Spanish before my Madrid trip" → fluency (NOT pass — no exam).
+
+Set the persona's:
+- **predictedGoalType** — the correct bucket for the goal you generated.
+- **predictedGoalTypeReasoning** — one sentence naming the cue ("mentions BITSAT 2025 → pass", "wants to build a chat app → build", "no project, no channel, just deeply learn ML → master").
+- **goalTypeOverrideTarget** — set to a *different* goalType ONLY if this persona would realistically change their mind via the chip on the ClarifyStep (Skeptic / Anxious Learner archetypes). Most personas: null. Examples: "skeptic who first typed a vague master goal but really wants to build something" → master predicted, build override; "anxious learner whose pass goal becomes master because they don't have a fixed exam date" → pass predicted, master override.
+
 ## Crucial Constraints
 
 1. DO NOT make all personas quirky or unusual. Most people are pretty normal. 2-3 personas should be straightforward motivated learners. The diversity comes from their topics, experience levels, and minor behavioral differences — not from everyone being a "character."
@@ -93,7 +116,9 @@ Return a JSON object with a "personas" array. Each persona has:
 
 3. The wizardBehavior predictions must be SPECIFIC and ACTIONABLE — not vague. "answers quickly" is vague. "Picks the first option that seems reasonable on multiple_choice, selects 3-4 options on multi_select because she wants breadth, text answers are 3-6 words" is actionable.
 
-4. When generating 5 personas: ensure at least 2 are "normal" motivated learners, at least 1 has a vague/short goal, at least 1 has a very specific goal, and at least 1 will give structure feedback. Topics must all be different.`;
+4. When generating 5 personas: ensure at least 2 are "normal" motivated learners, at least 1 has a vague/short goal, at least 1 has a very specific goal, and at least 1 will give structure feedback. Topics must all be different.
+
+5. **goalType coverage** — when generating ≥5 personas, ensure each predictedGoalType (master, monetize, pass, build, fluency) is represented at least once across the cohort. For smaller cohorts (1-4) coverage is unenforced — diversity over completeness. At least one persona total should have a non-null goalTypeOverrideTarget so the override path gets exercised when the orchestrator opts into it.`;
 
 const personaOutputSchema = z.object({
   personas: z.array(
@@ -122,6 +147,9 @@ const personaOutputSchema = z.object({
         generous: z.boolean(),
         harsh: z.boolean(),
       }),
+      predictedGoalType: z.enum(GOAL_TYPES),
+      predictedGoalTypeReasoning: z.string(),
+      goalTypeOverrideTarget: z.enum(GOAL_TYPES).nullable(),
     }),
   ),
 });
@@ -184,10 +212,41 @@ export async function generatePersonas(count: number = 5): Promise<Persona[]> {
     }
     p.quizStyleFlags = normalizeQuizFlags(p.quizStyleFlags);
     p.insightStyleFlags = normalizeInsightFlags(p.insightStyleFlags);
-    console.log(`${'[PersonaGen]'.magenta}   → ${p.name} [quiz: ${describeQuizFlags(p.quizStyleFlags)}, insight: ${describeInsightFlags(p.insightStyleFlags)}]`);
+    if (!p.predictedGoalTypeReasoning || p.predictedGoalTypeReasoning.trim().length === 0) {
+      // Reasoning is the assessor's only ground-truth anchor for scoring
+      // classification accuracy — refuse silently-empty entries here so a
+      // missing rationale surfaces immediately, not in the assessment write-up.
+      throw new Error(`Persona "${p.name}" is missing predictedGoalTypeReasoning`);
+    }
+    // Override target may not equal the predicted goalType — that's a no-op,
+    // not an override. Coerce same-as-predicted to null and warn.
+    if (p.goalTypeOverrideTarget && p.goalTypeOverrideTarget === p.predictedGoalType) {
+      console.warn(
+        `${'[PersonaGen]'.magenta} ${p.name}: goalTypeOverrideTarget == predictedGoalType (${p.predictedGoalType}); coercing to null.`,
+      );
+      p.goalTypeOverrideTarget = null;
+    }
+    const overrideStr = p.goalTypeOverrideTarget ? ` → override:${p.goalTypeOverrideTarget}` : '';
+    console.log(
+      `${'[PersonaGen]'.magenta}   → ${p.name} [quiz: ${describeQuizFlags(p.quizStyleFlags)}, insight: ${describeInsightFlags(p.insightStyleFlags)}, goalType: ${p.predictedGoalType}${overrideStr}]`,
+    );
   }
 
-  return parsed.personas;
+  // Coverage diagnostic — calls out missing buckets so an operator running
+  // ≥5 personas can see at a glance whether the cohort actually spans the
+  // goalType axis. Soft warning only; not a hard failure (the LLM's
+  // distribution can still be informative even when imperfect).
+  if (count >= 5) {
+    const observed = new Set(parsed.personas.map((p) => p.predictedGoalType as GoalType));
+    const missing = GOAL_TYPES.filter((t) => !observed.has(t));
+    if (missing.length > 0) {
+      console.warn(
+        `[PersonaGen] Cohort coverage gap — missing goalType(s): ${missing.join(', ')}. Re-run if balanced coverage matters for this evaluation.`.yellow,
+      );
+    }
+  }
+
+  return parsed.personas as Persona[];
 }
 
 // ── Flag normalization ─────────────────────────────────────
