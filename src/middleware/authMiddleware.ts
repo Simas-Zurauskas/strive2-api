@@ -79,6 +79,32 @@ export const optionalProtect = asyncHandler(
   },
 );
 
+/**
+ * Final authorisation gate for engineer-only surfaces (usage events,
+ * the dev "Reset quiz" endpoint, anything we add later that's strictly
+ * for ops). Stack ordering: `protect → requireVerified → requireAdmin`,
+ * because admin access is a stronger claim than verified-credentials.
+ *
+ * 403 (not 401): the user's session is valid, they just don't have
+ * the role. 401 would trigger the client's auto-signOut interceptor —
+ * an admin route hit by a non-admin should NOT log them out.
+ */
+export const requireAdmin = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const user = await UserModel.findById(req.userId).select('isAdmin').lean();
+
+  if (!user) {
+    res.status(401);
+    throw new Error('Unauthorized');
+  }
+
+  if (!user.isAdmin) {
+    res.status(403);
+    throw new AppError('Forbidden — admin access required.', { errorCode: 'CUSTOM_ERROR' });
+  }
+
+  next();
+});
+
 // Gates feature routes (course, gamification, recall, …) behind email
 // verification for credential-based accounts. `protect` stays JWT-only so
 // /me, /logout, /resend-verification-authenticated, /delete-account remain

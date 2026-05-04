@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { listUserCourses } from '@services/courseDbService';
+import { listUserCourses, omitServerOnlyCourseFields } from '@services/courseDbService';
 
 /**
  * @swagger
@@ -26,5 +26,5 @@ import { listUserCourses } from '@services/courseDbService';
 export const listCoursesController = asyncHandler(async (req, res) => {
   const courses = await listUserCourses({ userId: req.userId! });
 
-  res.status(200).json({ data: courses });
+  res.status(200).json({ data: courses.map(omitServerOnlyCourseFields) });
 });

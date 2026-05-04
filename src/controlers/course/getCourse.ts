@@ -1,5 +1,5 @@
 import asyncHandler from 'express-async-handler';
-import { getUserCourseLean } from '@services/courseDbService';
+import { getUserCourseLean, omitServerOnlyCourseFields } from '@services/courseDbService';
 import { ensureDepthPreviewsScope } from '@services/courseService';
 
 /**
@@ -35,5 +35,5 @@ export const getCourseController = asyncHandler(async (req, res) => {
   // before that field was added. No-op on already-enriched documents.
   const enriched = ensureDepthPreviewsScope(course);
 
-  res.status(200).json({ data: enriched });
+  res.status(200).json({ data: omitServerOnlyCourseFields(enriched) });
 });

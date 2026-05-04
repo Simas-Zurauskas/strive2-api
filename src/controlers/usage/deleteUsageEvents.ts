@@ -1,16 +1,12 @@
 import asyncHandler from 'express-async-handler';
 import mongoose from 'mongoose';
-import { ENVIRONMENT } from '@conf/env';
 import UsageEventModel from '@models/UsageEventModel';
 
-// No @swagger block — intentionally hidden from API docs. Dev-only helper
-// so the Usage tab can be reset without dropping the whole collection.
+// No @swagger block — intentionally hidden from API docs. Admin-only
+// helper so the Usage tab can be reset without dropping the whole
+// collection. Route guard (`requireAdmin`) handles the gate; this
+// controller trusts that the request reached it legitimately.
 export const deleteUsageEventsController = asyncHandler(async (req, res) => {
-  if (ENVIRONMENT !== 'development') {
-    res.status(404).json({ message: 'Not found' });
-    return;
-  }
-
   const userId = req.userId!;
   const result = await UsageEventModel.deleteMany({
     userId: new mongoose.Types.ObjectId(userId),

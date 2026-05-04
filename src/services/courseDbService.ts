@@ -8,6 +8,22 @@ import { Types } from 'mongoose';
  */
 export type LeanCourse = ICourse & { _id: Types.ObjectId };
 
+/**
+ * Server-only fields persisted on Course but never part of the public API
+ * contract. The hydrated path runs `Course.toJSON()` which strips these,
+ * but `.lean()` bypasses that transform — so any controller responding with
+ * a lean Course (or array of them) must call this before `res.json()`.
+ */
+const SERVER_ONLY_COURSE_FIELDS = ['suggestedDesignPrompts'] as const;
+
+export const omitServerOnlyCourseFields = <T extends Partial<ICourse>>(course: T): T => {
+  const out = { ...course };
+  for (const key of SERVER_ONLY_COURSE_FIELDS) {
+    delete (out as Record<string, unknown>)[key];
+  }
+  return out;
+};
+
 // ── Create ─────────────────────────────────────────────────
 
 export const createCourse = async (params: { userId: string; goal: string }): Promise<CourseDocument> => {

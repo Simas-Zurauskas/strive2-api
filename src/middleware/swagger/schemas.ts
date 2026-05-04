@@ -6,6 +6,7 @@ import { BLOCK_TYPES } from '@models/LessonContentModel';
 import { RECALL_CARD_KINDS, RECALL_MODES, RECALL_RATINGS, RECALL_STATES } from '@lib/recallConstants';
 import { USAGE_SERVICES } from '@lib/usageConstants';
 import { CREDIT_LEDGER_REASONS } from '@models/CreditLedgerModel';
+import { SECURITY_ACTIONS } from '@models/SecurityActionTokenModel';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
 
@@ -172,6 +173,7 @@ export const schemas: SchemaMap = {
       '_id',
       'email',
       'emailVerified',
+      'isAdmin',
       'authProviders',
       'subscription',
       'credits',
@@ -185,6 +187,7 @@ export const schemas: SchemaMap = {
       name: { type: 'string' },
       image: { type: 'string' },
       emailVerified: { type: 'boolean' },
+      isAdmin: { type: 'boolean' },
       authProviders: {
         type: 'array',
         items: { $ref: '#/components/schemas/AuthProvider' },
@@ -1574,6 +1577,115 @@ export const schemas: SchemaMap = {
       },
     },
   },
+
+  // ── Security actions (sensitive-action OTP gate) ─────────
+
+  SecurityAction: {
+    type: 'string',
+    enum: [...SECURITY_ACTIONS],
+    description:
+      'Sensitive account-state action that requires a fresh email-delivered 6-digit code in addition to the bearer token.',
+  },
+
+  // ── Depth-override 409 payloads ──────────────────────────
+  //
+  // Bidirectional gate on PATCH /api/course/{id}: the controller emits one
+  // of two `code` values depending on which side fired. Modelled as separate
+  // named schemas so both server-side JSDoc references and client-side
+  // discriminated unions are anchored on the same shapes.
+
+  DepthOverrideRiskLevel: {
+    type: 'string',
+    enum: ['low', 'moderate', 'high'],
+  },
+
+  DepthOverrideOvercommitPayload: {
+    type: 'object',
+    required: ['code', 'message', 'recommended', 'selectedDepth'],
+    description:
+      'Selected depth is likely too big for what the learner answered (overcommit). Returned with HTTP 409.',
+    properties: {
+      code: { type: 'string', enum: ['DEPTH_OVERRIDE_REQUIRES_ACK'] },
+      message: { type: 'string' },
+      recommended: nullableRef('#/components/schemas/CourseDepth'),
+      selectedDepth: { $ref: '#/components/schemas/CourseDepth' },
+      lessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated lesson count for the selected depth.',
+      },
+      estimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated learner-facing hours for the selected depth.',
+      },
+      softnessCues: { type: 'array', items: { type: 'string' } },
+      finishPressureCues: { type: 'array', items: { type: 'string' } },
+      overcommitRisk: { $ref: '#/components/schemas/DepthOverrideRiskLevel' },
+      overcommitRationale: { type: 'string' },
+    },
+  },
+
+  DepthOverrideUndercommitPayload: {
+    type: 'object',
+    required: ['code', 'message', 'recommended', 'selectedDepth'],
+    description:
+      'Selected depth is below the recommended tier and the LLM judged the coverage gap meaningful (undercommit). Returned with HTTP 409.',
+    properties: {
+      code: { type: 'string', enum: ['DEPTH_UNDERCOMMIT_REQUIRES_ACK'] },
+      message: { type: 'string' },
+      recommended: nullableRef('#/components/schemas/CourseDepth'),
+      selectedDepth: { $ref: '#/components/schemas/CourseDepth' },
+      lessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated lesson count for the selected depth (what the learner will get).',
+      },
+      estimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated learner-facing hours for the selected depth.',
+      },
+      recommendedLessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated lesson count for the recommended depth (what they would have gotten).',
+      },
+      recommendedEstimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated learner-facing hours for the recommended depth.',
+      },
+      undercommitRisk: { $ref: '#/components/schemas/DepthOverrideRiskLevel' },
+      undercommitRationale: { type: 'string' },
+    },
+  },
+
+  DepthOverridePayload: {
+    oneOf: [
+      { $ref: '#/components/schemas/DepthOverrideOvercommitPayload' },
+      { $ref: '#/components/schemas/DepthOverrideUndercommitPayload' },
+    ],
+    discriminator: {
+      propertyName: 'code',
+      mapping: {
+        DEPTH_OVERRIDE_REQUIRES_ACK: '#/components/schemas/DepthOverrideOvercommitPayload',
+        DEPTH_UNDERCOMMIT_REQUIRES_ACK: '#/components/schemas/DepthOverrideUndercommitPayload',
+      },
+    },
+  } as unknown as OpenAPIV3.SchemaObject,
 
   // ── Mentor attachment ────────────────────────────────────
 

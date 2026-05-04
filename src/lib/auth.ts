@@ -10,18 +10,25 @@ export interface AuthTokenPayload {
   exp: number;
 }
 
-// 7-day expiry: cuts the stolen-token exposure window from 30 days to 7 days
-// while still long enough to survive most user "go on holiday" scenarios.
+// 30-day expiry. Strive isn't a high-security app — the friction cost of
+// forcing re-login on a casual learner who comes back every couple of
+// weeks outweighs the marginal security gain of a shorter raw TTL. The
+// real defense is `tokenVersion`: every authenticated request re-reads
+// it from the DB via `protect`, so logout / password change / explicit
+// revocation invalidates every outstanding token *immediately* —
+// independent of how long the JWT itself claims to live.
+//
 // Sliding-refresh: the client (NextAuth jwt callback) calls
-// `/api/auth/refresh` BEFORE the token expires to swap in a fresh 7-day
-// token without re-authenticating. That swap reads `tokenVersion` from the
-// DB, so a stolen token whose tokenVersion has been bumped (logout,
-// password change, etc.) refuses to refresh — losing the attacker the
-// session even before the access token expires.
+// `/api/auth/refresh` when the token is within 7 days of expiring, which
+// mints a brand-new 30-day token. So a user who opens the app at least
+// once every ~23 days keeps a continuous session indefinitely. Refresh
+// re-checks tokenVersion against the DB, so a revoked token (logout,
+// password change, etc.) refuses to refresh — the attacker loses the
+// session even before the access token's natural expiry.
 //
 // Existing tokens retain their original baked-in exp; only newly issued
-// tokens get the shorter lifetime.
-export const ACCESS_TOKEN_TTL = '7d';
+// tokens get the longer lifetime.
+export const ACCESS_TOKEN_TTL = '30d';
 
 export const generateAuthToken = (params: { id: string; tokenVersion: number }): string => {
   const { id, tokenVersion } = params;

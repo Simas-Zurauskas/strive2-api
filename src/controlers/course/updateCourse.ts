@@ -1,6 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { updateCourseSchema } from './validation';
-import { updateCourse, getUserCourseLean } from '@services/courseDbService';
+import { updateCourse, getUserCourseLean, omitServerOnlyCourseFields } from '@services/courseDbService';
 import {
   detectSoftnessHint,
   detectFinishPressure,
@@ -119,102 +119,7 @@ const formatAnswersForSoftness = (
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               required: [code, message]
- *               properties:
- *                 code:
- *                   type: string
- *                   enum: [DEPTH_OVERRIDE_REQUIRES_ACK, DEPTH_UNDERCOMMIT_REQUIRES_ACK]
- *                 message:
- *                   type: string
- *                 recommended:
- *                   oneOf:
- *                     - $ref: '#/components/schemas/CourseDepth'
- *                     - type: 'null'
- *                 selectedDepth:
- *                   $ref: '#/components/schemas/CourseDepth'
- *                 lessonCountRange:
- *                   type: array
- *                   items:
- *                     type: number
- *                   minItems: 2
- *                   maxItems: 2
- *                   description: >
- *                     [min, max] estimated total lesson count for the
- *                     selected depth, derived from the lesson-count hints
- *                     (soft or normal band per the learner's softness signal).
- *                 estimatedHoursRange:
- *                   type: array
- *                   items:
- *                     type: number
- *                   minItems: 2
- *                   maxItems: 2
- *                   description: >
- *                     [min, max] estimated total learner-facing hours for
- *                     the selected depth. Derived from lessonCountRange ×
- *                     ~25 minutes per lesson, rounded up.
- *                 recommendedLessonCountRange:
- *                   type: array
- *                   items:
- *                     type: number
- *                   minItems: 2
- *                   maxItems: 2
- *                   description: >
- *                     Undercommit only. [min, max] estimated lesson count for
- *                     the recommended depth, so the dialog can frame the
- *                     coverage gap. Absent on overcommit responses.
- *                 recommendedEstimatedHoursRange:
- *                   type: array
- *                   items:
- *                     type: number
- *                   minItems: 2
- *                   maxItems: 2
- *                   description: >
- *                     Undercommit only. [min, max] estimated learner-facing
- *                     hours for the recommended depth. Absent on overcommit
- *                     responses.
- *                 softnessCues:
- *                   type: array
- *                   items:
- *                     type: string
- *                   description: Overcommit only.
- *                 finishPressureCues:
- *                   type: array
- *                   items:
- *                     type: string
- *                   description: Overcommit only.
- *                 overcommitRisk:
- *                   type: string
- *                   enum: [low, moderate, high]
- *                   description: >
- *                     Overcommit only. The LLM-emitted overcommit-risk
- *                     level read from the course's depth-previews.
- *                     Present when the gate fires on a course generated
- *                     after this field was added; absent on legacy
- *                     courses where the gate triggered on phrase-regex
- *                     cost signals alone.
- *                 overcommitRationale:
- *                   type: string
- *                   description: >
- *                     Overcommit only. One-sentence rationale for
- *                     `overcommitRisk`, surfaced in the dialog so the
- *                     learner can see the model's reasoning rather than
- *                     only allowlist-matched phrases. Absent when
- *                     `overcommitRisk` is absent.
- *                 undercommitRisk:
- *                   type: string
- *                   enum: [low, moderate, high]
- *                   description: >
- *                     Undercommit only. The LLM-emitted undercommit-risk
- *                     level. Either `moderate` or `high` triggered the
- *                     gate (paired with the contraction signal).
- *                 undercommitRationale:
- *                   type: string
- *                   description: >
- *                     Undercommit only. One-sentence rationale for
- *                     `undercommitRisk`, surfaced in the dialog so the
- *                     learner can see the model's reasoning. Absent when
- *                     the LLM didn't emit one.
+ *               $ref: '#/components/schemas/DepthOverridePayload'
  */
 export const updateCourseController = asyncHandler(async (req, res) => {
   const updates = updateCourseSchema.parse(req.body);
@@ -553,5 +458,5 @@ export const updateCourseController = asyncHandler(async (req, res) => {
 
   const course = await updateCourse({ userId, courseId, updates: cascadeUpdates });
 
-  res.status(200).json({ data: course });
+  res.status(200).json({ data: omitServerOnlyCourseFields(course.toJSON()) });
 });

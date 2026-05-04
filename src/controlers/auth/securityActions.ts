@@ -30,8 +30,7 @@ const requestCodeSchema = z.object({
  *             required: [action]
  *             properties:
  *               action:
- *                 type: string
- *                 enum: [set_password, change_password, delete_account]
+ *                 $ref: '#/components/schemas/SecurityAction'
  *     responses:
  *       200:
  *         content:

@@ -47,7 +47,7 @@ import {
   clearCourseMentorController,
 } from '@controlers/course';
 import { ENVIRONMENT } from '@conf/env';
-import { protect, requireVerified } from '@middleware/authMiddleware';
+import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
 import { usageContextMiddleware } from '@middleware/usageContext';
 import { requireCredits } from '@middleware/requireCredits';
 import { validateObjectId } from '@middleware/validateObjectId';
@@ -173,11 +173,21 @@ router.get('/:courseId/module-quiz/:moduleIndex', getModuleQuizContentController
 router.post('/:courseId/module-quiz/:moduleIndex/submit', submitQuizAttemptController);
 router.get('/:courseId/module-quiz/:moduleIndex/progress', getModuleQuizProgressController);
 
-// Dev-only: reset quiz (hidden from Swagger)
+// Admin-only: reset quiz (hidden from Swagger). Was previously env-gated
+// to development only; moved to a per-route admin gate so ops can use it
+// against staging/prod when iterating. The rest of the router already
+// runs under `protect + requireVerified`, so this just adds the role
+// check on top.
+router.delete(
+  '/:courseId/module-quiz/:moduleIndex/reset',
+  requireAdmin,
+  resetModuleQuizController,
+);
+
+// Dev-only stats endpoint consumed by the debug orchestrator to surface
+// recall count + curated link count per lesson in its markdown reports.
+// Stays env-gated — it's not a UI-facing surface, just a debug harness.
 if (ENVIRONMENT === 'development') {
-  router.delete('/:courseId/module-quiz/:moduleIndex/reset', resetModuleQuizController);
-  // Dev-only stats endpoint consumed by the debug orchestrator to surface
-  // recall count + curated link count per lesson in its markdown reports.
   router.get(
     '/:courseId/lesson-content/:moduleIndex/:lessonIndex/stats',
     getLessonContentStatsController,

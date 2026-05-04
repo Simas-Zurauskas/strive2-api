@@ -1,5 +1,18 @@
 import { z } from 'zod';
 
+// Moderate password standard. Mirrors the FE rules in
+// `client/src/validation/auth.ts` exactly — drift between the two would
+// either let weak passwords through (FE-only) or surface server-error
+// noise on inputs the FE accepted (BE stricter). Composition: 8–128 chars,
+// must contain at least one letter and one digit. Blocks "12345678" /
+// "password" / etc. without forcing symbol-class theatre.
+const passwordRule = z
+  .string()
+  .min(8, 'Password must be at least 8 characters')
+  .max(128, 'Password must be at most 128 characters')
+  .regex(/[a-zA-Z]/, 'Password must contain at least one letter')
+  .regex(/\d/, 'Password must contain at least one number');
+
 export const signInSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string().min(1, 'Password is required'),
@@ -7,10 +20,7 @@ export const signInSchema = z.object({
 
 export const signUpSchema = z.object({
   email: z.string().email('Invalid email address'),
-  password: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .max(128, 'Password must be at most 128 characters'),
+  password: passwordRule,
 });
 
 export const googleAuthSchema = z.object({
@@ -52,10 +62,7 @@ export const forgotPasswordSchema = z.object({
 export const resetPasswordSchema = z.object({
   email: z.string().email('Invalid email address'),
   token: z.string().min(1, 'Reset token is required'),
-  newPassword: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .max(128, 'Password must be at most 128 characters'),
+  newPassword: passwordRule,
 });
 
 // Email-OTP flow: callers must include the 6-digit code from the
@@ -63,10 +70,7 @@ export const resetPasswordSchema = z.object({
 // over a Google-only account by attaching a CREDENTIALS provider with an
 // attacker-controlled password.
 export const setPasswordSchema = z.object({
-  newPassword: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .max(128, 'Password must be at most 128 characters'),
+  newPassword: passwordRule,
   code: z
     .string()
     .regex(/^\d{6}$/, 'Confirmation code must be 6 digits'),
@@ -77,10 +81,7 @@ export const setPasswordSchema = z.object({
 // without the code, a stolen JWT could permanently take over the account
 // by setting a new password and locking out the legitimate owner.
 export const changePasswordSchema = z.object({
-  newPassword: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .max(128, 'Password must be at most 128 characters'),
+  newPassword: passwordRule,
   code: z
     .string()
     .regex(/^\d{6}$/, 'Confirmation code must be 6 digits'),

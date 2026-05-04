@@ -103,6 +103,14 @@ const schema = new Schema<ILessonContent>(
     toJSON: {
       transform(_doc, ret: Record<string, unknown>) {
         delete ret.__v;
+        // Server-only: drives the per-lesson TTS cooldown gate; never read
+        // by the client.
+        delete ret.lastTtsSpendAt;
+        // Server-only: read by getLessonChatHistory to seed the mentor-chat
+        // empty state and (for `completed`) the question-generation flow.
+        // Neither field is consumed by the public LessonContent response.
+        delete ret.completed;
+        delete ret.suggestedMentorPrompts;
         return ret;
       },
     },
