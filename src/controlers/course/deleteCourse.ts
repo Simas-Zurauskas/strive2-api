@@ -43,7 +43,7 @@ export const deleteCourseController = asyncHandler(async (req, res) => {
     JobModel.deleteMany({ courseId: course._id }),
     // `cleanupCourseContent` already deletes CourseDesignChat for this
     // course, so we don't double up here. It also covers lesson content,
-    // progress, quizzes, insights, insight-progress, and S3 assets.
+    // progress, quizzes, recall cards, recall-progress, and S3 assets.
     cleanupCourseContent(course._id.toString()),
     // Pull this course from every user's favoriteCourseIds. Without this,
     // deleted courses leave dangling ObjectIds in users' favorites arrays

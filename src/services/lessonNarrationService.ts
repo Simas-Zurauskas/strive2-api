@@ -37,6 +37,16 @@ import { ttsLog } from '@lib/loggers';
 
 const PROVIDER_TAG = 'google-wavenet-v1';
 
+/**
+ * Per-lesson TTS cooldown — bound on legitimate use is "user clicks
+ * Generate, waits 60 s, clicks again with new voice". 60 s is enough
+ * to short-circuit double-clicks and rapid voice toggling without
+ * blocking deliberate iteration. Enforced in the controller before job
+ * submission so cooldown denials are immediate 429s, not silent
+ * job-failed states.
+ */
+export const TTS_COOLDOWN_MS = 60_000;
+
 export interface RunLessonNarrationParams {
   courseId: string;
   moduleIndex: number;
@@ -145,7 +155,10 @@ export const runLessonNarration = async ({
   }
 
   // Persist the audio metadata regardless of cache hit/miss so the lesson
-  // doc reflects the latest synthesis attributes.
+  // doc reflects the latest synthesis attributes. `lastTtsSpendAt` is
+  // bumped only on cache miss — it gates the per-lesson cooldown that
+  // prevents accidental double-spend (see generateLessonNarrationController).
+  const now = new Date();
   await LessonContentModel.updateOne(
     { courseId, moduleIndex, lessonIndex },
     {
@@ -153,7 +166,8 @@ export const runLessonNarration = async ({
       audioVoice: voice.id,
       audioRate: resolvedRate,
       audioContentHash: contentHash,
-      audioGeneratedAt: new Date(),
+      audioGeneratedAt: now,
+      ...(exists ? {} : { lastTtsSpendAt: now }),
     },
   );
   ttsLog.info(
@@ -192,6 +206,10 @@ export const clearLessonNarration = async ({
       audioRate: null,
       audioContentHash: null,
       audioGeneratedAt: null,
+      // Reset the cooldown stamp too — clearing narration is an explicit
+      // operator action, not abuse, so the next synthesize attempt should
+      // not be gated by a stale spend timestamp.
+      lastTtsSpendAt: null,
     },
   );
   ttsLog.info(

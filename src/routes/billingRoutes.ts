@@ -21,7 +21,7 @@ router.get('/plans', getBillingPlansController);
 // Intentionally NOT behind `requireVerified` — an unverified user must still
 // be able to subscribe (some users want to pay before verifying), manage
 // their subscription, and see their billing history. Feature routes
-// (course, insight, …) stay gated by `requireVerified` separately.
+// (course, recall, …) stay gated by `requireVerified` separately.
 router.use(protect);
 
 router.post('/checkout', startCheckoutController);

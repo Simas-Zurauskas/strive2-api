@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import * as Sentry from '@sentry/node';
+import { captureWarning } from '@lib/errorReporter';
 import { HumanMessage } from '@langchain/core/messages';
 import { getInteractiveModel, getUtilityModel } from '@lib/langchain';
 import { cachedSystemMessage } from '@lib/ai/cacheControl';
@@ -185,13 +185,13 @@ const reportQuizGenerationFailure = ({
   genLog.warn(
     `quiz:generate attempt-fail attempt=${attempt} module="${state.moduleName}" promptLen=${humanMessageLength} emptyTool=${isEmptyTool}`,
   );
-  Sentry.captureMessage('quizGeneration attempt failure', {
-    level: 'warning',
+  captureWarning('quizGeneration attempt failure', {
     tags: {
       source: 'quizGeneration',
       empty_tool_call: String(isEmptyTool),
     },
     extra: diagnostic,
+    fingerprint: ['quizGeneration', 'attempt-failure', String(isEmptyTool)],
   });
 };
 

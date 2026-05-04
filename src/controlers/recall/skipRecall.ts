@@ -1,20 +1,20 @@
 import asyncHandler from 'express-async-handler';
-import { skipInsight } from '@services/insightSchedulerService';
-import { loadAuthorizedInsight } from './authorize';
-import { parseInsightIdParam } from './validation';
+import { skipRecall } from '@services/recallSchedulerService';
+import { loadAuthorizedRecallCard } from './authorize';
+import { parseRecallCardIdParam } from './validation';
 
 /**
  * @swagger
- * /api/insight/{insightId}/skip:
+ * /api/recall/{recallCardId}/skip:
  *   post:
- *     summary: Defer an insight by 1 day without treating it as a failed review
+ *     summary: Defer a recall card by 1 day without treating it as a failed review
  *     tags:
- *       - Insight
+ *       - Recall
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: insightId
+ *         name: recallCardId
  *         required: true
  *         schema:
  *           type: string
@@ -34,14 +34,14 @@ import { parseInsightIdParam } from './validation';
  *                       type: string
  *                       format: date-time
  */
-export const skipInsightController = asyncHandler(async (req, res) => {
+export const skipRecallController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const insightId = parseInsightIdParam(req.params.insightId);
+  const recallCardId = parseRecallCardIdParam(req.params.recallCardId);
 
   // Ownership-gated load — see authorize.ts. Rejects with 404 if either
-  // the insight doesn't exist or the caller doesn't own its course.
-  await loadAuthorizedInsight({ userId, insightId });
+  // the recall card doesn't exist or the caller doesn't own its course.
+  await loadAuthorizedRecallCard({ userId, recallCardId });
 
-  const progress = await skipInsight({ userId, insightId });
+  const progress = await skipRecall({ userId, recallCardId });
   res.status(200).json({ data: { nextDue: progress.nextDue } });
 });

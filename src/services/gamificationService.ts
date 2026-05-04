@@ -24,7 +24,7 @@ import mongoose from 'mongoose';
 import UserGamificationModel, { IUserGamification } from '@models/UserGamificationModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import CourseModel from '@models/CourseModel';
 import {
   XP_VALUES,
@@ -197,7 +197,7 @@ export const recordActivity = async (userId: string): Promise<RecordActivityResu
 
   // Read only the three fields the streak calculation needs. The previous
   // implementation loaded the full gamification doc (activeDates, xpLog,
-  // earnedAchievements, ~everything) on every lesson/quiz/insight activity
+  // earnedAchievements, ~everything) on every lesson/quiz/recall activity
   // just to check if today's already recorded. For the common case
   // (lastActiveDate === today → short-circuit), that was a wasted round-trip
   // worth of deserialization.
@@ -430,25 +430,25 @@ const isAchievementEarned = async ({
       return masteredCount >= totalModules;
     }
 
-    // Insight achievements (trigger: 'insight'). Cheap count-based
+    // Recall achievements (trigger: 'recall'). Cheap count-based
     // checks first; the cross-course-day query is an aggregation and
     // only runs while the user hasn't earned it (earnedIds guard
     // short-circuits in checkAchievements).
-    case 'insight_first': {
-      const count = await UserInsightProgressModel.countDocuments({ userId: userObjId });
+    case 'recall_first': {
+      const count = await UserRecallProgressModel.countDocuments({ userId: userObjId });
       return count >= 1;
     }
-    case 'insight_mastered_first': {
-      const count = await UserInsightProgressModel.countDocuments({
+    case 'recall_mastered_first': {
+      const count = await UserRecallProgressModel.countDocuments({
         userId: userObjId,
         masteredAt: { $ne: null },
       });
       return count >= 1;
     }
-    case 'insight_cross_course_day': {
+    case 'recall_cross_course_day': {
       // "3+ distinct courses reviewed today (UTC)."
       const startOfDay = new Date(todayStr() + 'T00:00:00Z');
-      const agg = await UserInsightProgressModel.aggregate([
+      const agg = await UserRecallProgressModel.aggregate([
         // Pre-filter progress rows to those with ANY event today. Eliminates
         // docs whose whole history pre-dates today before the $unwind expands
         // every event. Without this, a user with long histories pays for
@@ -456,11 +456,12 @@ const isAchievementEarned = async ({
         { $match: { userId: userObjId, 'history.ratedAt': { $gte: startOfDay } } },
         { $unwind: '$history' },
         { $match: { 'history.ratedAt': { $gte: startOfDay } } },
-        // Collection name for Insight model is 'Insight' (3rd arg passed
-        // explicitly in InsightModel.ts). Not Mongoose's default 'insights'.
-        { $lookup: { from: 'Insight', localField: 'insightId', foreignField: '_id', as: 'insight' } },
-        { $unwind: '$insight' },
-        { $group: { _id: '$insight.courseId' } },
+        // Collection name for RecallCard model is 'RecallCard' (3rd arg
+        // passed explicitly in RecallCardModel.ts). Not Mongoose's default
+        // 'recallcards'.
+        { $lookup: { from: 'RecallCard', localField: 'recallCardId', foreignField: '_id', as: 'card' } },
+        { $unwind: '$card' },
+        { $group: { _id: '$card.courseId' } },
         { $count: 'distinctCourses' },
       ]);
       return ((agg[0]?.distinctCourses as number | undefined) ?? 0) >= 3;
@@ -565,61 +566,61 @@ export const onExercisePass = async (userId: string): Promise<AwardXpResult> => 
   return awardXp({ userId, amount: XP_VALUES.EXERCISE_PASS, source: 'exercise_pass' });
 };
 
-// ── On Insight Review (orchestrator) ───────────────────────
+// ── On Recall Review (orchestrator) ──────────────────────
 
-export interface OnInsightReviewResult {
+export interface OnRecallReviewResult {
   xp: AwardXpResult;
   streak: RecordActivityResult;
   newAchievements: AchievementDefinition[];
 }
 
 /**
- * Fire XP + streak credit + insight-achievement check for a graded review.
+ * Fire XP + streak credit + recall-achievement check for a graded review.
  * Streak updates happen via recordActivity which is idempotent per-day.
  * Achievement check uses the `earnedIds` guard, so expensive queries
  * (cross-course) short-circuit once the user has earned the achievement.
  */
-export const onInsightReview = async ({
+export const onRecallReview = async ({
   userId,
-  insightId,
+  recallCardId,
   courseId,
 }: {
   userId: string;
-  insightId: string;
+  recallCardId: string;
   courseId: string;
-}): Promise<OnInsightReviewResult> => {
-  const xp = await awardXp({ userId, amount: XP_VALUES.INSIGHT_REVIEW, source: 'insight_review' });
+}): Promise<OnRecallReviewResult> => {
+  const xp = await awardXp({ userId, amount: XP_VALUES.RECALL_REVIEW, source: 'recall_review' });
   const streak = await recordActivity(userId);
-  const ach = await checkAchievements({ userId, trigger: 'insight', context: { insightId, courseId, mastered: false } });
+  const ach = await checkAchievements({ userId, trigger: 'recall', context: { recallCardId, courseId, mastered: false } });
   xp.newAchievements.push(...ach);
   return { xp, streak, newAchievements: ach };
 };
 
-// ── On Insight Mastered (orchestrator) ─────────────────────
+// ── On Recall Mastered (orchestrator) ────────────────────
 
-export interface OnInsightMasteredResult {
+export interface OnRecallMasteredResult {
   xp: AwardXpResult;
   streak: RecordActivityResult;
   newAchievements: AchievementDefinition[];
 }
 
 /**
- * Fire the one-time mastery reward when an insight first reaches
+ * Fire the one-time mastery reward when a recall card first reaches
  * Leitner box 4. Idempotency is guaranteed upstream in the scheduler
- * (`justMastered` is true exactly once per insight).
+ * (`justMastered` is true exactly once per recall card).
  */
-export const onInsightMastered = async ({
+export const onRecallMastered = async ({
   userId,
-  insightId,
+  recallCardId,
   courseId,
 }: {
   userId: string;
-  insightId: string;
+  recallCardId: string;
   courseId: string;
-}): Promise<OnInsightMasteredResult> => {
-  const xp = await awardXp({ userId, amount: XP_VALUES.INSIGHT_MASTERY, source: 'insight_mastery' });
+}): Promise<OnRecallMasteredResult> => {
+  const xp = await awardXp({ userId, amount: XP_VALUES.RECALL_MASTERY, source: 'recall_mastery' });
   const streak = await recordActivity(userId);
-  const ach = await checkAchievements({ userId, trigger: 'insight', context: { insightId, courseId, mastered: true } });
+  const ach = await checkAchievements({ userId, trigger: 'recall', context: { recallCardId, courseId, mastered: true } });
   xp.newAchievements.push(...ach);
   return { xp, streak, newAchievements: ach };
 };
@@ -634,8 +635,8 @@ interface XpByDayEntry {
     quiz_score: number;
     exercise_pass: number;
     review_complete: number;
-    insight_review: number;
-    insight_mastery: number;
+    recall_review: number;
+    recall_mastery: number;
   };
 }
 
@@ -644,7 +645,7 @@ interface WeeklySummaryPeriod {
   timeSeconds: number;
   lessons: number;
   quizzes: number;
-  insights: number;
+  recallReviews: number;
 }
 
 export interface GamificationStats {
@@ -678,7 +679,7 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
   ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 89); // 89 + today = 90 days
   const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().slice(0, 10);
 
-  const emptySources = () => ({ lesson_complete: 0, quiz_score: 0, exercise_pass: 0, review_complete: 0, insight_review: 0, insight_mastery: 0 });
+  const emptySources = () => ({ lesson_complete: 0, quiz_score: 0, exercise_pass: 0, review_complete: 0, recall_review: 0, recall_mastery: 0 });
   const xpByDayMap = new Map<string, ReturnType<typeof emptySources>>();
 
   for (const entry of profile.xpLog) {
@@ -701,8 +702,8 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
       sources.quiz_score +
       sources.exercise_pass +
       sources.review_complete +
-      sources.insight_review +
-      sources.insight_mastery;
+      sources.recall_review +
+      sources.recall_mastery;
     xpByDay.push({ date: dateStr, xp, sources });
     cursor.setDate(cursor.getDate() + 1);
   }
@@ -738,12 +739,12 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
     }
   }
 
-  // Time, lessons, quizzes, insights — parallel queries.
-  // Insight counts: one aggregation with conditional $sum for both weeks,
+  // Time, lessons, quizzes, recall cards — parallel queries.
+  // Recall counts: one aggregation with conditional $sum for both weeks,
   // pre-filtered to docs that have any event in the last ~14 days. Without
   // the pre-match, MongoDB would unwind every history event the user has
   // ever accumulated — on every Profile stats load.
-  const insightReviewCountsP = UserInsightProgressModel.aggregate<{
+  const recallReviewCountsP = UserRecallProgressModel.aggregate<{
     _id: null;
     thisWeek: number;
     lastWeek: number;
@@ -780,7 +781,7 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
     thisWeekTime, lastWeekTime,
     lessonsThisWeek, lessonsLastWeek,
     quizzesThisWeek, quizzesLastWeek,
-    insightReviewCounts,
+    recallReviewCounts,
   ] = await Promise.all([
     UserLessonProgressModel.aggregate([
       { $match: { userId: userObjId, lastAccessedAt: { $gte: startOfWeek } } },
@@ -808,20 +809,20 @@ export const getGamificationStats = async (userId: string): Promise<Gamification
       userId: userObjId,
       'attempts.completedAt': { $gte: startOfLastWeek, $lt: startOfWeek },
     }),
-    insightReviewCountsP,
+    recallReviewCountsP,
   ]);
 
-  const insightsThisWeek = insightReviewCounts[0]?.thisWeek ?? 0;
-  const insightsLastWeek = insightReviewCounts[0]?.lastWeek ?? 0;
+  const recallReviewsThisWeek = recallReviewCounts[0]?.thisWeek ?? 0;
+  const recallReviewsLastWeek = recallReviewCounts[0]?.lastWeek ?? 0;
 
   const weeklySummary = {
     thisWeek: {
       xp: thisWeekXp, timeSeconds: thisWeekTime, lessons: lessonsThisWeek,
-      quizzes: quizzesThisWeek, insights: insightsThisWeek,
+      quizzes: quizzesThisWeek, recallReviews: recallReviewsThisWeek,
     },
     lastWeek: {
       xp: lastWeekXp, timeSeconds: lastWeekTime, lessons: lessonsLastWeek,
-      quizzes: quizzesLastWeek, insights: insightsLastWeek,
+      quizzes: quizzesLastWeek, recallReviews: recallReviewsLastWeek,
     },
   };
 

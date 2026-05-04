@@ -5,6 +5,7 @@ import CourseModel from '@models/CourseModel';
 import { LessonProgressStatus } from '@lib/constants';
 import { bgError } from '@lib/bg';
 import * as gamificationService from '@services/gamificationService';
+import { resolveImageUrl } from '@services/s3Service';
 
 // ── Status transition guard ───────────────────────────────
 
@@ -180,6 +181,14 @@ interface ContinueLearningResult {
   lessonName: string;
   moduleIndex: number;
   lessonIndex: number;
+  /**
+   * Hero image URL for the resume-target lesson. Optional because lesson
+   * content may not yet be generated, or hero generation may have failed
+   * gracefully. The home Continue Learning hero uses this as a stylized
+   * atmospheric backdrop on top of the gradient — falls back to gradient
+   * when null.
+   */
+  lessonHeroImageUrl: string | null;
   courseProgress: { total: number; completed: number; percentage: number };
 }
 
@@ -201,16 +210,32 @@ export const getContinueLearning = async (params: {
   const lesson = mod?.lessons?.[latest.lessonIndex];
   if (!mod || !lesson) return null;
 
-  // Compute course progress
+  // Compute course progress + fetch the lesson hero in parallel. Hero lives
+  // on LessonContentModel, not on course.structure (which is metadata only).
+  const [completedCount, lessonContent] = await Promise.all([
+    UserLessonProgressModel.countDocuments({
+      userId: params.userId,
+      courseId: latest.courseId,
+      status: 'completed',
+    }),
+    LessonContentModel.findOne({
+      courseId: latest.courseId,
+      moduleIndex: latest.moduleIndex,
+      lessonIndex: latest.lessonIndex,
+    })
+      .select('heroImageUrl')
+      .lean(),
+  ]);
+
   const totalLessons = course.structure.modules.reduce(
     (sum, m) => sum + (m.lessons?.length ?? 0),
     0,
   );
-  const completedCount = await UserLessonProgressModel.countDocuments({
-    userId: params.userId,
-    courseId: latest.courseId,
-    status: 'completed',
-  });
+
+  // Hero is stored as an S3 key; the same `resolveImageUrl` used by the
+  // lesson-content controller turns that into a 7-day presigned URL.
+  // Legacy data: URIs pass through unchanged.
+  const lessonHeroImageUrl = await resolveImageUrl(lessonContent?.heroImageUrl ?? null);
 
   return {
     courseId: latest.courseId.toString(),
@@ -221,6 +246,7 @@ export const getContinueLearning = async (params: {
     lessonName: lesson.name,
     moduleIndex: latest.moduleIndex,
     lessonIndex: latest.lessonIndex,
+    lessonHeroImageUrl,
     courseProgress: {
       total: totalLessons,
       completed: completedCount,

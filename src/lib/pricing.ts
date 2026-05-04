@@ -214,7 +214,7 @@ export const priceTtsUsage = ({ sku, characters }: { sku: TtsSku; characters: nu
 // user-charged side of the ledger. Vendor cost (what we actually pay the
 // provider) is unchanged and continues to be recorded on `costMicroCents`;
 // the user is debited against `chargedMicroCents = vendor × factor` for these
-// services. Anthropic LLM cost — including the LLM-as-judge insight grader —
+// services. Anthropic LLM cost — including the LLM-as-judge recall card grader —
 // flows through 1:1.
 //
 // Markup is intentionally tier- and balance-source-agnostic: free, paid

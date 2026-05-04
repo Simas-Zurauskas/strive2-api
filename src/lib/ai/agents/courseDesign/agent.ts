@@ -2,6 +2,7 @@ import { AIMessage } from '@langchain/core/messages';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { chatLog } from '@lib/loggers';
+import { captureWarning } from '@lib/errorReporter';
 import { chat, saveMessages } from './nodes';
 import { StateAnnotation, State } from './state';
 import { TOOLS } from './tools';
@@ -42,10 +43,29 @@ const toolsWithStateUpdate: NodeFunction = async (state, config) => {
         chatLog.error(
           `design:tool batch done ms=${Date.now() - toolsStart} — modify_structure failed err=${parsed.error}`,
         );
-      } catch {
+        // The tool returned a structured failure. Track in Sentry so we can
+        // see the rate of "tool said no" vs "tool result was malformed".
+        captureWarning('design:modify_structure tool returned failure', {
+          tags: { agent: 'courseDesign', node: 'tools' },
+          extra: { error: String(parsed.error ?? 'unknown'), refinementCount: state.refinementCount },
+          fingerprint: ['courseDesign', 'modify_structure', 'tool-failure'],
+        });
+      } catch (parseErr) {
         chatLog.error(
           `design:tool batch done ms=${Date.now() - toolsStart} — modify_structure unparseable result`,
         );
+        // The tool result wasn't JSON. Silent in the original code; surface
+        // here because the user-facing UX (the design chat) silently rolls
+        // forward with the unchanged structure — the user will be confused
+        // why their refinement didn't apply.
+        captureWarning('design:modify_structure tool result unparseable', {
+          tags: { agent: 'courseDesign', node: 'tools' },
+          extra: {
+            reason: parseErr instanceof Error ? parseErr.message : String(parseErr),
+            contentPreview: String(msg.content ?? '').slice(0, 500),
+          },
+          fingerprint: ['courseDesign', 'modify_structure', 'unparseable'],
+        });
       }
     }
   }

@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import * as Sentry from '@sentry/node';
+import { captureError } from '@lib/errorReporter';
 import { STRIPE_WEBHOOK_SECRET } from '@conf/env';
 import { monetizationLog } from '@lib/loggers';
 import { constructWebhookEvent } from '@services/stripeService';
@@ -59,9 +59,14 @@ export const stripeWebhookController = async (req: Request, res: Response): Prom
     monetizationLog.error(
       `Webhook handler threw for ${event.type} (${event.id}) retryable=${isRetryable}: ${err instanceof Error ? err.message : String(err)}`,
     );
-    Sentry.captureException(err, {
-      tags: { area: 'stripe.webhook', eventType: event.type, retryable: String(isRetryable) },
+    captureError(err, {
+      tags: { area: 'stripe.webhook', event_type: event.type, retryable: String(isRetryable) },
       extra: { eventId: event.id },
+      // Collapse repeated transient failures of the same event type into a
+      // single Sentry issue. Stripe retries up to ~3 days on 5xx — without
+      // this, a 30-minute Mongo blip during checkouts produces dozens of
+      // identical issues.
+      fingerprint: ['stripe.webhook', event.type, isRetryable ? 'retryable' : 'deterministic'],
     });
 
     if (isRetryable) {

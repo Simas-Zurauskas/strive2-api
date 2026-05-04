@@ -5,8 +5,8 @@ import { Types } from 'mongoose';
 import { TAVILY_API_KEY } from '@conf/env';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
-import InsightModel from '@models/InsightModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
+import RecallCardModel from '@models/RecallCardModel';
 import { searchLessonContent } from '@services/lessonRagService';
 import { searchProductKb } from '@services/productKbRagService';
 import { readUrl } from '@lib/jinaReader';
@@ -57,9 +57,9 @@ export const webSearch = tool(
 //   - 'lesson' — progress on a specific lesson (status, quiz responses,
 //     exercises). Lesson mentor's default; course mentor uses it when
 //     the learner asks about a specific lesson.
-//   - 'module' — module quiz score + insights-due count for one module.
+//   - 'module' — module quiz score + recall cards-due count for one module.
 //   - 'course' — whole-course picture: per-module quiz scores grouped,
-//     total insights due (with module breakdown), lessons completed,
+//     total recall cards due (with module breakdown), lessons completed,
 //     days-since-last-activity. Primary scope for the course mentor.
 //
 // Module/lesson indices come from the tool input (LLM-controlled — it
@@ -136,15 +136,15 @@ export const getUserProgress = tool(
           .select('bestScore bestTier nextReviewAt attempts')
           .lean();
 
-        const insightIds = await InsightModel.distinct('_id', {
+        const recallCardIds = await RecallCardModel.distinct('_id', {
           courseId: new Types.ObjectId(courseId),
           moduleIndex,
         }) as Types.ObjectId[];
 
-        const insightsDue = insightIds.length > 0
-          ? await UserInsightProgressModel.countDocuments({
+        const recallDue = recallCardIds.length > 0
+          ? await UserRecallProgressModel.countDocuments({
               userId: new Types.ObjectId(userId),
-              insightId: { $in: insightIds },
+              recallCardId: { $in: recallCardIds },
               nextDue: { $lte: new Date() },
             })
           : 0;
@@ -161,7 +161,7 @@ export const getUserProgress = tool(
                   : false,
               }
             : null,
-          insightsDueInModule: insightsDue,
+          recallDueInModule: recallDue,
         });
       }
 
@@ -170,10 +170,10 @@ export const getUserProgress = tool(
         const courseObjectId = new Types.ObjectId(courseId);
 
         // Three parallel reads: lesson-progress aggregate, module-quiz
-        // progress, and insights metadata. We also need a count of due
-        // insights per-module — that's a follow-up read keyed off the
-        // insight ids.
-        const [lessonProgressAgg, moduleQuizzes, insightsByModule] = await Promise.all([
+        // progress, and recall card metadata. We also need a count of due
+        // recall cards per-module — that's a follow-up read keyed off the
+        // recall card ids.
+        const [lessonProgressAgg, moduleQuizzes, recallByModule] = await Promise.all([
           UserLessonProgressModel.aggregate<{
             _id: { moduleIndex: number; lessonIndex: number };
             status: string;
@@ -199,30 +199,30 @@ export const getUserProgress = tool(
           })
             .select('moduleIndex bestScore bestTier nextReviewAt attempts')
             .lean(),
-          InsightModel.aggregate<{ _id: number; insightIds: Types.ObjectId[] }>([
+          RecallCardModel.aggregate<{ _id: number; recallCardIds: Types.ObjectId[] }>([
             { $match: { courseId: courseObjectId } },
             {
               $group: {
                 _id: '$moduleIndex',
-                insightIds: { $push: '$_id' },
+                recallCardIds: { $push: '$_id' },
               },
             },
           ]),
         ]);
 
-        const insightsDuePerModule: { moduleIndex: number; due: number }[] = [];
-        let totalInsightsDue = 0;
-        for (const row of insightsByModule) {
-          const due = row.insightIds.length > 0
-            ? await UserInsightProgressModel.countDocuments({
+        const recallDuePerModule: { moduleIndex: number; due: number }[] = [];
+        let totalCardsDue = 0;
+        for (const row of recallByModule) {
+          const due = row.recallCardIds.length > 0
+            ? await UserRecallProgressModel.countDocuments({
                 userId: userObjectId,
-                insightId: { $in: row.insightIds },
+                recallCardId: { $in: row.recallCardIds },
                 nextDue: { $lte: new Date() },
               })
             : 0;
           if (due > 0) {
-            insightsDuePerModule.push({ moduleIndex: row._id, due });
-            totalInsightsDue += due;
+            recallDuePerModule.push({ moduleIndex: row._id, due });
+            totalCardsDue += due;
           }
         }
 
@@ -249,8 +249,8 @@ export const getUserProgress = tool(
             attemptCount: q.attempts.length,
             reviewDue: q.nextReviewAt ? q.nextReviewAt <= new Date() : false,
           })),
-          insightsDuePerModule,
-          totalInsightsDue,
+          recallDuePerModule,
+          totalCardsDue,
         });
       }
 
@@ -263,7 +263,7 @@ export const getUserProgress = tool(
   {
     name: 'get_user_progress',
     description:
-      "Fetch the learner's progress data. Use 'lesson' scope for one lesson's status/quiz responses (requires moduleIndex+lessonIndex), 'module' scope for one module's quiz score and insights-due count (requires moduleIndex), 'course' scope for the whole-course picture (per-module quiz scores grouped, total insights due, lessons completed, days since last activity).",
+      "Fetch the learner's progress data. Use 'lesson' scope for one lesson's status/quiz responses (requires moduleIndex+lessonIndex), 'module' scope for one module's quiz score and recall-due count (requires moduleIndex), 'course' scope for the whole-course picture (per-module quiz scores grouped, total recall cards due, lessons completed, days since last activity).",
     schema: z.object({
       scope: z
         .enum(['lesson', 'module', 'course'])
@@ -344,7 +344,7 @@ export const searchLessonContentTool = tool(
 //
 // Vector search over Strive's product help center. Use when the learner
 // asks a *meta* question — about Strive itself, billing, account,
-// teaching techniques, mastery measurement, the Insights queue, the
+// teaching techniques, mastery measurement, the Recall queue, the
 // streak, etc. — rather than a question about the course content. The
 // distinction matters: search_lesson_content is for "what does the
 // lesson say about X?", search_product_kb is for "how does Strive's

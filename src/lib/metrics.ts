@@ -54,29 +54,29 @@ export const bumpWithRetry = (label: string) => {
   withRetryTotal[label] = (withRetryTotal[label] ?? 0) + 1;
 };
 
-// ── Insight queue / fresh-pool diagnostics ─────────────────
+// ── Recall queue / fresh-pool diagnostics ─────────────────
 //
-// The GET /api/insight/queue endpoint sometimes returns 0 fresh despite the
+// The GET /api/recall/queue endpoint sometimes returns 0 fresh despite the
 // user having completed many lessons. These counters tag each invocation
 // with the reason the fresh pool came up empty (or `ok`) so production
 // traffic reveals which precondition is most often missing.
 //
 // The label-less style of this module means "counters with a reason label"
-// expand to one counter per reason. `insightQueueFreshReason` maps each
+// expand to one counter per reason. `recallQueueFreshReason` maps each
 // reason string to its running count; the renderer emits them under a
 // single metric name with a `reason=` label so Prometheus scrapers can
 // still break down the distribution.
 
-export type InsightQueueFreshReason =
-  | 'no_active_insights'
+export type RecallQueueFreshReason =
+  | 'no_active_recall_cards'
   | 'no_completed_lessons'
   | 'candidates_zero'
   | 'all_gated_by_lesson'
   | 'ok'
   | 'due_gated_fresh_skipped';
 
-const INSIGHT_QUEUE_FRESH_REASONS: InsightQueueFreshReason[] = [
-  'no_active_insights',
+const RECALL_QUEUE_FRESH_REASONS: RecallQueueFreshReason[] = [
+  'no_active_recall_cards',
   'no_completed_lessons',
   'candidates_zero',
   'all_gated_by_lesson',
@@ -84,8 +84,8 @@ const INSIGHT_QUEUE_FRESH_REASONS: InsightQueueFreshReason[] = [
   'due_gated_fresh_skipped',
 ];
 
-export const insightQueueFreshReason: Record<InsightQueueFreshReason, number> = {
-  no_active_insights: 0,
+export const recallQueueFreshReason: Record<RecallQueueFreshReason, number> = {
+  no_active_recall_cards: 0,
   no_completed_lessons: 0,
   candidates_zero: 0,
   all_gated_by_lesson: 0,
@@ -94,11 +94,11 @@ export const insightQueueFreshReason: Record<InsightQueueFreshReason, number> = 
 };
 
 /**
- * One increment per `getInsightQueue` invocation — tags the fresh-pool
+ * One increment per `getRecallQueue` invocation — tags the fresh-pool
  * decision-path so `/metrics` exposes "why fresh = 0" as a distribution.
  */
-export const bumpInsightQueueFreshReason = (reason: InsightQueueFreshReason) => {
-  insightQueueFreshReason[reason] += 1;
+export const bumpRecallQueueFreshReason = (reason: RecallQueueFreshReason) => {
+  recallQueueFreshReason[reason] += 1;
 };
 
 // Running sums of the four raw counts observed on each fresh-pool decision.
@@ -108,23 +108,23 @@ export const bumpInsightQueueFreshReason = (reason: InsightQueueFreshReason) => 
 // shipping a full histogram. Gauges would only reflect the last scraped
 // request and drop everything in between.
 
-export let insightQueueFreshActiveInsightCountSum = 0;
-export let insightQueueFreshCompletedLessonCountSum = 0;
-export let insightQueueFreshCandidateCountSum = 0;
-export let insightQueueFreshOutCountSum = 0;
-export let insightQueueFreshObservations = 0;
+export let recallQueueFreshActiveCardCountSum = 0;
+export let recallQueueFreshCompletedLessonCountSum = 0;
+export let recallQueueFreshCandidateCountSum = 0;
+export let recallQueueFreshOutCountSum = 0;
+export let recallQueueFreshObservations = 0;
 
-export const recordInsightQueueFreshCounts = (counts: {
-  activeInsightCount: number;
+export const recordRecallQueueFreshCounts = (counts: {
+  activeCardCount: number;
   completedLessonCount: number;
   candidateCount: number;
   freshOutCount: number;
 }) => {
-  insightQueueFreshActiveInsightCountSum += counts.activeInsightCount;
-  insightQueueFreshCompletedLessonCountSum += counts.completedLessonCount;
-  insightQueueFreshCandidateCountSum += counts.candidateCount;
-  insightQueueFreshOutCountSum += counts.freshOutCount;
-  insightQueueFreshObservations += 1;
+  recallQueueFreshActiveCardCountSum += counts.activeCardCount;
+  recallQueueFreshCompletedLessonCountSum += counts.completedLessonCount;
+  recallQueueFreshCandidateCountSum += counts.candidateCount;
+  recallQueueFreshOutCountSum += counts.freshOutCount;
+  recallQueueFreshObservations += 1;
 };
 
 // ── Lesson generation outcome + duration ────────────────────
@@ -436,7 +436,7 @@ export const bumpDepthUndercommitAcknowledged = () => {
 // ── LLM cache + token usage (per-label) ─────────────────────
 // Every Claude model in `lib/langchain.ts` is configured with ephemeral
 // prompt caching, but until now we had no aggregate visibility into hit
-// rates. These per-label maps mirror the `insightQueueFreshReason` pattern:
+// rates. These per-label maps mirror the `recallQueueFreshReason` pattern:
 // one logical metric, broken down by a `label` (e.g. `lesson:content`,
 // `quiz:generate`) so dashboards can pivot per-call-site without breaking
 // the zero-dep stance.
@@ -567,45 +567,45 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
   metric('process_heap_total_bytes', 'process.memoryUsage().heapTotal', 'gauge', mem.heapTotal);
   metric('process_uptime_seconds', 'process.uptime() since boot', 'gauge', uptime);
 
-  // ── Insight queue fresh-pool decision distribution ────────
+  // ── Recall queue fresh-pool decision distribution ────────
   // One counter per reason, exposed under a shared name with a `reason`
   // label so dashboards can pivot by decision path without breaking the
   // zero-dep stance.
-  lines.push('# HELP insight_queue_fresh_reason_total GET /insight/queue fresh-pool decision-path counts');
-  lines.push('# TYPE insight_queue_fresh_reason_total counter');
-  for (const reason of INSIGHT_QUEUE_FRESH_REASONS) {
-    lines.push(`insight_queue_fresh_reason_total{reason="${reason}"} ${insightQueueFreshReason[reason]}`);
+  lines.push('# HELP recall_queue_fresh_reason_total GET /recall/queue fresh-pool decision-path counts');
+  lines.push('# TYPE recall_queue_fresh_reason_total counter');
+  for (const reason of RECALL_QUEUE_FRESH_REASONS) {
+    lines.push(`recall_queue_fresh_reason_total{reason="${reason}"} ${recallQueueFreshReason[reason]}`);
   }
 
   metric(
-    'insight_queue_fresh_observations_total',
-    'Total GET /insight/queue invocations that produced a fresh-pool observation',
+    'recall_queue_fresh_observations_total',
+    'Total GET /recall/queue invocations that produced a fresh-pool observation',
     'counter',
-    insightQueueFreshObservations,
+    recallQueueFreshObservations,
   );
   metric(
-    'insight_queue_fresh_active_insight_count_sum',
-    'Running sum of `activeInsightIds.length` observed per queue request (divide by observations_total for avg)',
+    'recall_queue_fresh_active_card_count_sum',
+    'Running sum of `activeCardIds.length` observed per queue request (divide by observations_total for avg)',
     'counter',
-    insightQueueFreshActiveInsightCountSum,
+    recallQueueFreshActiveCardCountSum,
   );
   metric(
-    'insight_queue_fresh_completed_lesson_count_sum',
+    'recall_queue_fresh_completed_lesson_count_sum',
     'Running sum of `completedLessonKeys.size` observed per queue request',
     'counter',
-    insightQueueFreshCompletedLessonCountSum,
+    recallQueueFreshCompletedLessonCountSum,
   );
   metric(
-    'insight_queue_fresh_candidate_count_sum',
+    'recall_queue_fresh_candidate_count_sum',
     'Running sum of fresh-candidate rows returned per queue request (pre gating)',
     'counter',
-    insightQueueFreshCandidateCountSum,
+    recallQueueFreshCandidateCountSum,
   );
   metric(
-    'insight_queue_fresh_out_count_sum',
+    'recall_queue_fresh_out_count_sum',
     'Running sum of fresh items actually surfaced per queue request',
     'counter',
-    insightQueueFreshOutCountSum,
+    recallQueueFreshOutCountSum,
   );
 
   // ── Lesson generation outcome + duration ─────────────────

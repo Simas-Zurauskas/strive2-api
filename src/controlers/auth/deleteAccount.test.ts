@@ -1,6 +1,6 @@
 /**
  * Tests for deleteAccountController. The cascade is wide:
- *   - Per-course content (lessons, quizzes, chats, insights, S3) via cleanupCourseContent
+ *   - Per-course content (lessons, quizzes, chats, recall cards, S3) via cleanupCourseContent
  *   - Cross-user favorite cleanup (other users referencing this user's courses)
  *   - Stripe subscription cancellation
  *   - Abuse log row written (with lifetime credit aggregation)

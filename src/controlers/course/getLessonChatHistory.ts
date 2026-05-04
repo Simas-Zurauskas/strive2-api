@@ -13,7 +13,7 @@ const MAX_PROMPTS = 4;
  * Two ingredients only:
  *   1. ONE contextual prompt — fires only when chat is the *right*
  *      surface for the learner's current state. We deliberately do NOT
- *      fire one for "insights due" (the Insights queue is the right
+ *      fire one for "recall cards due" (the Recall queue is the right
  *      surface) or "lesson completed" (the Module Quiz is the right
  *      surface) — those would just route the learner into chat to do
  *      something a dedicated surface already does better. Low quiz
@@ -45,7 +45,7 @@ const computeSuggestedPrompts = ({
   if (!lessonGenerated) return [];
 
   // Single contextual prompt, only when chat is genuinely the right
-  // surface (vs Insights / Module Quiz, which already cover their own
+  // surface (vs Recall / Module Quiz, which already cover their own
   // jobs).
   const contextualPrompt =
     quizBestScore !== null && quizBestScore < 70

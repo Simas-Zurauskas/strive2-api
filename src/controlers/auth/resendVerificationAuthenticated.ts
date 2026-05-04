@@ -4,6 +4,13 @@ import { AppError } from '@middleware/errorMiddleware';
 import { sendVerificationEmailAsync } from '@services/emailService';
 import asyncHandler from 'express-async-handler';
 
+// Minimum spacing between sends per user. The unauthenticated counterpart
+// is gated by `emailDeliveryPerEmail` (3 / 15min) at the route layer, but
+// the authenticated route was previously only IP-bucketed — a single
+// signed-in user could mash the button and burn Mailjet quota plus spam
+// their own inbox. 60s mirrors the security-action service spacing.
+const RESEND_MIN_INTERVAL_MS = 60 * 1000;
+
 /**
  * @swagger
  * /api/auth/resend-verification-authenticated:
@@ -50,6 +57,27 @@ export const resendVerificationAuthenticatedController = asyncHandler(async (req
   if (user.emailVerified) {
     res.status(400);
     throw new AppError('Email is already verified', { errorCode: 'EMAIL_ALREADY_VERIFIED' });
+  }
+
+  // Server-side cooldown. We don't carry a dedicated timestamp; the
+  // existing `emailVerificationExpiry` field is rewritten on every send
+  // to `now + VERIFICATION_TOKEN_EXPIRY_MS`, so `expiry - now` measures
+  // time-since-last-send. A value under 60s means the last send was
+  // within the cooldown window. Returns retry-after seconds in `meta`
+  // so the client can mirror the wait visually.
+  if (user.emailVerificationExpiry) {
+    const msSinceLastSend = VERIFICATION_TOKEN_EXPIRY_MS - (user.emailVerificationExpiry.getTime() - Date.now());
+    if (msSinceLastSend >= 0 && msSinceLastSend < RESEND_MIN_INTERVAL_MS) {
+      const retryAfterSeconds = Math.ceil((RESEND_MIN_INTERVAL_MS - msSinceLastSend) / 1000);
+      throw new AppError(
+        `Please wait ${retryAfterSeconds}s before requesting another verification email.`,
+        {
+          errorCode: 'VERIFICATION_RESEND_TOO_SOON',
+          statusCode: 429,
+          meta: { retryAfterSeconds },
+        },
+      );
+    }
   }
 
   const { plainToken, hashedToken } = generateVerificationToken();

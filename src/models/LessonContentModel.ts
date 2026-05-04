@@ -28,6 +28,15 @@ export interface ILessonContent {
   audioRate: number | null;
   audioContentHash: string | null;
   audioGeneratedAt: Date | null;
+  /**
+   * Timestamp of the last billed TTS synthesis for this lesson — set only
+   * on cache miss in `runLessonNarration`, NOT on cache hits. Drives the
+   * per-lesson TTS cooldown gate that prevents accidental double-spend
+   * (rapid clicks, voice toggling). Distinct from `audioGeneratedAt`,
+   * which updates on every narration request (hit or miss) to surface
+   * the latest playback metadata.
+   */
+  lastTtsSpendAt: Date | null;
   summary: string | null;
   completed: boolean;
   /**
@@ -80,6 +89,7 @@ const schema = new Schema<ILessonContent>(
     audioRate: { type: Number, default: null },
     audioContentHash: { type: String, default: null },
     audioGeneratedAt: { type: Date, default: null },
+    lastTtsSpendAt: { type: Date, default: null },
     summary: { type: String, default: null },
     completed: { type: Boolean, default: false },
     suggestedMentorPrompts: {
@@ -93,6 +103,14 @@ const schema = new Schema<ILessonContent>(
     toJSON: {
       transform(_doc, ret: Record<string, unknown>) {
         delete ret.__v;
+        // Server-only: drives the per-lesson TTS cooldown gate; never read
+        // by the client.
+        delete ret.lastTtsSpendAt;
+        // Server-only: read by getLessonChatHistory to seed the mentor-chat
+        // empty state and (for `completed`) the question-generation flow.
+        // Neither field is consumed by the public LessonContent response.
+        delete ret.completed;
+        delete ret.suggestedMentorPrompts;
         return ret;
       },
     },

@@ -1,25 +1,25 @@
 /**
  * Tests for the Leitner v0 scheduler:
  *   - applyRating: pure function — all 4 rating semantics + clamps
- *   - rateInsight: persistence + mastery race detection (justMastered)
- *   - skipInsight, setInsightMode: simple persistence
+ *   - rateRecall: persistence + mastery race detection (justMastered)
+ *   - skipRecall, setRecallMode: simple persistence
  *
- * Run: yarn test insightScheduler
+ * Run: yarn test recallScheduler
  */
 
 import assert from 'node:assert/strict';
 import { describe, test, expect } from 'vitest';
 import mongoose from 'mongoose';
 import { setupTestDb } from '../../test-helpers/db';
-import { makeUser, makeCourse, makeLessonContent, makeInsight, makeInsightProgress, UserInsightProgressModel } from '../../test-helpers/factories';
-import { LEITNER_BOX_INTERVAL_DAYS, LEITNER_MAX_BOX } from '@lib/insightConstants';
+import { makeUser, makeCourse, makeLessonContent, makeRecallCard, makeRecallProgress, UserRecallProgressModel } from '../../test-helpers/factories';
+import { LEITNER_BOX_INTERVAL_DAYS, LEITNER_MAX_BOX } from '@lib/recallConstants';
 import {
   applyRating,
-  rateInsight,
-  skipInsight,
-  setInsightMode,
+  rateRecall,
+  skipRecall,
+  setRecallMode,
   type SchedulerSnapshot,
-} from '@services/insightSchedulerService';
+} from '@services/recallSchedulerService';
 
 setupTestDb();
 
@@ -92,63 +92,63 @@ describe('applyRating — Leitner box transitions', () => {
   });
 });
 
-// ── rateInsight (persists + mastery race) ──────────────
+// ── rateRecall (persists + mastery race) ──────────────
 
-describe('rateInsight', () => {
+describe('rateRecall', () => {
   const setupCard = async () => {
     const user = await makeUser();
     const course = await makeCourse({ userId: user._id });
     const lesson = await makeLessonContent({ courseId: course._id });
-    const insight = await makeInsight({ courseId: course._id, lessonId: lesson._id });
-    return { userId: user._id.toString(), insightId: insight._id.toString() };
+    const card = await makeRecallCard({ courseId: course._id, lessonId: lesson._id });
+    return { userId: user._id.toString(), recallCardId: card._id.toString() };
   };
 
   test('first rating creates a progress row, wasNew=true, justMastered=false', async () => {
-    const { userId, insightId } = await setupCard();
-    const result = await rateInsight({ userId, insightId, rating: 3 });
+    const { userId, recallCardId } = await setupCard();
+    const result = await rateRecall({ userId, recallCardId, rating: 3 });
     expect(result.wasNew).toBe(true);
     expect(result.justMastered).toBe(false);
     expect(result.progress.box).toBe(1); // 0 → 0+1 = 1 with rating 3
     expect(result.progress.reps).toBe(1);
 
-    const stored = await UserInsightProgressModel.countDocuments({ userId, insightId });
+    const stored = await UserRecallProgressModel.countDocuments({ userId, recallCardId });
     expect(stored).toBe(1);
   });
 
   test('second rating updates the same row (no duplicate), wasNew=false', async () => {
-    const { userId, insightId } = await setupCard();
-    await rateInsight({ userId, insightId, rating: 3 });
-    const result = await rateInsight({ userId, insightId, rating: 3 });
+    const { userId, recallCardId } = await setupCard();
+    await rateRecall({ userId, recallCardId, rating: 3 });
+    const result = await rateRecall({ userId, recallCardId, rating: 3 });
     expect(result.wasNew).toBe(false);
     expect(result.progress.box).toBe(2);
 
-    const count = await UserInsightProgressModel.countDocuments({ userId, insightId });
+    const count = await UserRecallProgressModel.countDocuments({ userId, recallCardId });
     expect(count).toBe(1);
   });
 
   test('justMastered fires exactly once on first transition to MAX_BOX', async () => {
-    const { userId, insightId } = await setupCard();
+    const { userId, recallCardId } = await setupCard();
     // 0 → 2 → 4 with two Easy ratings
-    const r1 = await rateInsight({ userId, insightId, rating: 4 });
+    const r1 = await rateRecall({ userId, recallCardId, rating: 4 });
     expect(r1.progress.box).toBe(2);
     expect(r1.justMastered).toBe(false);
 
-    const r2 = await rateInsight({ userId, insightId, rating: 4 });
+    const r2 = await rateRecall({ userId, recallCardId, rating: 4 });
     expect(r2.progress.box).toBe(LEITNER_MAX_BOX);
     expect(r2.justMastered).toBe(true);
     expect(r2.progress.masteredAt).toBeInstanceOf(Date);
   });
 
   test('justMastered does NOT re-fire on re-mastery after regression', async () => {
-    const { userId, insightId } = await setupCard();
-    await rateInsight({ userId, insightId, rating: 4 }); // 0→2
-    await rateInsight({ userId, insightId, rating: 4 }); // 2→4 (mastered)
-    await rateInsight({ userId, insightId, rating: 1 }); // 4→0 (Again, lapse)
-    const r4 = await rateInsight({ userId, insightId, rating: 4 }); // 0→2
+    const { userId, recallCardId } = await setupCard();
+    await rateRecall({ userId, recallCardId, rating: 4 }); // 0→2
+    await rateRecall({ userId, recallCardId, rating: 4 }); // 2→4 (mastered)
+    await rateRecall({ userId, recallCardId, rating: 1 }); // 4→0 (Again, lapse)
+    const r4 = await rateRecall({ userId, recallCardId, rating: 4 }); // 0→2
     expect(r4.progress.box).toBe(2);
     expect(r4.justMastered).toBe(false);
 
-    const r5 = await rateInsight({ userId, insightId, rating: 4 }); // 2→4
+    const r5 = await rateRecall({ userId, recallCardId, rating: 4 }); // 2→4
     expect(r5.progress.box).toBe(LEITNER_MAX_BOX);
     // Already mastered once — masteredAt was set on the first MAX transition
     // and is NEVER cleared, even after lapses. justMastered is the
@@ -157,19 +157,19 @@ describe('rateInsight', () => {
   });
 
   test('justMastered race: only one of two concurrent calls observes true', async () => {
-    const { userId, insightId } = await setupCard();
+    const { userId, recallCardId } = await setupCard();
     // Pre-position at box=3 so the next rating (3) lands at 4
-    await makeInsightProgress({
+    await makeRecallProgress({
       userId,
-      insightId,
+      recallCardId,
       box: 3,
       nextDue: new Date(),
       mode: 'tap-reveal',
     });
 
     const [a, b] = await Promise.all([
-      rateInsight({ userId, insightId, rating: 3 }),
-      rateInsight({ userId, insightId, rating: 3 }),
+      rateRecall({ userId, recallCardId, rating: 3 }),
+      rateRecall({ userId, recallCardId, rating: 3 }),
     ]);
 
     const masteredCount = [a, b].filter((r) => r.justMastered).length;
@@ -177,52 +177,52 @@ describe('rateInsight', () => {
   });
 
   test('lapses counter accumulates across multiple Again ratings', async () => {
-    const { userId, insightId } = await setupCard();
-    await rateInsight({ userId, insightId, rating: 1 });
-    await rateInsight({ userId, insightId, rating: 1 });
-    const r3 = await rateInsight({ userId, insightId, rating: 1 });
+    const { userId, recallCardId } = await setupCard();
+    await rateRecall({ userId, recallCardId, rating: 1 });
+    await rateRecall({ userId, recallCardId, rating: 1 });
+    const r3 = await rateRecall({ userId, recallCardId, rating: 1 });
     expect(r3.progress.lapses).toBe(3);
   });
 });
 
-// ── skipInsight ─────────────────────────────────────────
+// ── skipRecall ─────────────────────────────────────────
 
-describe('skipInsight', () => {
-  test('defers nextDue by INSIGHT_SKIP_DAYS, no box change', async () => {
+describe('skipRecall', () => {
+  test('defers nextDue by RECALL_SKIP_DAYS, no box change', async () => {
     const user = await makeUser();
     const course = await makeCourse({ userId: user._id });
     const lesson = await makeLessonContent({ courseId: course._id });
-    const insight = await makeInsight({ courseId: course._id, lessonId: lesson._id });
+    const card = await makeRecallCard({ courseId: course._id, lessonId: lesson._id });
 
-    await makeInsightProgress({
+    await makeRecallProgress({
       userId: user._id,
-      insightId: insight._id,
+      recallCardId: card._id,
       box: 2,
       nextDue: new Date(),
     });
-    const before = await UserInsightProgressModel.findOne({ userId: user._id, insightId: insight._id }).lean();
+    const before = await UserRecallProgressModel.findOne({ userId: user._id, recallCardId: card._id }).lean();
 
-    const after = await skipInsight({
+    const after = await skipRecall({
       userId: user._id.toString(),
-      insightId: insight._id.toString(),
+      recallCardId: card._id.toString(),
     });
     expect(after.box).toBe(2); // unchanged
     expect(after.nextDue.getTime()).toBeGreaterThan(before!.nextDue.getTime());
   });
 });
 
-// ── setInsightMode ──────────────────────────────────────
+// ── setRecallMode ──────────────────────────────────────
 
-describe('setInsightMode', () => {
+describe('setRecallMode', () => {
   test('persists tap-reveal vs typed-recall preference', async () => {
     const user = await makeUser();
     const course = await makeCourse({ userId: user._id });
     const lesson = await makeLessonContent({ courseId: course._id });
-    const insight = await makeInsight({ courseId: course._id, lessonId: lesson._id });
+    const card = await makeRecallCard({ courseId: course._id, lessonId: lesson._id });
 
-    const after = await setInsightMode({
+    const after = await setRecallMode({
       userId: user._id.toString(),
-      insightId: insight._id.toString(),
+      recallCardId: card._id.toString(),
       mode: 'typed-recall',
     });
     expect(after.mode).toBe('typed-recall');

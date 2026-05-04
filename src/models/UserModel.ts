@@ -82,6 +82,15 @@ export interface IUser extends UserInput {
   passwordResetToken?: string;
   passwordResetExpiry?: Date;
   tokenVersion: number;
+  /**
+   * Hand-flipped admin flag. There is no in-app UI to toggle this — it
+   * exists for ops to grant themselves access to engineer-only surfaces
+   * (BillingTab → engineer view, the dev "Reset quiz" button, the
+   * usage-events delete endpoint, etc.). Default false; only the `_id`s
+   * we explicitly set in the DB get true. The `requireAdmin` middleware
+   * gates server routes; client UI mirrors the same flag for visibility.
+   */
+  isAdmin: boolean;
   favoriteCourseIds: mongoose.Types.ObjectId[];
   subscription: IUserSubscription;
   credits: IUserCredits;
@@ -116,6 +125,9 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
     passwordResetToken: { type: String, select: false },
     passwordResetExpiry: { type: Date, select: false },
     tokenVersion: { type: Number, default: 0 },
+    // Default false; flipped by ops directly in the DB. No code path
+    // sets this to true.
+    isAdmin: { type: Boolean, default: false },
     favoriteCourseIds: {
       type: [{ type: Schema.Types.ObjectId, ref: 'Course' }],
       default: [],

@@ -1,23 +1,23 @@
 import asyncHandler from 'express-async-handler';
-import { rateInsight } from '@services/insightSchedulerService';
+import { rateRecall } from '@services/recallSchedulerService';
 import * as gamificationService from '@services/gamificationService';
-import { InsightRating } from '@lib/insightConstants';
+import { RecallRating } from '@lib/recallConstants';
 import { bgError } from '@lib/bg';
-import { loadAuthorizedInsight } from './authorize';
-import { parseInsightIdParam, rateInsightSchema } from './validation';
+import { loadAuthorizedRecallCard } from './authorize';
+import { parseRecallCardIdParam, rateRecallSchema } from './validation';
 
 /**
  * @swagger
- * /api/insight/{insightId}/rate:
+ * /api/recall/{recallCardId}/rate:
  *   post:
- *     summary: Submit a rating for an insight and advance its scheduler state
+ *     summary: Submit a rating for a recall card and advance its scheduler state
  *     tags:
- *       - Insight
+ *       - Recall
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: insightId
+ *         name: recallCardId
  *         required: true
  *         schema:
  *           type: string
@@ -30,7 +30,7 @@ import { parseInsightIdParam, rateInsightSchema } from './validation';
  *             required: [rating]
  *             properties:
  *               rating:
- *                 $ref: '#/components/schemas/InsightRating'
+ *                 $ref: '#/components/schemas/RecallRating'
  *               typedMatch:
  *                 type: number
  *                 minimum: 0
@@ -46,32 +46,32 @@ import { parseInsightIdParam, rateInsightSchema } from './validation';
  *               required: [data]
  *               properties:
  *                 data:
- *                   $ref: '#/components/schemas/RateInsightResult'
+ *                   $ref: '#/components/schemas/RateRecallResult'
  */
-export const rateInsightController = asyncHandler(async (req, res) => {
+export const rateRecallController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const insightId = parseInsightIdParam(req.params.insightId);
-  const { rating, typedMatch } = rateInsightSchema.parse(req.body);
+  const recallCardId = parseRecallCardIdParam(req.params.recallCardId);
+  const { rating, typedMatch } = rateRecallSchema.parse(req.body);
 
-  // Verifies the insight exists AND belongs to a course owned by this user.
-  // Without this check a user could rate anyone's insight by guessing the id.
-  // Returns the full insight so we can grab courseId for gamification below
+  // Verifies the recall card exists AND belongs to a course owned by this user.
+  // Without this check a user could rate anyone's recall card by guessing the id.
+  // Returns the full recall card so we can grab courseId for gamification below
   // without an extra query.
-  const insight = await loadAuthorizedInsight({ userId, insightId });
+  const card = await loadAuthorizedRecallCard({ userId, recallCardId });
 
-  const { progress, justMastered } = await rateInsight({
+  const { progress, justMastered } = await rateRecall({
     userId,
-    insightId,
-    rating: rating as InsightRating,
+    recallCardId,
+    rating: rating as RecallRating,
     typedMatch: typedMatch ?? null,
   });
 
-  const courseId = insight.courseId.toString();
+  const courseId = card.courseId.toString();
   // Fire-and-forget gamification side effects (XP + streak + achievements).
   // Never fail the rating response on a gamification error.
-  gamificationService.onInsightReview({ userId, insightId, courseId }).catch(bgError('gamification.onInsightReview'));
+  gamificationService.onRecallReview({ userId, recallCardId, courseId }).catch(bgError('gamification.onRecallReview'));
   if (justMastered) {
-    gamificationService.onInsightMastered({ userId, insightId, courseId }).catch(bgError('gamification.onInsightMastered'));
+    gamificationService.onRecallMastered({ userId, recallCardId, courseId }).catch(bgError('gamification.onRecallMastered'));
   }
 
   res.status(200).json({

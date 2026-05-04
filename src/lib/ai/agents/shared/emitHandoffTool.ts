@@ -29,7 +29,7 @@ import { z } from 'zod';
  *     rejected when out of range. Does NOT require the lesson to be
  *     generated — opening an ungenerated lesson is a valid action and
  *     the lesson screen handles that state itself.
- *   - 'insights' — the global insights review queue. No params.
+ *   - 'recall' — the global recall practice queue. No params.
  */
 
 export interface ModuleHandoffInfo {
@@ -49,7 +49,7 @@ export interface HandoffValidationContext {
   modules: ModuleHandoffInfo[];
 }
 
-const HANDOFF_TARGETS = ['quiz', 'insights', 'lesson'] as const;
+const HANDOFF_TARGETS = ['quiz', 'recall', 'lesson'] as const;
 type HandoffTarget = (typeof HANDOFF_TARGETS)[number];
 
 interface HandoffSuccess {
@@ -96,11 +96,11 @@ export const validateHandoff = (
   input: { target: HandoffTarget; moduleIndex?: number; lessonIndex?: number; label: string },
   ctx: HandoffValidationContext | undefined,
 ): HandoffSuccess | HandoffFailure => {
-  if (input.target === 'insights') {
+  if (input.target === 'recall') {
     return {
       ok: true,
-      target: 'insights',
-      label: trimLabel(input.label, 'Open insights'),
+      target: 'recall',
+      label: trimLabel(input.label, 'Open recall'),
     };
   }
 
@@ -184,11 +184,11 @@ export const emitHandoffTool = tool(
   {
     name: 'emit_handoff',
     description:
-      'Render an inline navigation button under your reply that takes the learner to a quiz, the insights queue, or a specific lesson. Use this whenever you would otherwise tell them to "open lesson X", "take the module quiz", or "go review your insights" — the button speaks for itself, so do not narrate the tool call. One handoff per recommendation; up to two handoffs per turn.',
+      'Render an inline navigation button under your reply that takes the learner to a quiz, the recall queue, or a specific lesson. Use this whenever you would otherwise tell them to "open lesson X", "take the module quiz", or "review your recall cards" — the button speaks for itself, so do not narrate the tool call. One handoff per recommendation; up to two handoffs per turn.',
     schema: z.object({
       target: z
         .enum(HANDOFF_TARGETS)
-        .describe("Where the button takes the learner: 'quiz' (module quiz), 'insights' (global review queue), or 'lesson' (a specific lesson)."),
+        .describe("Where the button takes the learner: 'quiz' (module quiz), 'recall' (global recall practice queue), or 'lesson' (a specific lesson)."),
       moduleIndex: z
         .number()
         .optional()
@@ -199,7 +199,7 @@ export const emitHandoffTool = tool(
         .describe("Required for target='lesson'. Zero-indexed."),
       label: z
         .string()
-        .describe('Button label, max ~5 words (e.g. "Take the module quiz", "Open lesson 4", "Go to insights").'),
+        .describe('Button label, max ~5 words (e.g. "Take the module quiz", "Open lesson 4", "Go to recall").'),
     }),
   },
 );
@@ -213,15 +213,15 @@ export const emitHandoffTool = tool(
 export const EMIT_HANDOFF_ANTHROPIC_TOOL: Anthropic.Messages.Tool = {
   name: 'emit_handoff',
   description:
-    'Render an inline navigation button under your reply that takes the learner to a quiz, the insights queue, or a specific lesson. Use this whenever you would otherwise tell them to "open lesson X", "take the module quiz", or "go review your insights" — the button speaks for itself, so do not narrate the tool call. One handoff per recommendation; up to two handoffs per turn.',
+    'Render an inline navigation button under your reply that takes the learner to a quiz, the recall queue, or a specific lesson. Use this whenever you would otherwise tell them to "open lesson X", "take the module quiz", or "review your recall cards" — the button speaks for itself, so do not narrate the tool call. One handoff per recommendation; up to two handoffs per turn.',
   input_schema: {
     type: 'object' as const,
     properties: {
       target: {
         type: 'string',
-        enum: ['quiz', 'insights', 'lesson'],
+        enum: ['quiz', 'recall', 'lesson'],
         description:
-          "Where the button takes the learner: 'quiz' (module quiz), 'insights' (global review queue), or 'lesson' (a specific lesson).",
+          "Where the button takes the learner: 'quiz' (module quiz), 'recall' (global recall practice queue), or 'lesson' (a specific lesson).",
       },
       moduleIndex: {
         type: 'number',
@@ -234,7 +234,7 @@ export const EMIT_HANDOFF_ANTHROPIC_TOOL: Anthropic.Messages.Tool = {
       label: {
         type: 'string',
         description:
-          'Button label, max ~5 words (e.g. "Take the module quiz", "Open lesson 4", "Go to insights").',
+          'Button label, max ~5 words (e.g. "Take the module quiz", "Open lesson 4", "Go to recall").',
       },
     },
     required: ['target', 'label'],

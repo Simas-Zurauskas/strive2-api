@@ -4,32 +4,32 @@ import { z } from 'zod';
 import { getUtilityModel } from '@lib/langchain';
 import { withRetry } from '@lib/retry';
 import { jsonish } from '@lib/zodHelpers';
-import { INSIGHT_KINDS, INSIGHT_MAX_PER_LESSON, INSIGHT_MIN_PER_LESSON } from '@lib/insightConstants';
-import { GeneratedInsight } from '@services/insightContentService';
+import { RECALL_CARD_KINDS, RECALL_CARDS_MAX_PER_LESSON, RECALL_CARDS_MIN_PER_LESSON } from '@lib/recallConstants';
+import { GeneratedRecallCard } from '@services/recallContentService';
 import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { genLog } from '@lib/loggers';
 import { LessonState } from '../state';
-import { validateInsightCandidate } from './insightGuardrails';
+import { validateRecallCardCandidate } from './recallCardGuardrails';
 
 // ── Schema & prompt ────────────────────────────────────
 
-const insightCandidateSchema = z.object({
-  sourceBlockId: z.string().describe("The id of the block this insight is derived from (e.g. 'section-1')"),
-  kind: z.enum(INSIGHT_KINDS).describe("'qa' for a question+answer card, 'cloze' for a sentence with one {{blank}}"),
+const recallCardCandidateSchema = z.object({
+  sourceBlockId: z.string().describe("The id of the block this recall card is derived from (e.g. 'section-1')"),
+  kind: z.enum(RECALL_CARD_KINDS).describe("'qa' for a question+answer card, 'cloze' for a sentence with one {{blank}}"),
   prompt: z.string().min(5).describe('For qa: the question text (target ≤ 400 chars). For cloze: the sentence with exactly one {{blank}} placeholder.'),
   answer: z.string().min(1).describe('For qa: a terse answer (5-15 words ideal, target ≤ 200 chars). For cloze: the word or short phrase that fills the blank.'),
   conceptTags: z.array(z.string()).optional().default([]).describe('1-4 short lowercase tags representing the concepts covered (e.g. ["spaced-repetition", "memory"]). REQUIRED on every card — omit only if no meaningful tag applies.'),
 });
 
-const insightsOutputSchema = z.object({
-  insights: jsonish(z.array(insightCandidateSchema).min(0)),
+const recallCardsOutputSchema = z.object({
+  recallCards: jsonish(z.array(recallCardCandidateSchema).min(0)),
 });
 
-const INSIGHT_SYSTEM_PROMPT = `You extract atomic retrieval-ready "insight cards" from a lesson a learner has just read.
+const RECALL_CARD_SYSTEM_PROMPT = `You extract atomic retrieval-ready "recall cards" from a lesson a learner has just read.
 
-## What an insight card is
+## What a recall card card is
 
-An insight card is a single retrieval-practice item — a question (or cloze sentence) that the learner attempts to recall before seeing the answer. Cards are later shown in a spaced-repetition feed.
+A recall card is a single retrieval-practice item — a question (or cloze sentence) that the learner attempts to recall before seeing the answer. Cards are later shown in a spaced-repetition feed.
 
 ## Output types
 
@@ -71,7 +71,7 @@ Bad (compound — two ideas):
 
 ## Count
 
-Generate between ${INSIGHT_MIN_PER_LESSON} and ${INSIGHT_MAX_PER_LESSON} high-quality cards. If the lesson doesn't contain enough testable claims for ${INSIGHT_MIN_PER_LESSON}, return only what is genuinely card-worthy — do not pad.
+Generate between ${RECALL_CARDS_MIN_PER_LESSON} and ${RECALL_CARDS_MAX_PER_LESSON} high-quality cards. If the lesson doesn't contain enough testable claims for ${RECALL_CARDS_MIN_PER_LESSON}, return only what is genuinely card-worthy — do not pad.
 
 ## conceptTags
 
@@ -93,9 +93,9 @@ const formatLessonForExtraction = (state: LessonState): string => {
 
 /** Post-filter candidates to guard against weak or duplicate items. */
 const filterCandidates = (
-  candidates: z.input<typeof insightCandidateSchema>[],
-): GeneratedInsight[] => {
-  const out: GeneratedInsight[] = [];
+  candidates: z.input<typeof recallCardCandidateSchema>[],
+): GeneratedRecallCard[] => {
+  const out: GeneratedRecallCard[] = [];
   const seenAnswers = new Set<string>();
 
   for (const c of candidates) {
@@ -108,9 +108,9 @@ const filterCandidates = (
 
     // Content-quality validator. Runs BEFORE dedupe so rejected candidates
     // don't pollute the answer-map key space.
-    const validation = validateInsightCandidate(c);
+    const validation = validateRecallCardCandidate(c);
     if (!validation.valid) {
-      genLog.info(`lesson:insights drop reason=${validation.reason}`);
+      genLog.info(`lesson:recall drop reason=${validation.reason}`);
       continue;
     }
 
@@ -132,12 +132,12 @@ const filterCandidates = (
     });
   }
 
-  return out.slice(0, INSIGHT_MAX_PER_LESSON);
+  return out.slice(0, RECALL_CARDS_MAX_PER_LESSON);
 };
 
 // ── Node ──────────────────────────────────────────────
 
-export const insightGeneration = async (
+export const recallCardGeneration = async (
   state: LessonState,
   config?: RunnableConfig,
 ): Promise<Partial<LessonState>> => {
@@ -148,8 +148,8 @@ export const insightGeneration = async (
     ['intro', 'section', 'callout', 'summary'].includes(b.type),
   );
   if (teachable.length === 0) {
-    genLog.info(`lesson:insights skip reason=no_teachable_blocks`);
-    return { insights: [] };
+    genLog.info(`lesson:recall skip reason=no_teachable_blocks`);
+    return { recallCards: [] };
   }
 
   const humanMessage = `## Lesson
@@ -164,36 +164,36 @@ Use the [id=...] tag to set \`sourceBlockId\` so each card is traceable to the b
 
 ${formatLessonForExtraction(state)}
 
-Return ${INSIGHT_MIN_PER_LESSON}-${INSIGHT_MAX_PER_LESSON} insight cards covering the most important ideas. Prefer questions over clozes unless a cloze is clearly the better shape for the claim.`;
+Return ${RECALL_CARDS_MIN_PER_LESSON}-${RECALL_CARDS_MAX_PER_LESSON} recall cards covering the most important ideas. Prefer questions over clozes unless a cloze is clearly the better shape for the claim.`;
 
   try {
-    genLog.info(`lesson:insights extract teachable=${teachable.length}`);
+    genLog.info(`lesson:recall extract teachable=${teachable.length}`);
 
-    const model = getUtilityModel().withStructuredOutput(insightsOutputSchema);
+    const model = getUtilityModel().withStructuredOutput(recallCardsOutputSchema);
     const result = await withRetry(() =>
       model.invoke(
-        [new SystemMessage(INSIGHT_SYSTEM_PROMPT), new HumanMessage(humanMessage)],
-        { metadata: { llmLabel: 'lesson:insights' } },
+        [new SystemMessage(RECALL_CARD_SYSTEM_PROMPT), new HumanMessage(humanMessage)],
+        { metadata: { llmLabel: 'lesson:recall' } },
       ),
     );
 
-    const filtered = filterCandidates(result.insights ?? []);
+    const filtered = filterCandidates(result.recallCards ?? []);
 
-    // Fire one SSE event per insight (client can render a side-panel live
-    // preview later; for now we just keep parity with other node events).
+    // Fire one SSE event per recall card (client can render a side-panel
+    // live preview later; for now we just keep parity with other node events).
     for (const ins of filtered) {
-      writer?.({ type: 'insight', insight: ins });
+      writer?.({ type: 'recall_card', card: ins });
     }
 
     genLog.info(
-      `lesson:insights done kept=${filtered.length}/${result.insights.length}`,
+      `lesson:recall-cards done kept=${filtered.length}/${result.recallCards.length}`,
     );
-    return { insights: filtered };
+    return { recallCards: filtered };
   } catch (e) {
     // Extraction failures never block the lesson. Research philosophy:
-    // insights are additive enrichment.
+    // recall cards are additive enrichment.
     const reason = e instanceof Error ? e.message : String(e);
-    genLog.warn(`lesson:insights fail reason=${reason} — lesson ships without cards`);
-    return { insights: [] };
+    genLog.warn(`lesson:recall fail reason=${reason} — lesson ships without cards`);
+    return { recallCards: [] };
   }
 };

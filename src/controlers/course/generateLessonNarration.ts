@@ -10,6 +10,7 @@ import {
   NARRATION_RATE_MAX,
   NARRATION_RATE_MIN,
 } from '@lib/narration/voices';
+import { TTS_COOLDOWN_MS } from '@services/lessonNarrationService';
 import { parseIndexParam } from './validation';
 import { ttsLog } from '@lib/loggers';
 
@@ -104,6 +105,24 @@ export const generateLessonNarrationController = asyncHandler(async (req, res) =
   if (!hasNarratableContent(lesson.blocks)) {
     res.status(400);
     throw new Error('Lesson has no narratable content (only quizzes / images / code)');
+  }
+
+  // Per-lesson TTS spend cooldown — set in `runLessonNarration` only on
+  // cache miss (real synthesis), so identical-script re-narration via
+  // cache hit is never blocked here (the job runs, hits S3 cache, no
+  // spend, no field update). Blocks the rapid-double-click + repeated
+  // voice toggling vectors.
+  if (lesson.lastTtsSpendAt) {
+    const elapsed = Date.now() - lesson.lastTtsSpendAt.getTime();
+    if (elapsed < TTS_COOLDOWN_MS) {
+      const retryAfterSec = Math.ceil((TTS_COOLDOWN_MS - elapsed) / 1000);
+      res.status(429).set('Retry-After', String(retryAfterSec)).json({
+        message: `Narration was just generated for this lesson. Try again in ${retryAfterSec}s.`,
+        errorCode: 'TTS_COOLDOWN',
+        meta: { retryAfterSec },
+      });
+      return;
+    }
   }
 
   // Resolve the voice + rate the job will actually use, NOW (in the

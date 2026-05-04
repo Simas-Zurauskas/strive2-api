@@ -4,8 +4,8 @@ import UserModel, { IUser, UserDocument } from '@models/UserModel';
 import CourseModel, { CourseDocument, ICourse } from '@models/CourseModel';
 import JobModel, { IJob, JobDocument } from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
-import InsightModel from '@models/InsightModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
+import RecallCardModel from '@models/RecallCardModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import UserGamificationModel from '@models/UserGamificationModel';
 import { AuthProvider } from '@lib/constants';
 import { PLANS } from '@lib/creditPricing';
@@ -117,7 +117,7 @@ export const makeLessonContent = async (params: {
   });
 };
 
-export const makeInsight = async (params: {
+export const makeRecallCard = async (params: {
   courseId: mongoose.Types.ObjectId | string;
   lessonId: mongoose.Types.ObjectId | string;
   moduleIndex?: number;
@@ -127,7 +127,7 @@ export const makeInsight = async (params: {
   answer?: string;
   conceptTags?: string[];
 }) => {
-  return InsightModel.create({
+  return RecallCardModel.create({
     courseId: params.courseId,
     lessonId: params.lessonId,
     moduleIndex: params.moduleIndex ?? 0,
@@ -140,9 +140,9 @@ export const makeInsight = async (params: {
   });
 };
 
-export const makeInsightProgress = async (params: {
+export const makeRecallProgress = async (params: {
   userId: mongoose.Types.ObjectId | string;
-  insightId: mongoose.Types.ObjectId | string;
+  recallCardId: mongoose.Types.ObjectId | string;
   box?: number;
   nextDue?: Date;
   mode?: 'tap-reveal' | 'typed-recall';
@@ -151,9 +151,9 @@ export const makeInsightProgress = async (params: {
   lapses?: number;
   state?: 'new' | 'learning' | 'review' | 'relearning';
 }) => {
-  return UserInsightProgressModel.create({
+  return UserRecallProgressModel.create({
     userId: params.userId,
-    insightId: params.insightId,
+    recallCardId: params.recallCardId,
     box: params.box ?? 0,
     reps: params.reps ?? 0,
     lapses: params.lapses ?? 0,
@@ -208,4 +208,4 @@ export const subscribeUser = async (params: {
  * alias themselves. Common case: a test that needs to assert directly on
  * a stored row.
  */
-export { UserModel, CourseModel, JobModel, LessonContentModel, InsightModel, UserInsightProgressModel, UserGamificationModel };
+export { UserModel, CourseModel, JobModel, LessonContentModel, RecallCardModel, UserRecallProgressModel, UserGamificationModel };

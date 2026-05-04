@@ -3,5 +3,5 @@ export { contentGeneration } from './contentGeneration';
 export { contentValidation } from './contentValidation';
 export { interactiveGeneration } from './interactiveGeneration';
 export { imageGeneration, linksGeneration } from './assetsGeneration';
-export { insightGeneration } from './insightGeneration';
+export { recallCardGeneration } from './recallCardGeneration';
 export { merge } from './merge';

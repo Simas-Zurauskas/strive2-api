@@ -1,15 +1,15 @@
 import mongoose, { HydratedDocument, Schema, Types } from 'mongoose';
-import { INSIGHT_KINDS, InsightKind } from '@lib/insightConstants';
+import { RECALL_CARD_KINDS, RecallCardKind } from '@lib/recallConstants';
 
 // ── Types ──────────────────────────────────────────────────
 
-export interface IInsight {
+export interface IRecallCard {
   courseId: Types.ObjectId;
   lessonId: Types.ObjectId;
   moduleIndex: number;
   lessonIndex: number;
   sourceBlockId: string;
-  kind: InsightKind;
+  kind: RecallCardKind;
   /** For qa: question text. For cloze: sentence with a single {{blank}} marker. */
   prompt: string;
   /** For qa: answer. For cloze: the word/phrase that fills {{blank}}. */
@@ -20,11 +20,11 @@ export interface IInsight {
   updatedAt: Date;
 }
 
-export type InsightDocument = HydratedDocument<IInsight>;
+export type RecallCardDocument = HydratedDocument<IRecallCard>;
 
 // ── Schema ─────────────────────────────────────────────────
 
-const schema = new Schema<IInsight>(
+const schema = new Schema<IRecallCard>(
   {
     courseId: {
       type: Schema.Types.ObjectId,
@@ -39,7 +39,7 @@ const schema = new Schema<IInsight>(
     moduleIndex: { type: Number, required: true },
     lessonIndex: { type: Number, required: true },
     sourceBlockId: { type: String, required: true },
-    kind: { type: String, enum: [...INSIGHT_KINDS], required: true },
+    kind: { type: String, enum: [...RECALL_CARD_KINDS], required: true },
     prompt: { type: String, required: true },
     answer: { type: String, required: true },
     conceptTags: { type: [String], default: [] },
@@ -56,13 +56,13 @@ const schema = new Schema<IInsight>(
   },
 );
 
-// Hot paths: fetch insights for a lesson (regen/cleanup), or for a course (feed).
+// Hot paths: fetch recall cards for a lesson (regen/cleanup), or for a course (feed).
 schema.index({ lessonId: 1 });
 schema.index({ courseId: 1 });
 schema.index({ conceptTags: 1 });
 
 // ── Model ──────────────────────────────────────────────────
 
-const InsightModel = mongoose.model<IInsight>('Insight', schema, 'Insight');
+const RecallCardModel = mongoose.model<IRecallCard>('RecallCard', schema, 'RecallCard');
 
-export default InsightModel;
+export default RecallCardModel;

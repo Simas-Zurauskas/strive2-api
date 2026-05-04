@@ -1,11 +1,11 @@
 import crypto from 'crypto';
-import * as Sentry from '@sentry/node';
 import SecurityActionTokenModel, {
   SecurityAction,
 } from '@models/SecurityActionTokenModel';
 import UserModel from '@models/UserModel';
 import { sendSecurityActionCodeAsync } from './emailService';
 import { lifecycleLog } from '@lib/loggers';
+import { captureWarning } from '@lib/errorReporter';
 import { AppError } from '@middleware/errorMiddleware';
 
 // Confirmation-code lifetimes & limits.
@@ -192,10 +192,11 @@ export const consumeSecurityActionCode = async ({
       { $inc: { attempts: 1 } },
     );
     lifecycleLog.warn(`security-action:code-mismatch userId=${userId} action=${action} attempts=${token.attempts + 1}`);
-    Sentry.captureMessage('security-action:code-mismatch', {
+    captureWarning('security-action:code-mismatch', {
       level: 'info',
       tags: { source: 'securityActionService', action },
       extra: { userId, attempts: token.attempts + 1 },
+      fingerprint: ['securityAction', 'code-mismatch', action],
     });
     throw new AppError('Confirmation code is incorrect.', {
       errorCode: 'SECURITY_CODE_INVALID',

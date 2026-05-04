@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { jsonrepair } from 'jsonrepair';
-import * as Sentry from '@sentry/node';
 import { genLog } from '@lib/loggers';
+import { captureWarning } from '@lib/errorReporter';
 
 /**
  * Check whether a comma at `fromPos` is structural JSON punctuation (separator
@@ -162,8 +162,7 @@ export const jsonish = <T extends z.ZodTypeAny>(schema: T): T => {
               genLog.warn(
                 `jsonish:parse-fail strict=${strictReason} repair=${repairReason} len=${s.length} pos=${pos} window=${JSON.stringify(window)}`,
               );
-              Sentry.captureMessage('jsonish parse failed — all 3 tiers', {
-                level: 'warning',
+              captureWarning('jsonish parse failed — all 3 tiers', {
                 tags: { source: 'jsonish' },
                 extra: {
                   strict_error: strictReason,
@@ -173,6 +172,9 @@ export const jsonish = <T extends z.ZodTypeAny>(schema: T): T => {
                   window,
                   payload_preview: s.slice(0, 500),
                 },
+                // All three tiers failing is the same class of bug regardless
+                // of payload — group repeated occurrences into one issue.
+                fingerprint: ['jsonish', 'parse-fail-all-tiers'],
               });
               ctx.issues.push({
                 code: 'custom',

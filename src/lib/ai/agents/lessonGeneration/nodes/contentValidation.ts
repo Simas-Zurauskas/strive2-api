@@ -11,6 +11,7 @@ import {
 } from '@lib/metrics';
 import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { genLog } from '@lib/loggers';
+import { captureWarning } from '@lib/errorReporter';
 import { LessonState } from '../state';
 import { lessonBlockSchema } from '../prompts';
 
@@ -245,6 +246,16 @@ async function repairStructuralGaps({
       const reason = sonnetError instanceof Error ? sonnetError.message : String(sonnetError);
       genLog.error(`lesson:validate repair-both-fail reason=${reason}`);
       logNoObjectDetails('contentValidation.repair', sonnetError);
+      // Silent degradation: both Haiku and Sonnet repair calls failed and
+      // we're returning the (still-broken) original blocks. The lesson will
+      // ship without the missing structural blocks the gate detected.
+      // Surfacing this to Sentry is critical — the user won't see a 5xx
+      // (the lesson "succeeded") but the gating logic was bypassed.
+      captureWarning('lesson:validate repair-both-fail', {
+        tags: { agent: 'lessonGeneration', node: 'contentValidation', stage: 'repair' },
+        extra: { reason, blockCount: blocks.length, missing: missing.join(' | ') },
+        fingerprint: ['lessonGeneration', 'contentValidation', 'repair-both-fail'],
+      });
       return blocks;
     }
   }
@@ -275,6 +286,14 @@ async function repairStructuralGaps({
     const reason = error instanceof Error ? error.message : String(error);
     genLog.error(`lesson:validate repair-postprocess-fail reason=${reason}`);
     logNoObjectDetails('contentValidation.repair', error);
+    // Silent degradation on the post-processing path (filter / re-order /
+    // emit). Same rationale as repair-both-fail above — surface so we can
+    // tell whether the lesson shipped with intended or accidental content.
+    captureWarning('lesson:validate repair-postprocess-fail', {
+      tags: { agent: 'lessonGeneration', node: 'contentValidation', stage: 'postprocess' },
+      extra: { reason, blockCount: blocks.length },
+      fingerprint: ['lessonGeneration', 'contentValidation', 'postprocess-fail'],
+    });
     return blocks; // Fall back to original blocks
   }
 }

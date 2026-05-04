@@ -11,20 +11,27 @@ import { chatLog } from '@lib/loggers';
 /**
  * Request validation. Mirrors `chatStreamSchema` but without
  * `attachmentIds` — the product-KB chat is ephemeral and has no
- * attachment surface in v1. The 20-message cap is a soft guard against
- * runaway client state; the global rate limiter handles request-rate
- * abuse separately.
+ * attachment surface in v1. The message + content caps are anti-abuse
+ * defence-in-depth on top of the per-IP/user rate limiter (8/min burst,
+ * 30/hr sustained, see productKbRoutes.ts).
+ *
+ * 4 000 chars per message comfortably fits any legitimate help-bot
+ * question (a paragraph is ~500 chars; a multi-part question with a
+ * pasted error message rarely exceeds 2 000). 12 messages = 6 turns of
+ * Q&A — generous for a help-bot interaction. Worst-case per-call input
+ * size drops from 20 × 20 000 = 400 000 chars to 12 × 4 000 = 48 000
+ * chars (~12 K tokens), an ~8× reduction in per-call LLM spend ceiling.
  */
 const productKbChatSchema = z.object({
   messages: z
     .array(
       z.object({
         role: z.enum(CHAT_ROLES),
-        content: z.string().min(1).max(20000),
+        content: z.string().min(1).max(4000),
       }),
     )
     .min(1)
-    .max(20),
+    .max(12),
 });
 
 /**

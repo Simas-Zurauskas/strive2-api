@@ -3,9 +3,10 @@ import { ERROR_CODES } from '@middleware/errorMiddleware';
 import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, GOAL_TYPES, GOAL_TYPE_CONFIDENCES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
 import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
-import { INSIGHT_KINDS, INSIGHT_MODES, INSIGHT_RATINGS, INSIGHT_STATES } from '@lib/insightConstants';
+import { RECALL_CARD_KINDS, RECALL_MODES, RECALL_RATINGS, RECALL_STATES } from '@lib/recallConstants';
 import { USAGE_SERVICES } from '@lib/usageConstants';
 import { CREDIT_LEDGER_REASONS } from '@models/CreditLedgerModel';
+import { SECURITY_ACTIONS } from '@models/SecurityActionTokenModel';
 
 type SchemaMap = Record<string, OpenAPIV3.SchemaObject>;
 
@@ -172,6 +173,7 @@ export const schemas: SchemaMap = {
       '_id',
       'email',
       'emailVerified',
+      'isAdmin',
       'authProviders',
       'subscription',
       'credits',
@@ -185,6 +187,7 @@ export const schemas: SchemaMap = {
       name: { type: 'string' },
       image: { type: 'string' },
       emailVerified: { type: 'boolean' },
+      isAdmin: { type: 'boolean' },
       authProviders: {
         type: 'array',
         items: { $ref: '#/components/schemas/AuthProvider' },
@@ -851,11 +854,11 @@ export const schemas: SchemaMap = {
     },
   },
 
-  GeneratedInsight: {
+  GeneratedRecallCard: {
     type: 'object',
     required: ['kind', 'prompt', 'answer', 'conceptTags', 'sourceBlockId'],
     properties: {
-      kind: { $ref: '#/components/schemas/InsightKind' },
+      kind: { $ref: '#/components/schemas/RecallCardKind' },
       prompt: { type: 'string' },
       answer: { type: 'string' },
       conceptTags: { type: 'array', items: { type: 'string' } },
@@ -894,20 +897,20 @@ export const schemas: SchemaMap = {
     },
   },
 
-  LessonProgressInsightEvent: {
+  LessonProgressRecallCardEvent: {
     type: 'object',
-    required: ['type', 'insight'],
+    required: ['type', 'card'],
     properties: {
-      type: { type: 'string', enum: ['insight'] },
-      insight: { $ref: '#/components/schemas/GeneratedInsight' },
+      type: { type: 'string', enum: ['recall_card'] },
+      card: { $ref: '#/components/schemas/GeneratedRecallCard' },
     },
   },
 
-  LessonProgressInsightsSavedEvent: {
+  LessonProgressRecallCardsSavedEvent: {
     type: 'object',
     required: ['type', 'count'],
     properties: {
-      type: { type: 'string', enum: ['insights_saved'] },
+      type: { type: 'string', enum: ['recall_cards_saved'] },
       count: { type: 'integer' },
     },
   },
@@ -938,8 +941,8 @@ export const schemas: SchemaMap = {
       { $ref: '#/components/schemas/LessonProgressBlockEvent' },
       { $ref: '#/components/schemas/LessonProgressHeroImageEvent' },
       { $ref: '#/components/schemas/LessonProgressContentReadyEvent' },
-      { $ref: '#/components/schemas/LessonProgressInsightEvent' },
-      { $ref: '#/components/schemas/LessonProgressInsightsSavedEvent' },
+      { $ref: '#/components/schemas/LessonProgressRecallCardEvent' },
+      { $ref: '#/components/schemas/LessonProgressRecallCardsSavedEvent' },
       { $ref: '#/components/schemas/LessonProgressNarrationStartedEvent' },
       { $ref: '#/components/schemas/LessonProgressNarrationReadyEvent' },
     ],
@@ -949,8 +952,8 @@ export const schemas: SchemaMap = {
         block: '#/components/schemas/LessonProgressBlockEvent',
         hero_image: '#/components/schemas/LessonProgressHeroImageEvent',
         content_ready: '#/components/schemas/LessonProgressContentReadyEvent',
-        insight: '#/components/schemas/LessonProgressInsightEvent',
-        insights_saved: '#/components/schemas/LessonProgressInsightsSavedEvent',
+        recall_card: '#/components/schemas/LessonProgressRecallCardEvent',
+        recall_cards_saved: '#/components/schemas/LessonProgressRecallCardsSavedEvent',
         narration_started: '#/components/schemas/LessonProgressNarrationStartedEvent',
         narration_ready: '#/components/schemas/LessonProgressNarrationReadyEvent',
       },
@@ -1049,13 +1052,13 @@ export const schemas: SchemaMap = {
 
   WeeklySummaryPeriod: {
     type: 'object',
-    required: ['xp', 'timeSeconds', 'lessons', 'quizzes', 'insights'],
+    required: ['xp', 'timeSeconds', 'lessons', 'quizzes', 'recallReviews'],
     properties: {
       xp: { type: 'number' },
       timeSeconds: { type: 'number' },
       lessons: { type: 'integer' },
       quizzes: { type: 'integer' },
-      insights: { type: 'integer' },
+      recallReviews: { type: 'integer' },
     },
   },
 
@@ -1066,16 +1069,16 @@ export const schemas: SchemaMap = {
       'quiz_score',
       'exercise_pass',
       'review_complete',
-      'insight_review',
-      'insight_mastery',
+      'recall_review',
+      'recall_mastery',
     ],
     properties: {
       lesson_complete: { type: 'number' },
       quiz_score: { type: 'number' },
       exercise_pass: { type: 'number' },
       review_complete: { type: 'number' },
-      insight_review: { type: 'number' },
-      insight_mastery: { type: 'number' },
+      recall_review: { type: 'number' },
+      recall_mastery: { type: 'number' },
     },
   },
 
@@ -1185,39 +1188,39 @@ export const schemas: SchemaMap = {
     },
   },
 
-  // ── Insights schemas ──────────────────────────────────────
+  // ── Recall schemas ────────────────────────────────────────
 
-  InsightKind: {
+  RecallCardKind: {
     type: 'string',
-    enum: [...INSIGHT_KINDS],
+    enum: [...RECALL_CARD_KINDS],
   },
 
-  InsightMode: {
+  RecallMode: {
     type: 'string',
-    enum: [...INSIGHT_MODES],
+    enum: [...RECALL_MODES],
   },
 
-  InsightState: {
+  RecallState: {
     type: 'string',
-    enum: [...INSIGHT_STATES],
+    enum: [...RECALL_STATES],
   },
 
-  InsightRating: {
+  RecallRating: {
     type: 'integer',
-    enum: [...INSIGHT_RATINGS],
+    enum: [...RECALL_RATINGS],
     description: '1=Again, 2=Hard, 3=Good, 4=Easy',
   },
 
-  InsightQueueItem: {
+  RecallQueueItem: {
     type: 'object',
     required: [
-      'insightId', 'courseId', 'courseSlug', 'courseName', 'lessonId',
+      'recallCardId', 'courseId', 'courseSlug', 'courseName', 'lessonId',
       'moduleIndex', 'lessonIndex', 'lessonName', 'moduleName',
       'kind', 'prompt', 'answer', 'conceptTags', 'sourceBlockId',
       'isNew', 'mode', 'box', 'dueAt',
     ],
     properties: {
-      insightId: { type: 'string' },
+      recallCardId: { type: 'string' },
       courseId: { type: 'string' },
       courseSlug: { type: 'string', nullable: true },
       courseName: { type: 'string' },
@@ -1226,29 +1229,29 @@ export const schemas: SchemaMap = {
       lessonIndex: { type: 'integer' },
       lessonName: { type: 'string' },
       moduleName: { type: 'string' },
-      kind: { $ref: '#/components/schemas/InsightKind' },
+      kind: { $ref: '#/components/schemas/RecallCardKind' },
       prompt: { type: 'string' },
       answer: { type: 'string' },
       conceptTags: { type: 'array', items: { type: 'string' } },
       sourceBlockId: { type: 'string' },
       isNew: { type: 'boolean' },
-      mode: { $ref: '#/components/schemas/InsightMode' },
+      mode: { $ref: '#/components/schemas/RecallMode' },
       box: { type: 'integer' },
       dueAt: { type: 'string', format: 'date-time', nullable: true },
     },
   },
 
-  InsightQueue: {
+  RecallQueue: {
     type: 'object',
     required: ['due', 'fresh', 'counts'],
     properties: {
       due: {
         type: 'array',
-        items: { $ref: '#/components/schemas/InsightQueueItem' },
+        items: { $ref: '#/components/schemas/RecallQueueItem' },
       },
       fresh: {
         type: 'array',
-        items: { $ref: '#/components/schemas/InsightQueueItem' },
+        items: { $ref: '#/components/schemas/RecallQueueItem' },
       },
       counts: {
         type: 'object',
@@ -1262,12 +1265,12 @@ export const schemas: SchemaMap = {
     },
   },
 
-  RateInsightResult: {
+  RateRecallResult: {
     type: 'object',
     required: ['box', 'state', 'reps', 'lapses', 'nextDue', 'lastReview'],
     properties: {
       box: { type: 'integer' },
-      state: { $ref: '#/components/schemas/InsightState' },
+      state: { $ref: '#/components/schemas/RecallState' },
       reps: { type: 'integer' },
       lapses: { type: 'integer' },
       nextDue: { type: 'string', format: 'date-time' },
@@ -1275,7 +1278,7 @@ export const schemas: SchemaMap = {
       masteredAt: { type: 'string', format: 'date-time', nullable: true },
       justMastered: {
         type: 'boolean',
-        description: 'True exactly once per insight, when this rating first reached Leitner box 4. Never true on re-mastery.',
+        description: 'True exactly once per recall card, when this rating first reached Leitner box 4. Never true on re-mastery.',
       },
     },
   },
@@ -1295,18 +1298,18 @@ export const schemas: SchemaMap = {
     },
   },
 
-  InsightStats: {
+  RecallStats: {
     type: 'object',
     required: [
-      'totalInsights', 'totalReviewed', 'totalMastered',
+      'totalCards', 'totalReviewed', 'totalMastered',
       'reviewedThisWeek', 'reviewedLastWeek',
       'dueToday', 'dueThisWeek',
       'boxDistribution', 'recentHistory',
     ],
     properties: {
-      totalInsights: { type: 'integer' },
+      totalCards: { type: 'integer' },
       totalReviewed: { type: 'integer' },
-      totalMastered: { type: 'integer', description: 'Insights that reached Leitner box 4 at least once (masteredAt !== null)' },
+      totalMastered: { type: 'integer', description: 'Recall cards that reached Leitner box 4 at least once (masteredAt !== null)' },
       reviewedThisWeek: { type: 'integer' },
       reviewedLastWeek: { type: 'integer' },
       dueToday: { type: 'integer' },
@@ -1472,7 +1475,7 @@ export const schemas: SchemaMap = {
     type: 'object',
     required: ['target', 'label'],
     properties: {
-      target: { type: 'string', enum: ['quiz', 'insights', 'lesson'] },
+      target: { type: 'string', enum: ['quiz', 'recall', 'lesson'] },
       moduleIndex: { type: 'integer' },
       lessonIndex: { type: 'integer' },
       label: { type: 'string' },
@@ -1574,6 +1577,115 @@ export const schemas: SchemaMap = {
       },
     },
   },
+
+  // ── Security actions (sensitive-action OTP gate) ─────────
+
+  SecurityAction: {
+    type: 'string',
+    enum: [...SECURITY_ACTIONS],
+    description:
+      'Sensitive account-state action that requires a fresh email-delivered 6-digit code in addition to the bearer token.',
+  },
+
+  // ── Depth-override 409 payloads ──────────────────────────
+  //
+  // Bidirectional gate on PATCH /api/course/{id}: the controller emits one
+  // of two `code` values depending on which side fired. Modelled as separate
+  // named schemas so both server-side JSDoc references and client-side
+  // discriminated unions are anchored on the same shapes.
+
+  DepthOverrideRiskLevel: {
+    type: 'string',
+    enum: ['low', 'moderate', 'high'],
+  },
+
+  DepthOverrideOvercommitPayload: {
+    type: 'object',
+    required: ['code', 'message', 'recommended', 'selectedDepth'],
+    description:
+      'Selected depth is likely too big for what the learner answered (overcommit). Returned with HTTP 409.',
+    properties: {
+      code: { type: 'string', enum: ['DEPTH_OVERRIDE_REQUIRES_ACK'] },
+      message: { type: 'string' },
+      recommended: nullableRef('#/components/schemas/CourseDepth'),
+      selectedDepth: { $ref: '#/components/schemas/CourseDepth' },
+      lessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated lesson count for the selected depth.',
+      },
+      estimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated learner-facing hours for the selected depth.',
+      },
+      softnessCues: { type: 'array', items: { type: 'string' } },
+      finishPressureCues: { type: 'array', items: { type: 'string' } },
+      overcommitRisk: { $ref: '#/components/schemas/DepthOverrideRiskLevel' },
+      overcommitRationale: { type: 'string' },
+    },
+  },
+
+  DepthOverrideUndercommitPayload: {
+    type: 'object',
+    required: ['code', 'message', 'recommended', 'selectedDepth'],
+    description:
+      'Selected depth is below the recommended tier and the LLM judged the coverage gap meaningful (undercommit). Returned with HTTP 409.',
+    properties: {
+      code: { type: 'string', enum: ['DEPTH_UNDERCOMMIT_REQUIRES_ACK'] },
+      message: { type: 'string' },
+      recommended: nullableRef('#/components/schemas/CourseDepth'),
+      selectedDepth: { $ref: '#/components/schemas/CourseDepth' },
+      lessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated lesson count for the selected depth (what the learner will get).',
+      },
+      estimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated learner-facing hours for the selected depth.',
+      },
+      recommendedLessonCountRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated lesson count for the recommended depth (what they would have gotten).',
+      },
+      recommendedEstimatedHoursRange: {
+        type: 'array',
+        items: { type: 'number' },
+        minItems: 2,
+        maxItems: 2,
+        description: '[min, max] estimated learner-facing hours for the recommended depth.',
+      },
+      undercommitRisk: { $ref: '#/components/schemas/DepthOverrideRiskLevel' },
+      undercommitRationale: { type: 'string' },
+    },
+  },
+
+  DepthOverridePayload: {
+    oneOf: [
+      { $ref: '#/components/schemas/DepthOverrideOvercommitPayload' },
+      { $ref: '#/components/schemas/DepthOverrideUndercommitPayload' },
+    ],
+    discriminator: {
+      propertyName: 'code',
+      mapping: {
+        DEPTH_OVERRIDE_REQUIRES_ACK: '#/components/schemas/DepthOverrideOvercommitPayload',
+        DEPTH_UNDERCOMMIT_REQUIRES_ACK: '#/components/schemas/DepthOverrideUndercommitPayload',
+      },
+    },
+  } as unknown as OpenAPIV3.SchemaObject,
 
   // ── Mentor attachment ────────────────────────────────────
 

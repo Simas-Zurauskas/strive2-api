@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import * as Sentry from '@sentry/node';
+import { captureError } from '@lib/errorReporter';
 import type { CreditsUpdatedEvent } from '@src/types/socketEvents';
 import { getIO } from './socket';
 
@@ -31,6 +31,10 @@ export const emitCreditsUpdated = ({
       .to(`user:${userId.toString()}`)
       .emit('credits:updated', payload);
   } catch (err) {
-    Sentry.captureException(err, { tags: { area: 'creditSocket.emit' } });
+    captureError(err, {
+      tags: { area: 'creditSocket.emit' },
+      extra: { userId: userId.toString() },
+      fingerprint: ['creditSocket', 'emit'],
+    });
   }
 };

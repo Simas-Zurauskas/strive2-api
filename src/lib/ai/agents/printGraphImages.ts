@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import * as Sentry from '@sentry/node';
 import { CompiledGraph } from '@langchain/langgraph';
 import { ENVIRONMENT } from '@conf/env';
 import { courseDesignAgent } from './courseDesign';
@@ -9,6 +8,7 @@ import { quizGenerationAgent } from './quizGeneration';
 import { lessonMentorAgent } from './lessonMentor';
 import { courseMentorAgent } from './courseMentor';
 import { lifecycleLog } from '@lib/loggers';
+import { captureError } from '@lib/errorReporter';
 
 const OUTPUT_DIR = path.resolve(__dirname, '../../../../graphs');
 
@@ -23,7 +23,11 @@ const saveGraphImage = async ({ graph, name }: { graph: CompiledGraph<any>; name
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     lifecycleLog.error(`graphs:save fail name=${name} reason=${reason}`);
-    Sentry.captureException(err);
+    captureError(err, {
+      tags: { area: 'graphs.save' },
+      extra: { name },
+      fingerprint: ['graphs', 'save', name],
+    });
   }
 };
 

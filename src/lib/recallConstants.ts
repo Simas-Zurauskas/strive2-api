@@ -1,14 +1,14 @@
-// ── Insight kinds ──────────────────────────────────────────
+// ── Recall card kinds ──────────────────────────────────────────
 
-export const INSIGHT_KINDS = ['qa', 'cloze'] as const;
-export type InsightKind = (typeof INSIGHT_KINDS)[number];
+export const RECALL_CARD_KINDS = ['qa', 'cloze'] as const;
+export type RecallCardKind = (typeof RECALL_CARD_KINDS)[number];
 
 // ── Rating (Anki-style 4-button) ──────────────────────────
 
-export const INSIGHT_RATINGS = [1, 2, 3, 4] as const;
-export type InsightRating = (typeof INSIGHT_RATINGS)[number];
+export const RECALL_RATINGS = [1, 2, 3, 4] as const;
+export type RecallRating = (typeof RECALL_RATINGS)[number];
 
-export const INSIGHT_RATING_LABELS: Record<InsightRating, string> = {
+export const RECALL_RATING_LABELS: Record<RecallRating, string> = {
   1: 'Again',
   2: 'Hard',
   3: 'Good',
@@ -17,11 +17,11 @@ export const INSIGHT_RATING_LABELS: Record<InsightRating, string> = {
 
 // ── Scheduler state ────────────────────────────────────────
 
-export const INSIGHT_STATES = ['new', 'learning', 'review', 'relearning'] as const;
-export type InsightState = (typeof INSIGHT_STATES)[number];
+export const RECALL_STATES = ['new', 'learning', 'review', 'relearning'] as const;
+export type RecallState = (typeof RECALL_STATES)[number];
 
-export const INSIGHT_MODES = ['tap-reveal', 'typed-recall'] as const;
-export type InsightMode = (typeof INSIGHT_MODES)[number];
+export const RECALL_MODES = ['tap-reveal', 'typed-recall'] as const;
+export type RecallMode = (typeof RECALL_MODES)[number];
 
 // ── Leitner v0 schedule ───────────────────────────────────
 // Phase 0 scheduler. Each rating maps the card to a box (0..4) with a fixed
@@ -41,18 +41,18 @@ export const LEITNER_BOX_INTERVAL_DAYS: Record<number, number> = {
   4: 30,
 };
 
-export const INSIGHT_SKIP_DAYS = 1;
+export const RECALL_SKIP_DAYS = 1;
 
 // ── Queue limits ───────────────────────────────────────────
 
-export const INSIGHT_QUEUE_DUE_LIMIT = 25;       // hard cap on due items served per request
-export const INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT = 5;  // fresh items mixed in when queue small
-export const INSIGHT_QUEUE_FRESH_THRESHOLD = 20; // if due >= this, no fresh items
+export const RECALL_QUEUE_DUE_LIMIT = 25;       // hard cap on due items served per request
+export const RECALL_QUEUE_FRESH_LIMIT_DEFAULT = 5;  // fresh items mixed in when queue small
+export const RECALL_QUEUE_FRESH_THRESHOLD = 20; // if due >= this, no fresh items
 
 // ── Generation budget per lesson ──────────────────────────
 
-export const INSIGHT_MIN_PER_LESSON = 3;
-export const INSIGHT_MAX_PER_LESSON = 5;
+export const RECALL_CARDS_MIN_PER_LESSON = 3;
+export const RECALL_CARDS_MAX_PER_LESSON = 5;
 
 // ── Concept-tag vocabulary ────────────────────────────────
 // Tags are normalized lowercase slugs (kebab-case), emitted by the

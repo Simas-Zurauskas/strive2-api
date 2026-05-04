@@ -8,7 +8,7 @@ import LessonMentorChatModel from '@models/LessonMentorChatModel';
 import CourseMentorChatModel from '@models/CourseMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import UserGamificationModel from '@models/UserGamificationModel';
 import { cleanupCourseContent } from '@services/courseCleanupService';
 import { recordAccountDeletion } from '@services/abuseLogService';
@@ -100,15 +100,15 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
 
   // Delegate per-course cleanup to the same primitive `deleteCourse` uses so
   // the two deletion paths can't drift when new course-scoped models are added.
-  // Covers lesson content, quiz content, chat, progress, insights,
-  // insight-progress, and S3 assets under `lessons/{courseId}/`.
+  // Covers lesson content, quiz content, chat, progress, recall cards,
+  // recall-progress, and S3 assets under `lessons/{courseId}/`.
   await Promise.all(courseIds.map((id) => cleanupCourseContent(id.toString())));
 
   await Promise.all([
     JobModel.deleteMany({ userId: user._id }),
     UserLessonProgressModel.deleteMany({ userId: user._id }),
     UserModuleQuizProgressModel.deleteMany({ userId: user._id }),
-    UserInsightProgressModel.deleteMany({ userId: user._id }),
+    UserRecallProgressModel.deleteMany({ userId: user._id }),
     CourseDesignChatModel.deleteMany({ userId: user._id }),
     // Defense-in-depth user-scoped wipe — `cleanupCourseContent` above
     // already handles mentor chats per owned course, but a stray row left

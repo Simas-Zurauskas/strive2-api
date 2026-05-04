@@ -39,6 +39,15 @@ export const API_URL = process.env.API_URL || `http://localhost:${PORT}`;
 
 export const SENTRY_DSN = getEnv('SENTRY_DSN');
 
+// Optional shared secret guarding the unauthenticated `/metrics` endpoint.
+// When set, scrapers must send `X-Metrics-Token: <value>` on every request
+// or the endpoint returns 401. When unset, the endpoint stays open — this
+// preserves operational continuity during rollout: ops sets the env var
+// and updates the scraper config in coordinated steps. Defence-in-depth on
+// top of the network ACL that already restricts `/metrics` to private
+// scrapers.
+export const METRICS_TOKEN = process.env.METRICS_TOKEN;
+
 // Build identification — set by CI at deploy time.
 //   - RELEASE_SHA: full git commit SHA of the running build. Used by Sentry
 //     for release tagging + by the /version endpoint. Set in CI from the

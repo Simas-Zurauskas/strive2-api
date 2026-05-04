@@ -4,26 +4,25 @@ import {
   getUsageHistoryController,
   getUsageSummaryController,
 } from '@controlers/usage';
-import { ENVIRONMENT } from '@conf/env';
-import { protect, requireVerified } from '@middleware/authMiddleware';
+import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
 import { usageContextMiddleware } from '@middleware/usageContext';
 
 const router = Router();
 
-// Same gate as every other feature router (CLAUDE.md convention) + enter the
-// usage-tracking scope so any paid action this router triggers later (none
-// today, but keeps the invariant uniform) still attributes correctly.
-router.use(protect, requireVerified, usageContextMiddleware);
+// Engineer-only surfaces: raw per-call API spend in microcents, useful for
+// debugging actual LLM/BFL/Tavily costs against what the user is being
+// charged in credits. Stack ordering: protect → requireVerified →
+// requireAdmin so a 401 only fires for genuinely unauthenticated callers
+// and 403 fires for non-admin sessions (avoids tripping the client-side
+// 401 → signOut interceptor for verified users who happen not to be admins).
+router.use(protect, requireVerified, requireAdmin, usageContextMiddleware);
 
 router.get('/history', getUsageHistoryController);
 router.get('/summary', getUsageSummaryController);
 
-// Dev-only: wipe the caller's ledger rows so the Usage tab can be reset
-// while iterating on the feature. The controller itself 404s in non-dev
-// environments, but we also mount it conditionally to keep it off the
-// Swagger surface in production.
-if (ENVIRONMENT === 'development') {
-  router.delete('/events', deleteUsageEventsController);
-}
+// Wipe the caller's ledger rows. Previously dev-only; now admin-only and
+// available in every environment so ops can reset their own ledger while
+// iterating against staging/prod data.
+router.delete('/events', deleteUsageEventsController);
 
 export { router as usageRoutes };

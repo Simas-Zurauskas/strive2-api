@@ -1,17 +1,13 @@
 import asyncHandler from 'express-async-handler';
-import { ENVIRONMENT } from '@conf/env';
 import { getUserCourseLean } from '@services/courseDbService';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
 import { parseIndexParam } from './validation';
 
-// No @swagger block — intentionally hidden from API docs.
+// No @swagger block — intentionally hidden from API docs. Admin-only;
+// the route applies `requireAdmin` ahead of this controller, so by the
+// time we reach here the request is authorised.
 export const resetModuleQuizController = asyncHandler(async (req, res) => {
-  if (ENVIRONMENT !== 'development') {
-    res.status(404).json({ message: 'Not found' });
-    return;
-  }
-
   const userId = req.userId!;
   const moduleIndex = parseIndexParam({ value: req.params.moduleIndex, name: 'moduleIndex' });
   const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });

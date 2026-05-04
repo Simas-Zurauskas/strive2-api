@@ -247,7 +247,7 @@ describe('setPasswordController', () => {
 
     const { req, res } = buildReqRes({
       userId: user._id.toString(),
-      body: { newPassword: 'should-not-apply', code: '999999' },
+      body: { newPassword: 'should-not-apply-1', code: '999999' },
     });
     await expect(invokeController(setPasswordController, req, res)).rejects.toMatchObject({
       message: expect.stringContaining('incorrect'),
@@ -339,7 +339,7 @@ describe('changePasswordController', () => {
     const before = await UserModel.findById(user._id).select('+password').lean();
     const { req, res } = buildReqRes({
       userId: user._id.toString(),
-      body: { newPassword: 'should-not-apply', code: '999999' },
+      body: { newPassword: 'should-not-apply-1', code: '999999' },
     });
     await expect(invokeController(changePasswordController, req, res)).rejects.toMatchObject({
       message: expect.stringContaining('incorrect'),

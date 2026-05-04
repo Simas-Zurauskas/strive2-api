@@ -8,11 +8,13 @@ import '@conf/sentry';
 import 'colors';
 import { createServer } from 'http';
 import connectDB from '@conf/mongo';
-import { API_URL, ENVIRONMENT, FRONTEND_URL, PORT } from '@conf/env';
+import { API_URL, ENVIRONMENT, FRONTEND_URL, METRICS_TOKEN, PORT } from '@conf/env';
+import { timingSafeEqual } from 'node:crypto';
 import { errorHandler } from '@middleware/errorMiddleware';
 import cors from 'cors';
 import express from 'express';
 import * as Sentry from '@sentry/node';
+import { captureError } from '@lib/errorReporter';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import mt from 'moment-timezone';
@@ -22,7 +24,7 @@ import { authRoutes } from '@routes/authRoutes';
 import { billingRoutes } from '@routes/billingRoutes';
 import { courseRoutes } from '@routes/courseRoutes';
 import { gamificationRoutes } from '@routes/gamificationRoutes';
-import { insightRoutes } from '@routes/insightRoutes';
+import { recallRoutes } from '@routes/recallRoutes';
 import { productKbRoutes } from '@routes/productKbRoutes';
 import { usageRoutes } from '@routes/usageRoutes';
 import { stripeWebhookController } from '@controlers/billing';
@@ -179,12 +181,29 @@ const readinessHandler = async (_req: express.Request, res: express.Response) =>
 app.get('/ready', readinessHandler);
 app.get('/health', readinessHandler);
 
-// Prometheus-compatible text-format endpoint. No auth — metrics expose
-// aggregate gauges and counters only (no PII, no request bodies). Restrict
-// network access to internal scrapers via security groups / private ALB
-// listener rules rather than application-layer auth; that way the scraper
-// config stays simple and there's nothing to rotate.
-app.get('/metrics', (_req, res) => {
+// Prometheus-compatible text-format endpoint. Aggregate gauges + counters
+// only (no PII, no request bodies). Primary defence is still the network
+// ACL (private ALB listener / security group). When `METRICS_TOKEN` is
+// set, we require an `X-Metrics-Token` header as defence-in-depth — opt-in
+// so the scraper config can be updated in a coordinated step. When unset,
+// behaviour matches the pre-hardening default (open).
+const checkMetricsToken = (req: express.Request): boolean => {
+  if (!METRICS_TOKEN) return true;
+  const provided = req.header('x-metrics-token');
+  if (!provided) return false;
+  // timingSafeEqual requires equal-length buffers; a length mismatch is
+  // a non-match without leaking timing on the comparison itself.
+  const a = Buffer.from(provided);
+  const b = Buffer.from(METRICS_TOKEN);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+};
+
+app.get('/metrics', (req, res) => {
+  if (!checkMetricsToken(req)) {
+    res.status(401).set('Content-Type', 'text/plain').send('Unauthorized');
+    return;
+  }
   const io = getIO();
   const body = renderMetrics({
     activeJobs: jobLimit.activeCount,
@@ -200,23 +219,31 @@ app.use('/api/auth', authRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/course', courseRoutes);
 app.use('/api/gamification', gamificationRoutes);
-app.use('/api/insight', insightRoutes);
+app.use('/api/recall', recallRoutes);
 app.use('/api/product-kb', productKbRoutes);
 app.use('/api/usage', usageRoutes);
 
-app.get('/swagger.json', (req, res) => {
-  res.status(200).json(swaggerSpec);
-});
+// Swagger UI + the raw `/swagger.json` spec are exposed in non-production
+// only. In production the full route table + body schemas + errorCode
+// catalog are hostile-recon material — an attacker gets the entire API
+// contract for free. The spec stays available locally and on staging so
+// the client codegen (`yarn codegen`) keeps working; production codegen
+// must point at staging.
+if (ENVIRONMENT !== 'production') {
+  app.get('/swagger.json', (req, res) => {
+    res.status(200).json(swaggerSpec);
+  });
 
-app.use(
-  '/swagger',
-  swaggerUi.serve,
-  swaggerUi.setup(swaggerSpec, {
-    explorer: true,
-    customSiteTitle: 'Strive API',
-    swaggerOptions: { filter: true },
-  }),
-);
+  app.use(
+    '/swagger',
+    swaggerUi.serve,
+    swaggerUi.setup(swaggerSpec, {
+      explorer: true,
+      customSiteTitle: 'Strive API',
+      swaggerOptions: { filter: true },
+    }),
+  );
+}
 
 app.use((req, res, next) => {
   res.status(404);
@@ -224,7 +251,12 @@ app.use((req, res, next) => {
   next(error);
 });
 
-Sentry.setupExpressErrorHandler(app);
+// `errorHandler` does its own Sentry capture (5xx only — see
+// `errorMiddleware.ts`) so we deliberately do NOT mount
+// `Sentry.setupExpressErrorHandler(app)`. The default integration captures
+// every error reaching the chain, including Zod 400s and AppError 4xxs
+// like INSUFFICIENT_CREDITS / EMAIL_NOT_VERIFIED — these are operational
+// signals, not bugs, and they would dominate the event quota.
 app.use(errorHandler);
 
 const server = createServer(app);
@@ -327,11 +359,13 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 // try/catch. This handler is the safety net for that and similar SDK quirks.
 process.on('uncaughtException', (err: Error) => {
   lifecycleLog.error(`uncaughtException ${err?.stack ?? err}`);
-  try {
-    Sentry.captureException(err, { tags: { fatal: 'uncaughtException' } });
-  } catch {
-    // Swallow — we're already in a fatal path.
-  }
+  // captureError swallows internal Sentry SDK failures so we never
+  // double-fault on the fatal path.
+  captureError(err, {
+    level: 'fatal',
+    tags: { fatal: 'uncaughtException' },
+    fingerprint: ['process', 'uncaughtException', err?.name ?? 'Error'],
+  });
   Sentry.close(2_000)
     .catch(() => undefined)
     .finally(() => process.exit(1));
@@ -340,9 +374,9 @@ process.on('uncaughtException', (err: Error) => {
 process.on('unhandledRejection', (reason: unknown) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
   lifecycleLog.error(`unhandledRejection ${err.stack ?? err.message}`);
-  try {
-    Sentry.captureException(err, { tags: { fatal: 'unhandledRejection' } });
-  } catch {
-    // Swallow — same reason.
-  }
+  captureError(err, {
+    level: 'error',
+    tags: { fatal: 'unhandledRejection' },
+    fingerprint: ['process', 'unhandledRejection', err?.name ?? 'Error'],
+  });
 });

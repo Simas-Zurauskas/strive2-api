@@ -1,7 +1,7 @@
 import Mailjet from 'node-mailjet';
-import * as Sentry from '@sentry/node';
 import { MAILJET_API_KEY, MAILJET_API_SECRET, FRONTEND_URL } from '@conf/env';
 import { integrationLog } from '@lib/loggers';
+import { captureError } from '@lib/errorReporter';
 
 export const SENDER_EMAIL_ACCOUNT = 'accounts@strive-learning.com';
 
@@ -108,9 +108,10 @@ export const sendVerificationEmailAsync = (params: { to: string; token: string }
     integrationLog.error(
       `mailjet:send exhausted template=verify to=${params.to} attempts=${delays.length + 1}`,
     );
-    Sentry.captureException(lastError, {
+    captureError(lastError, {
       tags: { email_delivery: 'verification' },
       extra: { to: params.to, attempts: delays.length + 1 },
+      fingerprint: ['email_delivery', 'verification'],
     });
   });
 };
@@ -192,9 +193,10 @@ export const sendPasswordResetEmailAsync = (params: { to: string; token: string 
     integrationLog.error(
       `mailjet:send exhausted template=password-reset to=${params.to} attempts=${delays.length + 1}`,
     );
-    Sentry.captureException(lastError, {
+    captureError(lastError, {
       tags: { email_delivery: 'password_reset' },
       extra: { to: params.to, attempts: delays.length + 1 },
+      fingerprint: ['email_delivery', 'password_reset'],
     });
   });
 };
@@ -297,9 +299,10 @@ export const sendSecurityActionCodeAsync = (params: {
     integrationLog.error(
       `mailjet:send exhausted template=security-action action=${params.action} to=${params.to} attempts=${delays.length + 1}`,
     );
-    Sentry.captureException(lastError, {
-      tags: { email_delivery: 'security_action' },
-      extra: { to: params.to, action: params.action, attempts: delays.length + 1 },
+    captureError(lastError, {
+      tags: { email_delivery: 'security_action', action: params.action },
+      extra: { to: params.to, attempts: delays.length + 1 },
+      fingerprint: ['email_delivery', 'security_action', params.action],
     });
   });
 };

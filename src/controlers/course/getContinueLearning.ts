@@ -21,7 +21,7 @@ import { getContinueLearning } from '@services/progressService';
  *                 data:
  *                   type: object
  *                   nullable: true
- *                   required: [courseId, courseSlug, courseName, courseGoal, moduleName, lessonName, moduleIndex, lessonIndex, courseProgress]
+ *                   required: [courseId, courseSlug, courseName, courseGoal, moduleName, lessonName, moduleIndex, lessonIndex, lessonHeroImageUrl, courseProgress]
  *                   properties:
  *                     courseId:
  *                       type: string
@@ -40,6 +40,10 @@ import { getContinueLearning } from '@services/progressService';
  *                       type: integer
  *                     lessonIndex:
  *                       type: integer
+ *                     lessonHeroImageUrl:
+ *                       type: string
+ *                       nullable: true
+ *                       description: Hero image of the resume-target lesson. Null when content has not been generated or generation failed.
  *                     courseProgress:
  *                       $ref: '#/components/schemas/CourseProgressStats'
  */

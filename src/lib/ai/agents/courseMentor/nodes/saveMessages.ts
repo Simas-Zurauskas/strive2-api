@@ -69,7 +69,7 @@ export const saveMessages: NodeFunction = async (state) => {
 
   // Concatenate every text contribution from AI messages this turn —
   // INCLUDING ones that also issued tool_calls. An iteration like
-  // `text="You have 2 insights due..." tool_calls=1` produces visible
+  // `text="You have 2 recall cards due..." tool_calls=1` produces visible
   // text the user reads before the tool fires; the old "no tool_calls"
   // filter silently dropped it on persist, so reload showed the
   // user's question with nothing after it. Joining with "\n\n"

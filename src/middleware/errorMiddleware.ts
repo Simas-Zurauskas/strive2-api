@@ -2,6 +2,7 @@ import { ENVIRONMENT } from '@conf/env';
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { lifecycleLog } from '@lib/loggers';
+import { captureError } from '@lib/errorReporter';
 
 export const ERROR_CODES = [
   'CUSTOM_ERROR',
@@ -10,6 +11,7 @@ export const ERROR_CODES = [
   'EMAIL_ALREADY_VERIFIED',
   'EMAIL_VERIFICATION_EXPIRED',
   'EMAIL_VERIFICATION_INVALID',
+  'VERIFICATION_RESEND_TOO_SOON',
   'PASSWORD_RESET_INVALID',
   'PASSWORD_RESET_EXPIRED',
   'PASSWORD_ALREADY_SET',
@@ -78,7 +80,7 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
   }
 
   // Precedence: an explicit `res.status(4xx)` the controller set wins; next
-  // we honor `err.statusCode` (used by `parseIndexParam` / `parseInsightIdParam`
+  // we honor `err.statusCode` (used by `parseIndexParam` / `parseRecallCardIdParam`
   // and similar throw-with-code helpers); fallback is 500. Without the err
   // branch those validation throws silently escalated to 500s in logs.
   const errStatus = typeof err.statusCode === 'number' ? err.statusCode : undefined;
@@ -101,6 +103,27 @@ export const errorHandler = async (err: IError, req: Request, res: Response, nex
       `ua="${userAgent?.substring(0, 100) ?? '-'}"` +
       (ENVIRONMENT !== 'production' && err.stack ? `\n${err.stack}` : ''),
   );
+
+  // Only 5xx (server bugs / unexpected exceptions) reach Sentry. 4xx are
+  // operational signals that the API surfaces to the client — Zod validation,
+  // insufficient credits, unverified email, too many concurrent jobs — and
+  // reporting them would burn the event quota and bury real signal.
+  // `captureError` also gates on operational client errors as a defence in
+  // depth in case `statusCode` is missing on the err itself.
+  if (statusCode >= 500) {
+    captureError(err, {
+      tags: {
+        http_status: statusCode,
+        http_method: method,
+        ...(errorCode ? { error_code: errorCode } : {}),
+      },
+      extra: {
+        url,
+        requestId: requestIdVal,
+        userAgent: userAgent?.substring(0, 200),
+      },
+    });
+  }
 
   res.status(statusCode).json({
     message,
