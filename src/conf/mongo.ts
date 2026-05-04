@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
-import * as Sentry from '@sentry/node';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
 import { deleteByPrefix } from '@services/s3Service';
 import { bgError } from '@lib/bg';
+import { captureError } from '@lib/errorReporter';
 import { lifecycleLog, jobLog } from '@lib/loggers';
 
 import { MONGO_URI } from './env';
@@ -62,7 +62,10 @@ export const cleanupOrphanedJobs = async () => {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     jobLog.error(`reaper:fail msg=${message}`);
-    Sentry.captureException(error);
+    captureError(error, {
+      tags: { area: 'mongo.boot', phase: 'reaper' },
+      fingerprint: ['mongo.boot', 'reaper'],
+    });
   }
 };
 
@@ -85,14 +88,21 @@ const connectDB = async () => {
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       lifecycleLog.error(`mongo:indexes-sync-fail model=Course msg=${message}`);
-      Sentry.captureException(error);
+      captureError(error, {
+        tags: { area: 'mongo.boot', phase: 'index_sync', model: 'Course' },
+        fingerprint: ['mongo.boot', 'index_sync', 'Course'],
+      });
     }
 
     await cleanupOrphanedJobs();
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     lifecycleLog.error(`mongo:connect-fail msg=${message} — refusing to boot`);
-    Sentry.captureException(error);
+    captureError(error, {
+      level: 'fatal',
+      tags: { area: 'mongo.boot', phase: 'connect' },
+      fingerprint: ['mongo.boot', 'connect'],
+    });
     process.exit(1);
   }
 };

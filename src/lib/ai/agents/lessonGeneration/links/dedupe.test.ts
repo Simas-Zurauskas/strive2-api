@@ -107,7 +107,7 @@ test('utm_* prefix still stripped (Phase 1 regression guard)', () => {
 
 test('same title on different hosts collapses to highest-score survivor (Emily arxiv+mdpi case)', () => {
   const sharedTitle =
-    'Comprehensive Insights into Cholesterol-Mediated Modulation of Membrane Function';
+    'Comprehensive Recall into Cholesterol-Mediated Modulation of Membrane Function';
   const input = [
     makeCandidate({
       id: 'arxiv',

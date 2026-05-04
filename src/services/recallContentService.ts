@@ -1,29 +1,29 @@
 import { Types } from 'mongoose';
-import InsightModel, { IInsight } from '@models/InsightModel';
+import RecallCardModel, { IRecallCard } from '@models/RecallCardModel';
 import LessonContentModel from '@models/LessonContentModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
-import { InsightKind, normalizeConceptTag } from '@lib/insightConstants';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
+import { RecallCardKind, normalizeConceptTag } from '@lib/recallConstants';
 import { genLog } from '@lib/loggers';
 
 // ── Types ──────────────────────────────────────────────────
 
 /**
- * Raw insight emitted by the LangGraph generator. Not yet validated or
+ * Raw recall card emitted by the LangGraph generator. Not yet validated or
  * associated with a persisted lesson.
  */
-export interface GeneratedInsight {
-  kind: InsightKind;
+export interface GeneratedRecallCard {
+  kind: RecallCardKind;
   prompt: string;
   answer: string;
   conceptTags: string[];
   sourceBlockId: string;
 }
 
-export interface PersistInsightsParams {
+export interface PersistRecallCardsParams {
   courseId: string;
   moduleIndex: number;
   lessonIndex: number;
-  insights: GeneratedInsight[];
+  cards: GeneratedRecallCard[];
 }
 
 // ── Dedup helpers ─────────────────────────────────────────
@@ -40,10 +40,10 @@ const normalizeForDedup = (s: string): string =>
     .replace(/[^\w\s]/g, '')
     .trim();
 
-const dedupeWithinLesson = (insights: GeneratedInsight[]): GeneratedInsight[] => {
+const dedupeWithinLesson = (cards: GeneratedRecallCard[]): GeneratedRecallCard[] => {
   const seen = new Set<string>();
-  const unique: GeneratedInsight[] = [];
-  for (const ins of insights) {
+  const unique: GeneratedRecallCard[] = [];
+  for (const ins of cards) {
     const key = `${ins.kind}|${normalizeForDedup(ins.prompt)}|${normalizeForDedup(ins.answer)}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -55,52 +55,52 @@ const dedupeWithinLesson = (insights: GeneratedInsight[]): GeneratedInsight[] =>
 // ── Persist ──────────────────────────────────────────────
 
 /**
- * Replace all insights for a given (course, module, lesson) coordinate with
+ * Replace all recall cards for a given (course, module, lesson) coordinate with
  * the freshly generated set. Call this AFTER the LessonContent row exists.
  *
  * Strategy:
  *   1. Look up the LessonContent._id (required as FK).
- *   2. Delete existing insights tied to this lessonId.
+ *   2. Delete existing recall cards tied to this lessonId.
  *   3. Insert the new set (dedup'd + validated).
- *   4. Orphaned UserInsightProgress rows (if any) become unreachable — they
- *      have no matching Insight. They're cleaned up lazily when the user's
- *      queue query filters against the insight collection, and swept on a
+ *   4. Orphaned UserRecallProgress rows (if any) become unreachable — they
+ *      have no matching RecallCard. They're cleaned up lazily when the user's
+ *      queue query filters against the recall card collection, and swept on a
  *      background job later (deferred).
  *
- * Returns the list of persisted insight _ids.
+ * Returns the list of persisted recall card _ids.
  */
-export const persistLessonInsights = async (params: PersistInsightsParams): Promise<string[]> => {
+export const persistLessonRecallCards = async (params: PersistRecallCardsParams): Promise<string[]> => {
   const { courseId, moduleIndex, lessonIndex } = params;
 
-  if (params.insights.length === 0) return [];
+  if (params.cards.length === 0) return [];
 
   const lesson = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex })
     .select('_id')
     .lean();
 
   if (!lesson) {
-    genLog.warn(`lesson:insights persist-skip lesson=${courseId}/${moduleIndex}/${lessonIndex} reason=lesson_content_not_found`);
+    genLog.warn(`lesson:recall persist-skip lesson=${courseId}/${moduleIndex}/${lessonIndex} reason=lesson_content_not_found`);
     return [];
   }
 
   const lessonId = lesson._id as Types.ObjectId;
   const courseObjId = new Types.ObjectId(courseId);
 
-  const deduped = dedupeWithinLesson(params.insights)
-    .map((i) => normalizeInsight(i))
-    .filter((i) => i !== null) as GeneratedInsight[];
+  const deduped = dedupeWithinLesson(params.cards)
+    .map((i) => normalizeRecallCard(i))
+    .filter((i) => i !== null) as GeneratedRecallCard[];
 
   if (deduped.length === 0) {
-    // Still clear any stale insights for this lesson so we don't leave them
+    // Still clear any stale recall cards for this lesson so we don't leave them
     // orphaned after a regeneration that produced zero valid items.
-    await InsightModel.deleteMany({ lessonId });
+    await RecallCardModel.deleteMany({ lessonId });
     return [];
   }
 
   // Atomic replace: delete old, insert new.
-  await InsightModel.deleteMany({ lessonId });
+  await RecallCardModel.deleteMany({ lessonId });
 
-  const docs: Omit<IInsight, 'createdAt' | 'updatedAt'>[] = deduped.map((i) => ({
+  const docs: Omit<IRecallCard, 'createdAt' | 'updatedAt'>[] = deduped.map((i) => ({
     courseId: courseObjId,
     lessonId,
     moduleIndex,
@@ -113,8 +113,8 @@ export const persistLessonInsights = async (params: PersistInsightsParams): Prom
     version: 1,
   }));
 
-  const inserted = await InsightModel.insertMany(docs);
-  genLog.info(`lesson:insights persist-ok count=${inserted.length} lesson=${courseId}/${moduleIndex}/${lessonIndex}`);
+  const inserted = await RecallCardModel.insertMany(docs);
+  genLog.info(`lesson:recall persist-ok count=${inserted.length} lesson=${courseId}/${moduleIndex}/${lessonIndex}`);
 
   return inserted.map((d) => (d._id as Types.ObjectId).toString());
 };
@@ -124,7 +124,7 @@ export const persistLessonInsights = async (params: PersistInsightsParams): Prom
  * that are structurally invalid (e.g. empty text after trim, cloze without a
  * blank marker).
  */
-const normalizeInsight = (raw: GeneratedInsight): GeneratedInsight | null => {
+const normalizeRecallCard = (raw: GeneratedRecallCard): GeneratedRecallCard | null => {
   const prompt = raw.prompt?.trim();
   const answer = raw.answer?.trim();
   if (!prompt || !answer) return null;
@@ -150,20 +150,20 @@ const normalizeInsight = (raw: GeneratedInsight): GeneratedInsight | null => {
 // ── Cleanup on course/lesson delete ──────────────────────
 
 /**
- * Remove all insights (and progress rows) tied to a course. Call from
+ * Remove all recall cards (and progress rows) tied to a course. Call from
  * courseCleanupService when a course is deleted.
  */
-export const deleteCourseInsights = async (courseId: string): Promise<void> => {
+export const deleteCourseRecallCards = async (courseId: string): Promise<void> => {
   const courseObjId = new Types.ObjectId(courseId);
 
-  // 1. Gather insight ids to cascade to UserInsightProgress.
-  const insights = await InsightModel.find({ courseId: courseObjId }).select('_id').lean();
-  const insightIds = insights.map((i) => i._id);
+  // 1. Gather recall card ids to cascade to UserRecallProgress.
+  const cards = await RecallCardModel.find({ courseId: courseObjId }).select('_id').lean();
+  const recallCardIds = cards.map((i) => i._id);
 
-  if (insightIds.length === 0) return;
+  if (recallCardIds.length === 0) return;
 
   await Promise.all([
-    InsightModel.deleteMany({ courseId: courseObjId }),
-    UserInsightProgressModel.deleteMany({ insightId: { $in: insightIds } }),
+    RecallCardModel.deleteMany({ courseId: courseObjId }),
+    UserRecallProgressModel.deleteMany({ recallCardId: { $in: recallCardIds } }),
   ]);
 };

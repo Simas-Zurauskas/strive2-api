@@ -10,13 +10,13 @@ import assert from 'node:assert/strict';
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import mongoose from 'mongoose';
 import { setupTestDb } from '../../test-helpers/db';
-import { makeUser, makeCourse, makeLessonContent, makeInsight, makeInsightProgress } from '../../test-helpers/factories';
+import { makeUser, makeCourse, makeLessonContent, makeRecallCard, makeRecallProgress } from '../../test-helpers/factories';
 import LessonContentModel from '@models/LessonContentModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import InsightModel from '@models/InsightModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
+import RecallCardModel from '@models/RecallCardModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import CourseDesignChatModel from '@models/CourseDesignChatModel';
 
 vi.mock('@services/s3Service', () => ({
@@ -45,18 +45,18 @@ describe('cleanupCourseContent', () => {
     const result = await cleanupCourseContent(course._id.toString());
     expect(result.lessonContentDeleted).toBe(0);
     expect(result.lessonProgressDeleted).toBe(0);
-    expect(result.insightsDeleted).toBe(0);
-    expect(result.insightProgressDeleted).toBe(0);
+    expect(result.recallCardsDeleted).toBe(0);
+    expect(result.recallProgressDeleted).toBe(0);
 
     // S3 cleanup is fire-and-forget; we mocked it to resolve
     expect(deleteByPrefix).toHaveBeenCalledWith(`lessons/${course._id}/`);
   });
 
-  test('cascades through lessons, quizzes, insights, and dependent insight progress', async () => {
+  test('cascades through lessons, quizzes, recall cards, and dependent recall progress', async () => {
     const user = await makeUser();
     const course = await makeCourse({ userId: user._id });
 
-    // Seed: 2 lesson contents, 1 quiz content, 1 insight + progress, 1 chat session
+    // Seed: 2 lesson contents, 1 quiz content, 1 recall card + progress, 1 chat session
     await makeLessonContent({ courseId: course._id, moduleIndex: 0, lessonIndex: 0 });
     await makeLessonContent({ courseId: course._id, moduleIndex: 1, lessonIndex: 0 });
     await ModuleQuizContentModel.create({
@@ -66,10 +66,10 @@ describe('cleanupCourseContent', () => {
       version: 1,
     });
     const lesson = await makeLessonContent({ courseId: course._id, moduleIndex: 2, lessonIndex: 0 });
-    const insight = await makeInsight({ courseId: course._id, lessonId: lesson._id });
-    await makeInsightProgress({
+    const card = await makeRecallCard({ courseId: course._id, lessonId: lesson._id });
+    await makeRecallProgress({
       userId: user._id,
-      insightId: insight._id,
+      recallCardId: card._id,
       reps: 1,
     });
     await CourseDesignChatModel.create({
@@ -81,15 +81,15 @@ describe('cleanupCourseContent', () => {
     const result = await cleanupCourseContent(course._id.toString());
     expect(result.lessonContentDeleted).toBe(3);
     expect(result.quizContentDeleted).toBe(1);
-    expect(result.insightsDeleted).toBe(1);
-    expect(result.insightProgressDeleted).toBe(1);
+    expect(result.recallCardsDeleted).toBe(1);
+    expect(result.recallProgressDeleted).toBe(1);
     expect(result.chatSessionsDeleted).toBe(1);
 
     // Verify nothing left
     expect(await LessonContentModel.countDocuments({ courseId: course._id })).toBe(0);
     expect(await ModuleQuizContentModel.countDocuments({ courseId: course._id })).toBe(0);
-    expect(await InsightModel.countDocuments({ courseId: course._id })).toBe(0);
-    expect(await UserInsightProgressModel.countDocuments({ insightId: insight._id })).toBe(0);
+    expect(await RecallCardModel.countDocuments({ courseId: course._id })).toBe(0);
+    expect(await UserRecallProgressModel.countDocuments({ recallCardId: card._id })).toBe(0);
   });
 
   test('cleans only the targeted course (other courses untouched)', async () => {

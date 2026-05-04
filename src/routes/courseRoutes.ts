@@ -177,7 +177,7 @@ router.get('/:courseId/module-quiz/:moduleIndex/progress', getModuleQuizProgress
 if (ENVIRONMENT === 'development') {
   router.delete('/:courseId/module-quiz/:moduleIndex/reset', resetModuleQuizController);
   // Dev-only stats endpoint consumed by the debug orchestrator to surface
-  // insight count + curated link count per lesson in its markdown reports.
+  // recall count + curated link count per lesson in its markdown reports.
   router.get(
     '/:courseId/lesson-content/:moduleIndex/:lessonIndex/stats',
     getLessonContentStatsController,

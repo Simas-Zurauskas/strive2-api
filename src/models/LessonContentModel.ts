@@ -28,6 +28,15 @@ export interface ILessonContent {
   audioRate: number | null;
   audioContentHash: string | null;
   audioGeneratedAt: Date | null;
+  /**
+   * Timestamp of the last billed TTS synthesis for this lesson — set only
+   * on cache miss in `runLessonNarration`, NOT on cache hits. Drives the
+   * per-lesson TTS cooldown gate that prevents accidental double-spend
+   * (rapid clicks, voice toggling). Distinct from `audioGeneratedAt`,
+   * which updates on every narration request (hit or miss) to surface
+   * the latest playback metadata.
+   */
+  lastTtsSpendAt: Date | null;
   summary: string | null;
   completed: boolean;
   /**
@@ -80,6 +89,7 @@ const schema = new Schema<ILessonContent>(
     audioRate: { type: Number, default: null },
     audioContentHash: { type: String, default: null },
     audioGeneratedAt: { type: Date, default: null },
+    lastTtsSpendAt: { type: Date, default: null },
     summary: { type: String, default: null },
     completed: { type: Boolean, default: false },
     suggestedMentorPrompts: {

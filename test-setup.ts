@@ -39,6 +39,14 @@ stub('STRIPE_WEBHOOK_SECRET', 'whsec_stub');
 stub('OPENAI_API_KEY', 'test');
 stub('PINECONE_API_KEY', 'test');
 stub('PINECONE_INDEX_NAME', 'test-index');
+// Sentry DSN is required at boot. The test stub uses the canonical
+// example DSN format from the Sentry docs — `Sentry.init` validates the
+// shape but the SDK never sends events when ENVIRONMENT='test' (we leave
+// `tracesSampleRate: 0` and tests never hit captureError; `errorReporter`
+// also wraps every SDK call in try/catch so a misconfigured DSN can't
+// fail a test).
+stub('SENTRY_DSN', 'https://public@o0.ingest.sentry.io/0');
+stub('GOOGLE_TTS_CREDENTIALS_JSON', '{}');
 
 // Subscription Stripe price IDs — only used by stripeService tests, but
 // stubbed here so any module that pulls them in at load time also sees them.

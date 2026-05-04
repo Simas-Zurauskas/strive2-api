@@ -16,8 +16,8 @@ import LessonMentorChatModel from '@models/LessonMentorChatModel';
 import LessonContentModel from '@models/LessonContentModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
-import InsightModel from '@models/InsightModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
+import RecallCardModel from '@models/RecallCardModel';
 
 /** Format lesson blocks as markdown for system prompt injection. */
 const blocksToMarkdown = (
@@ -48,20 +48,20 @@ const buildLearnerContext = async ({
 }): Promise<string> => {
   const userObjectId = new Types.ObjectId(userId);
 
-  const [lessonProgress, quizProgress, insightIds] = await Promise.all([
+  const [lessonProgress, quizProgress, recallCardIds] = await Promise.all([
     UserLessonProgressModel.findOne({ userId: userObjectId, courseId, moduleIndex, lessonIndex })
       .select('status completedAt timeSpentSeconds')
       .lean(),
     UserModuleQuizProgressModel.findOne({ userId: userObjectId, courseId, moduleIndex })
       .select('bestScore bestTier nextReviewAt')
       .lean(),
-    InsightModel.distinct('_id', { courseId, moduleIndex, lessonIndex }) as Promise<Types.ObjectId[]>,
+    RecallCardModel.distinct('_id', { courseId, moduleIndex, lessonIndex }) as Promise<Types.ObjectId[]>,
   ]);
 
-  const insightsDue = insightIds.length > 0
-    ? await UserInsightProgressModel.countDocuments({
+  const recallDue = recallCardIds.length > 0
+    ? await UserRecallProgressModel.countDocuments({
         userId: userObjectId,
-        insightId: { $in: insightIds },
+        recallCardId: { $in: recallCardIds },
         nextDue: { $lte: new Date() },
       })
     : 0;
@@ -78,7 +78,7 @@ const buildLearnerContext = async ({
     lines.push('- Module quiz: not taken');
   }
 
-  lines.push(`- Insights due for review from this lesson: ${insightsDue}`);
+  lines.push(`- Recall cards due for review from this lesson: ${recallDue}`);
 
   return lines.join('\n');
 };

@@ -1,5 +1,4 @@
 import mongoose from 'mongoose';
-import * as Sentry from '@sentry/node';
 import UserModel from '@models/UserModel';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import { emitCreditsUpdated } from '@lib/creditSocket';
@@ -12,6 +11,7 @@ import {
 import { getUsageContext } from '@lib/usageContext';
 import { bumpCreditDebitExhausted } from '@lib/metrics';
 import { monetizationLog } from '@lib/loggers';
+import { captureWarning } from '@lib/errorReporter';
 import { withCreditTransaction } from '@lib/dbTransaction';
 
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -329,9 +329,9 @@ export const debitActualSpend = async ({
     `Debit retries exhausted: user=${String(userId)} job=${String(jobId)} type=${jobType} spent=${microCents}μ¢ — user got free work`,
   );
   bumpCreditDebitExhausted();
-  Sentry.captureMessage('debitActualSpend exhausted retries', {
-    level: 'warning',
-    tags: { area: 'credits.debit', jobType },
+  captureWarning('debitActualSpend exhausted retries', {
+    tags: { area: 'credits.debit', job_type: jobType },
     extra: { userId: String(userId), jobId: String(jobId), microCents },
+    fingerprint: ['credits.debit', 'exhausted-retries', jobType],
   });
 };

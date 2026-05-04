@@ -26,6 +26,17 @@ const SENSITIVE_KEYS = new Set([
   'stripeSecretKey',
 ]);
 
+// Parse `SENTRY_TRACES_SAMPLE_RATE` from env. Allows ops to tune sampling
+// per environment without redeploying. Falls back to 0 (off) on any parse
+// error or absent env so a typo never accidentally bills 100% of traffic.
+const parseSampleRate = (raw: string | undefined, env: string): number => {
+  if (env === 'test') return 0;
+  if (!raw) return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return 0;
+  return n;
+};
+
 const scrubObject = (input: unknown, depth = 0): unknown => {
   if (depth > 4) return '[truncated:depth]';
   if (input == null) return input;
@@ -42,13 +53,28 @@ const scrubObject = (input: unknown, depth = 0): unknown => {
   return out;
 };
 
+// Loud warning when a production deployment is missing the release SHA.
+// Sentry events without `release` can't be tied to a specific deploy, so
+// "which deploy broke this?" becomes a manual log-spelunking exercise.
+// Don't refuse to boot — a missing SHA is a CI-hygiene bug, not a stop-
+// the-world condition — but the warning is intentionally noisy so the
+// next ops review notices.
+if (ENVIRONMENT === 'production' && !RELEASE_SHA) {
+  lifecycleLog.error(
+    'sentry:warn RELEASE_SHA unset in production — events will not be tied to a release. ' +
+      'CI must export RELEASE_SHA=$(git rev-parse HEAD) at deploy time.',
+  );
+}
+
 Sentry.init({
   dsn: SENTRY_DSN,
   environment: ENVIRONMENT,
   release: RELEASE_SHA,
-  // Default 1.0 captures every error; that's fine for now. Tracing is
-  // expensive enough that we leave it disabled until we have a use for it.
-  tracesSampleRate: 0,
+  // Tracing samples are expensive (one full transaction per sampled event).
+  // Default to off everywhere; opt-in via env so production can be cranked
+  // up to 0.05 etc. once event quota budget is approved without a code
+  // change. Tests stay at 0 always (no point sampling unit-test runs).
+  tracesSampleRate: parseSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE, ENVIRONMENT),
   // Don't auto-capture request data (bodies, headers, cookies). We attach
   // explicit, scrubbed `extra` fields at the callsites we care about.
   sendDefaultPii: false,
@@ -77,4 +103,6 @@ Sentry.init({
   },
 });
 
-lifecycleLog.info(`sentry:ready environment=${ENVIRONMENT}`);
+lifecycleLog.info(
+  `sentry:ready environment=${ENVIRONMENT} release=${RELEASE_SHA ?? '(unset)'}`,
+);

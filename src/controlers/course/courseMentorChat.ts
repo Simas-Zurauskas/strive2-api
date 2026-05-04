@@ -17,8 +17,8 @@ import LessonContentModel from '@models/LessonContentModel';
 import CourseMentorChatModel from '@models/CourseMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
-import InsightModel from '@models/InsightModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
+import RecallCardModel from '@models/RecallCardModel';
 
 
 /**
@@ -92,20 +92,20 @@ const buildCourseLearnerContext = async ({
 }): Promise<string> => {
   const userObjectId = new Types.ObjectId(userId);
 
-  const [lessonProgressRows, moduleQuizzes, insightIds] = await Promise.all([
+  const [lessonProgressRows, moduleQuizzes, recallCardIds] = await Promise.all([
     UserLessonProgressModel.find({ userId: userObjectId, courseId })
       .select('status completedAt')
       .lean(),
     UserModuleQuizProgressModel.find({ userId: userObjectId, courseId })
       .select('moduleIndex bestScore')
       .lean(),
-    InsightModel.distinct('_id', { courseId }) as Promise<Types.ObjectId[]>,
+    RecallCardModel.distinct('_id', { courseId }) as Promise<Types.ObjectId[]>,
   ]);
 
-  const insightsDue = insightIds.length > 0
-    ? await UserInsightProgressModel.countDocuments({
+  const recallDue = recallCardIds.length > 0
+    ? await UserRecallProgressModel.countDocuments({
         userId: userObjectId,
-        insightId: { $in: insightIds },
+        recallCardId: { $in: recallCardIds },
         nextDue: { $lte: new Date() },
       })
     : 0;
@@ -134,7 +134,7 @@ const buildCourseLearnerContext = async ({
   } else {
     lines.push('- Module quizzes: none taken');
   }
-  lines.push(`- Insights due across the course: ${insightsDue}`);
+  lines.push(`- Recall cards due across the course: ${recallDue}`);
 
   return lines.join('\n');
 };

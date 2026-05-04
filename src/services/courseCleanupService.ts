@@ -5,8 +5,8 @@ import LessonMentorChatModel from '@models/LessonMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import InsightModel from '@models/InsightModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
+import RecallCardModel from '@models/RecallCardModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import { deleteByPrefix } from '@services/s3Service';
 import { deleteLessonChunksForCourse } from '@services/lessonRagService';
 import { bgError } from '@lib/bg';
@@ -20,8 +20,8 @@ export interface CleanupResult {
   lessonProgressDeleted: number;
   quizContentDeleted: number;
   quizProgressDeleted: number;
-  insightsDeleted: number;
-  insightProgressDeleted: number;
+  recallCardsDeleted: number;
+  recallProgressDeleted: number;
   ragChunksDeleted: number;
   ragVectorsDeleted: number;
 }
@@ -32,10 +32,10 @@ export interface CleanupResult {
  * to prevent orphaned data keyed by stale module/lesson indices.
  */
 export const cleanupCourseContent = async (courseId: string): Promise<CleanupResult> => {
-  // Grab insight ids first so we can cascade to UserInsightProgress before
-  // deleting the insight rows themselves.
-  const insightIdDocs = await InsightModel.find({ courseId }).select('_id').lean();
-  const insightIds = insightIdDocs.map((d) => d._id);
+  // Grab recall card ids first so we can cascade to UserRecallProgress before
+  // deleting the recall card rows themselves.
+  const recallCardIdDocs = await RecallCardModel.find({ courseId }).select('_id').lean();
+  const recallCardIds = recallCardIdDocs.map((d) => d._id);
 
   const [
     chatSessions,
@@ -45,8 +45,8 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
     lessonProgress,
     quizContent,
     quizProgress,
-    insights,
-    insightProgress,
+    recallCards,
+    recallProgress,
     ragCleanup,
   ] = await Promise.all([
     CourseDesignChatModel.deleteMany({ courseId }),
@@ -59,9 +59,9 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
     UserLessonProgressModel.deleteMany({ courseId }),
     ModuleQuizContentModel.deleteMany({ courseId }),
     UserModuleQuizProgressModel.deleteMany({ courseId }),
-    InsightModel.deleteMany({ courseId }),
-    insightIds.length > 0
-      ? UserInsightProgressModel.deleteMany({ insightId: { $in: insightIds } })
+    RecallCardModel.deleteMany({ courseId }),
+    recallCardIds.length > 0
+      ? UserRecallProgressModel.deleteMany({ recallCardId: { $in: recallCardIds } })
       : Promise.resolve({ deletedCount: 0 }),
     // RAG cleanup wraps Mongo + Pinecone deletions; failure logs but doesn't
     // abort the rest of the cleanup. Returning zero counts on error means
@@ -87,8 +87,8 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
     lessonProgressDeleted: lessonProgress.deletedCount,
     quizContentDeleted: quizContent.deletedCount,
     quizProgressDeleted: quizProgress.deletedCount,
-    insightsDeleted: insights.deletedCount,
-    insightProgressDeleted: insightProgress.deletedCount ?? 0,
+    recallCardsDeleted: recallCards.deletedCount,
+    recallProgressDeleted: recallProgress.deletedCount ?? 0,
     ragChunksDeleted: ragCleanup.chunksDeleted,
     ragVectorsDeleted: ragCleanup.vectorsDeleted,
   };
@@ -100,7 +100,7 @@ export const cleanupCourseContent = async (courseId: string): Promise<CleanupRes
         `chats=${result.chatSessionsDeleted} mentor=${result.mentorChatsDeleted} ` +
         `lessons=${result.lessonContentDeleted} progress=${result.lessonProgressDeleted} ` +
         `quiz=${result.quizContentDeleted}/${result.quizProgressDeleted} ` +
-        `insights=${result.insightsDeleted}/${result.insightProgressDeleted} ` +
+        `recallCards=${result.recallCardsDeleted}/${result.recallProgressDeleted} ` +
         `rag=${result.ragChunksDeleted}/${result.ragVectorsDeleted}`,
     );
   }

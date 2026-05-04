@@ -44,7 +44,7 @@ const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: 'get_user_progress',
     description:
-      "Fetch the learner's progress data. Use 'course' scope to get the full picture (per-module quiz scores, insights due grouped by module, lessons completed). Use 'module' for a single module, 'lesson' for one lesson — but at course scope you usually want 'course'.",
+      "Fetch the learner's progress data. Use 'course' scope to get the full picture (per-module quiz scores, recall cards due grouped by module, lessons completed). Use 'module' for a single module, 'lesson' for one lesson — but at course scope you usually want 'course'.",
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -93,7 +93,7 @@ export const chat: NodeFunction = async (state, config) => {
   // The course-summary block ALREADY includes course goal + depth + the
   // full module/lesson tree with per-lesson status. The learnerContext
   // block (built by the controller) carries aggregated progress signals
-  // — quiz scores per module, insights due, days since last activity.
+  // — quiz scores per module, recall cards due, days since last activity.
   // Both are deterministic per `(courseId, userId, course state)` so
   // they cache turn-to-turn.
   const contextBlock = state.learnerContext

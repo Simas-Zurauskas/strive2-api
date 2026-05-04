@@ -19,7 +19,7 @@ export const MODEL_IDS = {
 
 // Each model gets its own cache-logging callback with a sensible default
 // label. Call sites that share a model (interactiveModel → quiz/interactive;
-// utilityModel → links/insights/grading) override per-call via
+// utilityModel → links/recall/grading) override per-call via
 // `.invoke(input, { metadata: { llmLabel: 'foo:bar' } })`. See
 // `lib/ai/cacheLogger.ts`.
 //

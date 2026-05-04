@@ -38,8 +38,14 @@ export const decodeAuthToken = (token: string): AuthTokenPayload | undefined => 
   }
 };
 
+// Cost factor 12 matches OWASP 2024 password-storage guidance on commodity
+// hardware. ~250-400 ms per hash on a modern server — fine for login
+// frequency. Existing hashes at lower costs keep working: bcrypt embeds
+// the cost in the hash string, so `bcrypt.compare` honors the per-row
+// cost and only newly-hashed passwords (signup, reset, change) get the
+// upgraded cost.
 export const hashPassword = async (password: string): Promise<string> => {
-  const salt = await bcrypt.genSalt(10);
+  const salt = await bcrypt.genSalt(12);
   return bcrypt.hash(password, salt);
 };
 

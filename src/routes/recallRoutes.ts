@@ -1,14 +1,14 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import {
-  getInsightQueueController,
-  rateInsightController,
-  skipInsightController,
-  setInsightModeController,
-  getInsightStatsController,
-  getInsightsDueCountController,
-  gradeInsightAnswerController,
-} from '@controlers/insight';
+  getRecallQueueController,
+  rateRecallController,
+  skipRecallController,
+  setRecallModeController,
+  getRecallStatsController,
+  getRecallDueCountController,
+  gradeRecallAnswerController,
+} from '@controlers/recall';
 import { protect, requireVerified } from '@middleware/authMiddleware';
 import { usageContextMiddleware } from '@middleware/usageContext';
 import { requireCredits } from '@middleware/requireCredits';
@@ -31,14 +31,14 @@ const gradeLimiter = rateLimit({
 router.use(protect, requireVerified, usageContextMiddleware);
 
 // Static paths must precede any parameterized ones (CLAUDE.md convention).
-router.get('/queue', getInsightQueueController);
-router.get('/stats', getInsightStatsController);
-router.get('/due-count', getInsightsDueCountController);
+router.get('/queue', getRecallQueueController);
+router.get('/stats', getRecallStatsController);
+router.get('/due-count', getRecallDueCountController);
 
-// Parameterized (all POST) — per-insight actions.
-router.post('/:insightId/rate', rateInsightController);
-router.post('/:insightId/skip', skipInsightController);
-router.post('/:insightId/mode', setInsightModeController);
-router.post('/:insightId/grade', gradeLimiter, requireCredits(), gradeInsightAnswerController);
+// Parameterized (all POST) — per-recall-card actions.
+router.post('/:recallCardId/rate', rateRecallController);
+router.post('/:recallCardId/skip', skipRecallController);
+router.post('/:recallCardId/mode', setRecallModeController);
+router.post('/:recallCardId/grade', gradeLimiter, requireCredits(), gradeRecallAnswerController);
 
-export { router as insightRoutes };
+export { router as recallRoutes };

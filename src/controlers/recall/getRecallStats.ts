@@ -1,13 +1,13 @@
 import asyncHandler from 'express-async-handler';
-import { getInsightStats, getInsightsDueCount } from '@services/insightQueueService';
+import { getRecallStats, getRecallDueCount } from '@services/recallQueueService';
 
 /**
  * @swagger
- * /api/insight/stats:
+ * /api/recall/stats:
  *   get:
- *     summary: Get per-user insight review stats (mastery dashboard)
+ *     summary: Get per-user recall review stats (mastery dashboard)
  *     tags:
- *       - Insight
+ *       - Recall
  *     security:
  *       - bearerAuth: []
  *     responses:
@@ -19,21 +19,21 @@ import { getInsightStats, getInsightsDueCount } from '@services/insightQueueServ
  *               required: [data]
  *               properties:
  *                 data:
- *                   $ref: '#/components/schemas/InsightStats'
+ *                   $ref: '#/components/schemas/RecallStats'
  */
-export const getInsightStatsController = asyncHandler(async (req, res) => {
+export const getRecallStatsController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const stats = await getInsightStats({ userId });
+  const stats = await getRecallStats({ userId });
   res.status(200).json({ data: stats });
 });
 
 /**
  * @swagger
- * /api/insight/due-count:
+ * /api/recall/due-count:
  *   get:
- *     summary: Cheap count of due insights for dashboard widgets
+ *     summary: Cheap count of due recall cards for dashboard widgets
  *     tags:
- *       - Insight
+ *       - Recall
  *     security:
  *       - bearerAuth: []
  *     responses:
@@ -51,8 +51,8 @@ export const getInsightStatsController = asyncHandler(async (req, res) => {
  *                     count:
  *                       type: integer
  */
-export const getInsightsDueCountController = asyncHandler(async (req, res) => {
+export const getRecallDueCountController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const count = await getInsightsDueCount({ userId });
+  const count = await getRecallDueCount({ userId });
   res.status(200).json({ data: { count } });
 });

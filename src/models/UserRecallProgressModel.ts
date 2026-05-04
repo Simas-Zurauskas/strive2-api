@@ -1,30 +1,30 @@
 import mongoose, { HydratedDocument, Schema, Types } from 'mongoose';
 import {
-  INSIGHT_MODES,
-  INSIGHT_RATINGS,
-  INSIGHT_STATES,
-  InsightMode,
-  InsightRating,
-  InsightState,
+  RECALL_MODES,
+  RECALL_RATINGS,
+  RECALL_STATES,
+  RecallMode,
+  RecallRating,
+  RecallState,
   LEITNER_MAX_BOX,
-} from '@lib/insightConstants';
+} from '@lib/recallConstants';
 
 // ── Types ──────────────────────────────────────────────────
 
-export interface IInsightReviewEvent {
+export interface IRecallReviewEvent {
   ratedAt: Date;
-  rating: InsightRating;
+  rating: RecallRating;
   /** Days elapsed since the previous review when this rating was submitted. */
   elapsedDays: number;
   /** Whether the user was in typed-recall mode when they rated. */
-  mode: InsightMode;
+  mode: RecallMode;
   /** For typed-recall: the similarity score (0..1) of their typed answer. */
   typedMatch?: number | null;
 }
 
-export interface IUserInsightProgress {
+export interface IUserRecallProgress {
   userId: Types.ObjectId;
-  insightId: Types.ObjectId;
+  recallCardId: Types.ObjectId;
 
   // ── Leitner v0 state ─────────────────────────────
   /** Current Leitner box (0..LEITNER_MAX_BOX). */
@@ -34,38 +34,38 @@ export interface IUserInsightProgress {
   /** Total times the user failed (rated 1/Again). */
   lapses: number;
   /** Coarse FSM state for UI + future FSRS migration. */
-  state: InsightState;
-  /** Interaction mode for this insight for the current user. */
-  mode: InsightMode;
+  state: RecallState;
+  /** Interaction mode for this recall card for the current user. */
+  mode: RecallMode;
 
   // ── Scheduling ────────────────────────────────────
   lastReview: Date | null;
   nextDue: Date;
 
   /**
-   * Set ONCE the first time this insight reaches box = LEITNER_MAX_BOX.
+   * Set ONCE the first time this recall card reaches box = LEITNER_MAX_BOX.
    * Never un-set — re-mastery after regression is not celebrated again.
-   * Drives `insight_mastery` XP and the `insight_mastered_first` achievement.
+   * Drives `recall_mastery` XP and the `recall_mastered_first` achievement.
    */
   masteredAt: Date | null;
 
   // ── Audit ────────────────────────────────────────
-  history: IInsightReviewEvent[];
+  history: IRecallReviewEvent[];
 
   createdAt: Date;
   updatedAt: Date;
 }
 
-export type UserInsightProgressDocument = HydratedDocument<IUserInsightProgress>;
+export type UserRecallProgressDocument = HydratedDocument<IUserRecallProgress>;
 
 // ── Sub-schemas ────────────────────────────────────────────
 
-const reviewEventSchema = new Schema<IInsightReviewEvent>(
+const reviewEventSchema = new Schema<IRecallReviewEvent>(
   {
     ratedAt: { type: Date, required: true },
-    rating: { type: Number, enum: [...INSIGHT_RATINGS], required: true },
+    rating: { type: Number, enum: [...RECALL_RATINGS], required: true },
     elapsedDays: { type: Number, required: true },
-    mode: { type: String, enum: [...INSIGHT_MODES], required: true },
+    mode: { type: String, enum: [...RECALL_MODES], required: true },
     typedMatch: { type: Number, default: null },
   },
   { _id: false },
@@ -73,23 +73,23 @@ const reviewEventSchema = new Schema<IInsightReviewEvent>(
 
 // ── Schema ─────────────────────────────────────────────────
 
-const schema = new Schema<IUserInsightProgress>(
+const schema = new Schema<IUserRecallProgress>(
   {
     userId: {
       type: Schema.Types.ObjectId,
       ref: 'User',
       required: true,
     },
-    insightId: {
+    recallCardId: {
       type: Schema.Types.ObjectId,
-      ref: 'Insight',
+      ref: 'RecallCard',
       required: true,
     },
     box: { type: Number, default: 0, min: 0, max: LEITNER_MAX_BOX },
     reps: { type: Number, default: 0 },
     lapses: { type: Number, default: 0 },
-    state: { type: String, enum: [...INSIGHT_STATES], default: 'new' },
-    mode: { type: String, enum: [...INSIGHT_MODES], default: 'tap-reveal' },
+    state: { type: String, enum: [...RECALL_STATES], default: 'new' },
+    mode: { type: String, enum: [...RECALL_MODES], default: 'tap-reveal' },
     lastReview: { type: Date, default: null },
     nextDue: { type: Date, required: true },
     masteredAt: { type: Date, default: null },
@@ -106,17 +106,17 @@ const schema = new Schema<IUserInsightProgress>(
   },
 );
 
-// A user reviews the same insight at most once at a time; one progress row per pair.
-schema.index({ userId: 1, insightId: 1 }, { unique: true });
+// A user reviews the same recall card at most once at a time; one progress row per pair.
+schema.index({ userId: 1, recallCardId: 1 }, { unique: true });
 // Hot query: the daily queue sorts by nextDue for this user.
 schema.index({ userId: 1, nextDue: 1 });
 
 // ── Model ──────────────────────────────────────────────────
 
-const UserInsightProgressModel = mongoose.model<IUserInsightProgress>(
-  'UserInsightProgress',
+const UserRecallProgressModel = mongoose.model<IUserRecallProgress>(
+  'UserRecallProgress',
   schema,
-  'UserInsightProgress',
+  'UserRecallProgress',
 );
 
-export default UserInsightProgressModel;
+export default UserRecallProgressModel;

@@ -36,6 +36,31 @@ import {
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
+// Per-call stall ceiling for every Anthropic / LangChain call in this
+// module. The Anthropic SDK's default request timeout is 10 minutes,
+// which is also the outer `JOB_TIMEOUT_MS` cap — so without this, a
+// degraded API can pin a `pLimit` slot for the full job timeout. 180 s
+// is generous: Sonnet generating a long course structure routinely
+// takes 60–120 s on healthy days, so this only fires on genuine stalls.
+// Combined with `withRetry`'s 3 attempts, the worst-case per-step
+// wall time becomes 3 × 180 s = 9 min — still inside the 10 min job
+// budget, with headroom for surrounding orchestration. This is a
+// stall-protection cap, NOT a normal-flow latency target — do not
+// lower it without re-verifying p99 generation latency under load.
+const ANTHROPIC_PER_CALL_TIMEOUT_MS = 180_000;
+
+const withCallTimeout = async <T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<T> => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ANTHROPIC_PER_CALL_TIMEOUT_MS);
+  try {
+    return await fn(ctrl.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 // Re-export from the validation module so existing importers (jobRunner.ts)
 // continue working without a mechanical import refactor.
 export { clarifyOutputSchema, isThinFreeText } from './clarifyValidation';
@@ -101,7 +126,7 @@ const GOAL_TYPE_CLASSIFIER_TOOL: Anthropic.Messages.Tool = {
 export const classifyGoalType = async (params: { goal: string }): Promise<GoalTypeClassification> => {
   const goal = sanitizePromptInput(params.goal);
   try {
-    const result = await anthropic.messages.create({
+    const result = await withCallTimeout((signal) => anthropic.messages.create({
       model: MODEL_IDS.HAIKU,
       max_tokens: 256,
       temperature: 0,
@@ -115,7 +140,7 @@ export const classifyGoalType = async (params: { goal: string }): Promise<GoalTy
       messages: [{ role: 'user', content: goal }],
       tools: [GOAL_TYPE_CLASSIFIER_TOOL],
       tool_choice: { type: 'tool', name: GOAL_TYPE_CLASSIFIER_TOOL.name },
-    });
+    }, { signal }));
 
     logCacheUsage({
       label: 'clarify:goalType',
@@ -248,7 +273,7 @@ export const clarifyCourse = async (params: { goal: string; goalType?: GoalType 
   // with the cacheControl helper contract — no effective prefix hit on Haiku.
   const response = await withRetry(async () => {
     try {
-      const result = await anthropic.messages.create({
+      const result = await withCallTimeout((signal) => anthropic.messages.create({
         model: MODEL_IDS.HAIKU,
         max_tokens: 4096,
         temperature: 0.7,
@@ -262,7 +287,7 @@ export const clarifyCourse = async (params: { goal: string; goalType?: GoalType 
         messages: [{ role: 'user', content: userMessage }],
         tools: [CLARIFY_TOOL],
         tool_choice: { type: 'tool', name: CLARIFY_TOOL.name },
-      });
+      }, { signal }));
 
       logCacheUsage({ label: 'clarify:questions', usage: usageFromAnthropic(result), model: MODEL_IDS.HAIKU });
 
@@ -597,7 +622,7 @@ Generate personalized depth previews for each tier.`;
   // refactor.
   const response = await withRetry(
     async () => {
-      const result = await anthropic.messages.create({
+      const result = await withCallTimeout((signal) => anthropic.messages.create({
         model: MODEL_IDS.HAIKU,
         max_tokens: 4096,
         temperature: 0.7,
@@ -611,7 +636,7 @@ Generate personalized depth previews for each tier.`;
         messages: [{ role: 'user', content: humanMessage }],
         tools: [DEPTH_PREVIEWS_TOOL],
         tool_choice: { type: 'tool', name: DEPTH_PREVIEWS_TOOL.name },
-      });
+      }, { signal }));
 
       logCacheUsage({
         label: 'clarify:depth-previews',
@@ -872,9 +897,11 @@ Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules).
 Fill in the reasoning fields first, then design the course structure.`;
 
   const response = await withRetry(() =>
-    structuredModel.invoke(
-      [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
-      { metadata: { llmLabel: 'structure:generate' } },
+    withCallTimeout((signal) =>
+      structuredModel.invoke(
+        [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
+        { metadata: { llmLabel: 'structure:generate' }, signal },
+      ),
     ),
   );
 
@@ -957,9 +984,11 @@ Rules for refinement:
 - The result should feel like a thoughtful revision, not a complete regeneration.`;
 
   const response = await withRetry(() =>
-    structuredModel.invoke(
-      [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
-      { metadata: { llmLabel: 'structure:refine' } },
+    withCallTimeout((signal) =>
+      structuredModel.invoke(
+        [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
+        { metadata: { llmLabel: 'structure:refine' }, signal },
+      ),
     ),
   );
 

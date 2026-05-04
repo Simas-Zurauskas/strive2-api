@@ -28,11 +28,11 @@
  */
 import mongoose from 'mongoose';
 import pLimit from 'p-limit';
-import * as Sentry from '@sentry/node';
+import { captureError, captureWarning, addBreadcrumb } from '@lib/errorReporter';
 import JobModel from '@models/JobModel';
 import CourseModel, { ICourse } from '@models/CourseModel';
 import LessonContentModel, { ILessonBlock } from '@models/LessonContentModel';
-import InsightModel from '@models/InsightModel';
+import RecallCardModel from '@models/RecallCardModel';
 import { JobType, CourseDepth } from '@lib/constants';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import { contextLoad, imageGeneration, linksGeneration } from '@lib/ai/agents/lessonGeneration/nodes';
@@ -41,7 +41,7 @@ import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
 import { clarifyCourse, classifyGoalType, generateCourseStructure, refineCourseStructure, generateDepthPreviews, isThinFreeText } from './courseService';
 import { cleanupCourseContent } from './courseCleanupService';
-import { GeneratedInsight, persistLessonInsights } from './insightContentService';
+import { GeneratedRecallCard, persistLessonRecallCards } from './recallContentService';
 import { deleteByPrefix } from './s3Service';
 import { jobEvents } from './jobEvents';
 import type { LessonProgressEvent } from '@src/types/socketEvents';
@@ -218,7 +218,13 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
   jobLimit(() => processJob(job._id.toString())).catch((err) => {
     const msg = err instanceof Error ? err.message : String(err);
     jobLog.error(`processJob:unhandled jobId=${job._id.toString()} msg=${msg}`);
-    Sentry.captureException(err, { tags: { source: 'jobRunner.processJob.unhandled' } });
+    // `processJob` has its own try/catch — anything that escapes it is a
+    // bug in the runner itself (heartbeat interval, finally block, etc.).
+    captureError(err, {
+      tags: { source: 'jobRunner.processJob.unhandled', job_type: params.type },
+      extra: { jobId: job._id.toString(), userId: params.userId, courseId: params.courseId },
+      fingerprint: ['jobRunner', 'processJob.unhandled', params.type],
+    });
   });
 
   return job._id.toString();
@@ -343,12 +349,12 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       //   2. `jobEvents.emit('progress', ...)` — the live-stream channel the
       //      client subscribes to via Socket.io. Zero client-server round
       //      trips per block, unlike the 3 s LessonContent poll.
-      //   3. State captured here (summary, heroImageUrl, pendingInsights) for
-      //      the final persistence gate + insight persistence after the
+      //   3. State captured here (summary, heroImageUrl, pendingRecallCards) for
+      //      the final persistence gate + recall card persistence after the
       //      agent stream completes.
       const allBlocks: ILessonBlock[] = [];
       let savedHeroImageUrl: string | null = null;
-      let pendingInsights: GeneratedInsight[] = [];
+      let pendingRecallCards: GeneratedRecallCard[] = [];
 
       let saveTimer: ReturnType<typeof setTimeout> | null = null;
       let savePromise: Promise<void> = Promise.resolve();
@@ -438,9 +444,9 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
             const { contentSummary } = chunk.contentGeneration as { contentSummary?: string };
             if (contentSummary) capturedSummary = contentSummary;
           }
-          if (chunk.insightGeneration) {
-            const { insights } = chunk.insightGeneration as { insights?: GeneratedInsight[] };
-            if (insights) pendingInsights = insights;
+          if (chunk.recallCardGeneration) {
+            const { recallCards } = chunk.recallCardGeneration as { recallCards?: GeneratedRecallCard[] };
+            if (recallCards) pendingRecallCards = recallCards;
           }
           if (chunk.contentValidation) {
             // Derive placeholder hints deterministically from the blocks the
@@ -511,17 +517,17 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
           { upsert: true, returnDocument: 'after' },
         );
 
-        if (pendingInsights.length > 0) {
-          const persistedIds = await persistLessonInsights({
+        if (pendingRecallCards.length > 0) {
+          const persistedIds = await persistLessonRecallCards({
             courseId,
             moduleIndex,
             lessonIndex,
-            insights: pendingInsights,
+            cards: pendingRecallCards,
           }).catch((e) => {
-            bgError('jobRunner.persistLessonInsights')(e);
+            bgError('jobRunner.persistLessonRecallCards')(e);
             return [] as string[];
           });
-          emitProgress({ type: 'insights_saved', count: persistedIds.length });
+          emitProgress({ type: 'recall_cards_saved', count: persistedIds.length });
         }
 
         // Index the freshly-saved lesson into the RAG store. Awaited (not
@@ -581,8 +587,8 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
           LessonContentModel.deleteOne({ courseId, moduleIndex, lessonIndex, completed: false }).catch(
             bgError('jobRunner.cleanupLesson'),
           ),
-          InsightModel.deleteMany({ courseId, moduleIndex, lessonIndex }).catch(
-            bgError('jobRunner.cleanupInsights'),
+          RecallCardModel.deleteMany({ courseId, moduleIndex, lessonIndex }).catch(
+            bgError('jobRunner.cleanupRecallCards'),
           ),
           deleteByPrefix(`lessons/${courseId}/${moduleIndex}/${lessonIndex}/`).catch(
             bgError('jobRunner.cleanupS3'),
@@ -801,6 +807,24 @@ const processJob = async (jobId: string): Promise<void> => {
   let errorMessage: string | undefined;
 
   const jobMetadata = (job.metadata ?? {}) as Record<string, unknown>;
+
+  // Drop a breadcrumb at job start so any error captured deep inside the
+  // agent graph has a trail back to the originating job. Cheap (no
+  // network call) and correlates the error with the job in a single click
+  // in the Sentry UI.
+  addBreadcrumb({
+    category: 'job',
+    message: `${job.type}:start`,
+    level: 'info',
+    data: {
+      jobId,
+      jobType: job.type,
+      userId: job.userId.toString(),
+      courseId: job.courseId.toString(),
+      ...(typeof jobMetadata.moduleIndex === 'number' ? { moduleIndex: jobMetadata.moduleIndex } : {}),
+      ...(typeof jobMetadata.lessonIndex === 'number' ? { lessonIndex: jobMetadata.lessonIndex } : {}),
+    },
+  });
   // Snapshot the user's plan + subscription status at job-start so every
   // recordUsage call under the scope stamps these onto the persisted row.
   // Single projection — cheap; failures fall through to a stamp-less scope
@@ -860,9 +884,14 @@ const processJob = async (jobId: string): Promise<void> => {
   } catch (error: unknown) {
     errorMessage = error instanceof Error ? error.message : String(error);
     jobLog.error(`${job.type}:fail jobId=${jobId} ms=${Date.now() - startedAt} msg=${errorMessage}`);
-    Sentry.captureException(error, {
-      tags: { source: 'jobRunner', jobType: job.type },
-      extra: { jobId, courseId: job.courseId.toString(), metadata: job.metadata },
+    // Fingerprint by job type + error class so retries of the same job type
+    // hitting the same failure mode collapse into a single Sentry issue.
+    // `usageContext` is active here, so userId/plan/courseId are auto-tagged.
+    const errName = error instanceof Error ? error.name : 'Unknown';
+    captureError(error, {
+      tags: { source: 'jobRunner', job_type: job.type },
+      extra: { jobId, courseId: job.courseId.toString(), metadata: job.metadata, ms: Date.now() - startedAt },
+      fingerprint: ['jobRunner', 'job-failure', job.type, errName],
     });
   } finally {
     clearInterval(heartbeatInterval);
@@ -933,10 +962,12 @@ const sweepStuckJobs = async (): Promise<void> => {
     if (!job) return;
 
     jobLog.warn(`watchdog:stuck-job-killed jobId=${job._id.toString()} type=${job.type} userId=${job.userId.toString()}`);
-    Sentry.captureMessage('watchdog:stuck-job-killed', {
-      level: 'warning',
-      tags: { source: 'jobRunner.watchdog', jobType: job.type },
-      extra: { jobId: job._id.toString(), courseId: job.courseId.toString() },
+    // Fingerprint by jobType — a platform issue producing many stuck jobs
+    // of the same type folds into one Sentry issue with an event count.
+    captureWarning('watchdog:stuck-job-killed', {
+      tags: { source: 'jobRunner.watchdog', job_type: job.type },
+      extra: { jobId: job._id.toString(), courseId: job.courseId.toString(), userId: job.userId.toString() },
+      fingerprint: ['jobRunner.watchdog', 'stuck-job', job.type],
     });
 
     // Clear the course mutex so a new job can run. Use a conditional filter

@@ -33,14 +33,14 @@ const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: 'get_user_progress',
     description:
-      "Fetch the learner's progress data. Use 'lesson' scope to get their status, quiz responses, and time spent on this lesson. Use 'module' scope to get their module quiz score and how many insights are due for review.",
+      "Fetch the learner's progress data. Use 'lesson' scope to get their status, quiz responses, and time spent on this lesson. Use 'module' scope to get their module quiz score and how many recall cards are due for review.",
     input_schema: {
       type: 'object' as const,
       properties: {
         scope: {
           type: 'string',
           enum: ['lesson', 'module'],
-          description: "'lesson' for this lesson's progress, 'module' for quiz scores and insights due",
+          description: "'lesson' for this lesson's progress, 'module' for quiz scores and recall cards due",
         },
       },
       required: ['scope'],

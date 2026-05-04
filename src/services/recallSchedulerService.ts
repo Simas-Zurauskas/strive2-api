@@ -1,16 +1,16 @@
 import { Types } from 'mongoose';
-import UserInsightProgressModel, {
-  IInsightReviewEvent,
-  IUserInsightProgress,
-} from '@models/UserInsightProgressModel';
+import UserRecallProgressModel, {
+  IRecallReviewEvent,
+  IUserRecallProgress,
+} from '@models/UserRecallProgressModel';
 import {
-  INSIGHT_SKIP_DAYS,
-  InsightMode,
-  InsightRating,
-  InsightState,
+  RECALL_SKIP_DAYS,
+  RecallMode,
+  RecallRating,
+  RecallState,
   LEITNER_BOX_INTERVAL_DAYS,
   LEITNER_MAX_BOX,
-} from '@lib/insightConstants';
+} from '@lib/recallConstants';
 
 // ── Pure scheduling math (Leitner v0) ───────────────────
 
@@ -20,7 +20,7 @@ export interface SchedulerSnapshot {
   box: number;
   reps: number;
   lapses: number;
-  state: InsightState;
+  state: RecallState;
   lastReview: Date | null;
   nextDue: Date;
 }
@@ -41,11 +41,11 @@ export const applyRating = ({
   now,
 }: {
   snapshot: SchedulerSnapshot;
-  rating: InsightRating;
+  rating: RecallRating;
   now: Date;
 }): SchedulerSnapshot => {
   let { box, reps, lapses } = snapshot;
-  let state: InsightState;
+  let state: RecallState;
 
   switch (rating) {
     case 1:
@@ -94,21 +94,21 @@ const elapsedDays = ({ last, now }: { last: Date | null; now: Date }): number =>
   return Math.max(0, Math.floor((now.getTime() - last.getTime()) / DAY_MS));
 };
 
-// ── Rate an insight (persists + returns new snapshot) ───
+// ── Rate a recall card (persists + returns new snapshot) ───
 
-export interface RateInsightParams {
+export interface RateRecallParams {
   userId: string;
-  insightId: string;
-  rating: InsightRating;
+  recallCardId: string;
+  rating: RecallRating;
   /** Typed-recall match score (0..1) if the user answered via typed recall. */
   typedMatch?: number | null;
 }
 
-export interface RateInsightResult {
-  progress: IUserInsightProgress;
+export interface RateRecallResult {
+  progress: IUserRecallProgress;
   wasNew: boolean;
   /**
-   * True exactly once per insight, when the rating caused the first-ever
+   * True exactly once per recall card, when the rating caused the first-ever
    * transition to box = LEITNER_MAX_BOX. Guaranteed race-safe: under
    * concurrent writes only one caller observes `true`. Never true on
    * re-mastery after regression.
@@ -116,14 +116,14 @@ export interface RateInsightResult {
   justMastered: boolean;
 }
 
-export const rateInsight = async (params: RateInsightParams): Promise<RateInsightResult> => {
+export const rateRecall = async (params: RateRecallParams): Promise<RateRecallResult> => {
   const now = new Date();
   const userObjId = new Types.ObjectId(params.userId);
-  const insightObjId = new Types.ObjectId(params.insightId);
+  const cardObjId = new Types.ObjectId(params.recallCardId);
 
-  const existing = await UserInsightProgressModel.findOne({
+  const existing = await UserRecallProgressModel.findOne({
     userId: userObjId,
-    insightId: insightObjId,
+    recallCardId: cardObjId,
   });
 
   const wasNew = !existing;
@@ -149,8 +149,8 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
   const elapsed = elapsedDays({ last: currentSnapshot.lastReview, now });
   const next = applyRating({ snapshot: currentSnapshot, rating: params.rating, now });
 
-  const mode: InsightMode = existing?.mode ?? 'tap-reveal';
-  const event: IInsightReviewEvent = {
+  const mode: RecallMode = existing?.mode ?? 'tap-reveal';
+  const event: IRecallReviewEvent = {
     ratedAt: now,
     rating: params.rating,
     elapsedDays: elapsed,
@@ -158,8 +158,8 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
     typedMatch: params.typedMatch ?? null,
   };
 
-  const updated = await UserInsightProgressModel.findOneAndUpdate(
-    { userId: userObjId, insightId: insightObjId },
+  const updated = await UserRecallProgressModel.findOneAndUpdate(
+    { userId: userObjId, recallCardId: cardObjId },
     {
       $set: {
         box: next.box,
@@ -170,7 +170,7 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
         nextDue: next.nextDue,
       },
       // Rolling window on history[]. Downstream consumers in
-      // `insightQueueService.getInsightStats` only read the most recent
+      // `recallQueueService.getRecallStats` only read the most recent
       // two weeks of events (weekly counts + 14-day trend) plus
       // `history.length > 0` as a "has-been-reviewed" probe. Capping at
       // 200 entries preserves both signals — at Leitner's max cadence the
@@ -180,7 +180,7 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
       $push: { history: { $each: [event], $slice: -200 } },
       $setOnInsert: {
         userId: userObjId,
-        insightId: insightObjId,
+        recallCardId: cardObjId,
         mode,
       },
     },
@@ -193,10 +193,10 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
   // know a non-null return means THIS call won the mastery race.
   let justMastered = false;
   if (updated!.box === LEITNER_MAX_BOX && !updated!.masteredAt) {
-    const mastered = await UserInsightProgressModel.findOneAndUpdate(
+    const mastered = await UserRecallProgressModel.findOneAndUpdate(
       {
         userId: userObjId,
-        insightId: insightObjId,
+        recallCardId: cardObjId,
         masteredAt: null,
         box: LEITNER_MAX_BOX,
       },
@@ -210,7 +210,7 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
   }
 
   return {
-    progress: updated!.toJSON() as IUserInsightProgress,
+    progress: updated!.toJSON() as IUserRecallProgress,
     wasNew,
     justMastered,
   };
@@ -218,20 +218,20 @@ export const rateInsight = async (params: RateInsightParams): Promise<RateInsigh
 
 // ── Skip (soft defer) ────────────────────────────────────
 
-export const skipInsight = async (params: { userId: string; insightId: string }): Promise<IUserInsightProgress> => {
+export const skipRecall = async (params: { userId: string; recallCardId: string }): Promise<IUserRecallProgress> => {
   const now = new Date();
   const userObjId = new Types.ObjectId(params.userId);
-  const insightObjId = new Types.ObjectId(params.insightId);
+  const cardObjId = new Types.ObjectId(params.recallCardId);
 
-  const nextDue = new Date(now.getTime() + INSIGHT_SKIP_DAYS * DAY_MS);
+  const nextDue = new Date(now.getTime() + RECALL_SKIP_DAYS * DAY_MS);
 
-  const updated = await UserInsightProgressModel.findOneAndUpdate(
-    { userId: userObjId, insightId: insightObjId },
+  const updated = await UserRecallProgressModel.findOneAndUpdate(
+    { userId: userObjId, recallCardId: cardObjId },
     {
       $set: { nextDue },
       $setOnInsert: {
         userId: userObjId,
-        insightId: insightObjId,
+        recallCardId: cardObjId,
         box: 0,
         reps: 0,
         lapses: 0,
@@ -243,27 +243,27 @@ export const skipInsight = async (params: { userId: string; insightId: string })
     { upsert: true, returnDocument: 'after' },
   );
 
-  return updated!.toJSON() as IUserInsightProgress;
+  return updated!.toJSON() as IUserRecallProgress;
 };
 
 // ── Toggle mode ──────────────────────────────────────────
 
-export const setInsightMode = async (params: {
+export const setRecallMode = async (params: {
   userId: string;
-  insightId: string;
-  mode: InsightMode;
-}): Promise<IUserInsightProgress> => {
+  recallCardId: string;
+  mode: RecallMode;
+}): Promise<IUserRecallProgress> => {
   const userObjId = new Types.ObjectId(params.userId);
-  const insightObjId = new Types.ObjectId(params.insightId);
+  const cardObjId = new Types.ObjectId(params.recallCardId);
   const now = new Date();
 
-  const updated = await UserInsightProgressModel.findOneAndUpdate(
-    { userId: userObjId, insightId: insightObjId },
+  const updated = await UserRecallProgressModel.findOneAndUpdate(
+    { userId: userObjId, recallCardId: cardObjId },
     {
       $set: { mode: params.mode },
       $setOnInsert: {
         userId: userObjId,
-        insightId: insightObjId,
+        recallCardId: cardObjId,
         box: 0,
         reps: 0,
         lapses: 0,
@@ -275,5 +275,5 @@ export const setInsightMode = async (params: {
     { upsert: true, returnDocument: 'after' },
   );
 
-  return updated!.toJSON() as IUserInsightProgress;
+  return updated!.toJSON() as IUserRecallProgress;
 };

@@ -28,9 +28,15 @@ vi.mock('@lib/creditSocket', () => ({
   emitCreditsUpdated: vi.fn(),
 }));
 
-vi.mock('@sentry/node', () => ({
-  captureException: vi.fn(),
-  captureMessage: vi.fn(),
+// `creditService` reports the exhausted-retry warning through the
+// canonical `errorReporter` wrapper rather than calling Sentry directly,
+// so the mock surface is the wrapper. The wrapper itself is unit-tested
+// separately; here we just assert the wrapper was invoked.
+vi.mock('@lib/errorReporter', () => ({
+  captureError: vi.fn(),
+  captureWarning: vi.fn(),
+  addBreadcrumb: vi.fn(),
+  setSentryUser: vi.fn(),
 }));
 
 import {
@@ -388,7 +394,7 @@ describe('static-markup integration (recordUsage → debit)', () => {
 // ── debitActualSpend retry exhaustion (force the warning path) ──
 
 describe('debitActualSpend retry exhaustion', () => {
-  test('exhausted retries: warns + no debit, no ledger row, captureMessage fires', async () => {
+  test('exhausted retries: warns + no debit, no ledger row, captureWarning fires', async () => {
     const user = await makeUser();
     await UserModel.updateOne(
       { _id: user._id },
@@ -398,7 +404,7 @@ describe('debitActualSpend retry exhaustion', () => {
     // Force every CAS attempt to lose by stubbing UserModel.updateOne to
     // return modifiedCount: 0 for the debit call. Use spyOn so the spy is
     // restored after the test.
-    const Sentry = await import('@sentry/node');
+    const errorReporter = await import('@lib/errorReporter');
     const originalUpdateOne = UserModel.updateOne.bind(UserModel);
     const spy = vi.spyOn(UserModel, 'updateOne').mockImplementation(((
       filter: Record<string, unknown>,
@@ -441,7 +447,13 @@ describe('debitActualSpend retry exhaustion', () => {
       });
 
       expect(await CreditLedgerModel.countDocuments({ reason: 'debit_action' })).toBe(0);
-      expect(Sentry.captureMessage).toHaveBeenCalledOnce();
+      expect(errorReporter.captureWarning).toHaveBeenCalledOnce();
+      expect(errorReporter.captureWarning).toHaveBeenCalledWith(
+        'debitActualSpend exhausted retries',
+        expect.objectContaining({
+          tags: expect.objectContaining({ area: 'credits.debit' }),
+        }),
+      );
     } finally {
       spy.mockRestore();
     }

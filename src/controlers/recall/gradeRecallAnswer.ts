@@ -1,8 +1,8 @@
 import asyncHandler from 'express-async-handler';
 import { z } from 'zod';
-import { gradeTypedAnswer } from '@services/insightGradingService';
-import { loadAuthorizedInsight } from './authorize';
-import { parseInsightIdParam } from './validation';
+import { gradeTypedAnswer } from '@services/recallGradingService';
+import { loadAuthorizedRecallCard } from './authorize';
+import { parseRecallCardIdParam } from './validation';
 
 const gradeSchema = z.object({
   userAnswer: z.string().min(1, 'userAnswer is required').max(1000, 'userAnswer too long'),
@@ -10,16 +10,16 @@ const gradeSchema = z.object({
 
 /**
  * @swagger
- * /api/insight/{insightId}/grade:
+ * /api/recall/{recallCardId}/grade:
  *   post:
  *     summary: Grade a learner's typed-recall answer against the canonical (Haiku + Levenshtein short-circuit)
  *     tags:
- *       - Insight
+ *       - Recall
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: insightId
+ *         name: recallCardId
  *         required: true
  *         schema:
  *           type: string
@@ -45,22 +45,22 @@ const gradeSchema = z.object({
  *                 data:
  *                   $ref: '#/components/schemas/GradeResult'
  */
-export const gradeInsightAnswerController = asyncHandler(async (req, res) => {
+export const gradeRecallAnswerController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const insightId = parseInsightIdParam(req.params.insightId);
+  const recallCardId = parseRecallCardIdParam(req.params.recallCardId);
   const { userAnswer } = gradeSchema.parse(req.body);
 
-  // The insight itself is the source of truth for prompt + canonical answer —
+  // The recall card itself is the source of truth for prompt + canonical answer —
   // never trust the client to pass them. That also guards against prompt
   // injection attempts from a modified frontend. Ownership-gated to prevent
-  // grading another user's insight by guessing the id (BOLA).
-  const insight = await loadAuthorizedInsight({ userId, insightId });
+  // grading another user's recall card by guessing the id (BOLA).
+  const card = await loadAuthorizedRecallCard({ userId, recallCardId });
 
   const grade = await gradeTypedAnswer({
-    prompt: insight.prompt,
-    canonicalAnswer: insight.answer,
+    prompt: card.prompt,
+    canonicalAnswer: card.answer,
     userAnswer,
-    kind: insight.kind,
+    kind: card.kind,
   });
 
   res.status(200).json({ data: grade });

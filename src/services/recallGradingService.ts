@@ -2,7 +2,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { getUtilityModel } from '@lib/langchain';
 import { withRetry } from '@lib/retry';
-import { InsightKind } from '@lib/insightConstants';
+import { RecallCardKind } from '@lib/recallConstants';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ export const gradeTypedAnswer = async (params: {
   prompt: string;
   canonicalAnswer: string;
   userAnswer: string;
-  kind: InsightKind;
+  kind: RecallCardKind;
 }): Promise<GradeResult> => {
   const trimmed = params.userAnswer.trim();
   if (!trimmed) {
@@ -91,7 +91,7 @@ ${trimmed}`;
   const result = await withRetry(() =>
     model.invoke(
       [new SystemMessage(SYSTEM_PROMPT), new HumanMessage(humanMessage)],
-      { metadata: { llmLabel: 'insight:grade' } },
+      { metadata: { llmLabel: 'recall:grade' } },
     ),
   );
 

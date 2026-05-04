@@ -4,6 +4,7 @@ import asyncHandler from 'express-async-handler';
 import { decodeAuthToken } from '@lib/auth';
 import { AppError } from '@middleware/errorMiddleware';
 import { AuthProvider } from '@lib/constants';
+import { setSentryUser } from '@lib/errorReporter';
 
 export const protect = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   if (!req.headers.authorization?.startsWith('Bearer')) {
@@ -27,6 +28,11 @@ export const protect = asyncHandler(async (req: Request, res: Response, next: Ne
   }
 
   req.userId = decoded.id;
+  // Attach the user id to the Sentry scope so any downstream error
+  // captured during this request can be filtered/grouped by user without
+  // every callsite remembering to set it. `usageContext` middleware
+  // refines this further with plan/subscription tags once it loads them.
+  setSentryUser(decoded.id);
   next();
 });
 
@@ -63,6 +69,7 @@ export const optionalProtect = asyncHandler(
       const user = await UserModel.findById(decoded.id).select('tokenVersion').lean();
       if (user && decoded.tokenVersion === user.tokenVersion) {
         req.userId = decoded.id;
+        setSentryUser(decoded.id);
       }
     } catch {
       // Stay anonymous on any DB error — public surfaces should never 5xx
@@ -72,7 +79,7 @@ export const optionalProtect = asyncHandler(
   },
 );
 
-// Gates feature routes (course, gamification, insight, …) behind email
+// Gates feature routes (course, gamification, recall, …) behind email
 // verification for credential-based accounts. `protect` stays JWT-only so
 // /me, /logout, /resend-verification-authenticated, /delete-account remain
 // reachable for unverified users — otherwise the 401 interceptor on the

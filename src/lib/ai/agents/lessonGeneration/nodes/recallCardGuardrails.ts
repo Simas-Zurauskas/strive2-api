@@ -1,7 +1,7 @@
 /**
  * Cloze / qa authoring guardrails.
  *
- * Extracted from insightGeneration.ts so unit tests can import the validator
+ * Extracted from recallCardGeneration.ts so unit tests can import the validator
  * without pulling the LangChain side-effects that its parent module requires
  * at import time (env-var guards, LLM client construction).
  *
@@ -14,17 +14,17 @@
  *   - Mike's cloze had two blanks in one sentence ("{{blank}} and {{blank}}
  *     are marker traits"), violating atomicity.
  *
- * The INSIGHT_SYSTEM_PROMPT tightening is the primary defense; this module
+ * The RECALL_CARD_SYSTEM_PROMPT tightening is the primary defense; this module
  * is belt-and-braces. Failed candidates are dropped silently upstream —
- * lessons ship with fewer insights rather than worse ones.
+ * lessons ship with fewer recall cards rather than worse ones.
  */
 
-import { INSIGHT_KINDS } from '@lib/insightConstants';
+import { RECALL_CARD_KINDS } from '@lib/recallConstants';
 
-// Candidate shape — mirrors the Zod schema in insightGeneration.ts, but kept
+// Candidate shape — mirrors the Zod schema in recallCardGeneration.ts, but kept
 // as a plain interface here so this module has zero Zod/Langchain deps.
-export interface InsightCandidateLike {
-  kind: (typeof INSIGHT_KINDS)[number];
+export interface RecallCardCandidateLike {
+  kind: (typeof RECALL_CARD_KINDS)[number];
   prompt: string;
   answer: string;
   conceptTags?: string[];
@@ -47,11 +47,11 @@ export interface ValidationOutcome {
 }
 
 /**
- * Pure string-logic validator over a candidate insight. Returns {valid:true}
+ * Pure string-logic validator over a candidate recall card. Returns {valid:true}
  * for passing candidates and {valid:false, reason} for dropped ones. Reason
  * is for logging/observability only — never surfaced to clients.
  */
-export const validateInsightCandidate = (c: InsightCandidateLike): ValidationOutcome => {
+export const validateRecallCardCandidate = (c: RecallCardCandidateLike): ValidationOutcome => {
   const promptTrim = c.prompt.trim();
   const answerTrim = c.answer.trim();
 

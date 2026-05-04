@@ -1,6 +1,6 @@
 import type { ILessonBlock } from '@models/LessonContentModel';
 import type { JobType } from '@lib/constants';
-import type { GeneratedInsight } from '@services/insightContentService';
+import type { GeneratedRecallCard } from '@services/recallContentService';
 import type { CreditLedgerReason } from '@models/CreditLedgerModel';
 
 // Canonical shapes for the Socket.io events the API emits. Mirrored by the
@@ -44,8 +44,8 @@ export type LessonProgressEvent =
   | { type: 'block'; block: ILessonBlock }
   | { type: 'hero_image'; url: string; s3Key?: string }
   | { type: 'content_ready'; placeholders: LessonPlaceholderBlock[] }
-  | { type: 'insight'; insight: GeneratedInsight }
-  | { type: 'insights_saved'; count: number }
+  | { type: 'recall_card'; card: GeneratedRecallCard }
+  | { type: 'recall_cards_saved'; count: number }
   | { type: 'narration_started' }
   | { type: 'narration_ready'; cached: boolean; voiceId: string };
 

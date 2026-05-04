@@ -12,7 +12,7 @@ import { CHAT_ROLES } from '@lib/constants';
  * agent during the live turn, not durable artifacts of the response.
  */
 export interface ICourseMentorChatHandoff {
-  target: 'quiz' | 'insights' | 'lesson';
+  target: 'quiz' | 'recall' | 'lesson';
   moduleIndex?: number;
   lessonIndex?: number;
   label: string;
@@ -69,7 +69,7 @@ const handoffSchema = new Schema<ICourseMentorChatHandoff>(
   {
     target: {
       type: String,
-      enum: ['quiz', 'insights', 'lesson'],
+      enum: ['quiz', 'recall', 'lesson'],
       required: true,
     },
     moduleIndex: { type: Number },

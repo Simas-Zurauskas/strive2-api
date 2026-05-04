@@ -5,8 +5,8 @@ export const XP_VALUES = {
   QUIZ_SCORE_MULTIPLIER: 2, // score (0-100) * multiplier = 0-200 XP
   EXERCISE_PASS: 30,
   REVIEW_COMPLETE: 40,
-  INSIGHT_REVIEW: 5, // per graded rating — modest to discourage grinding
-  INSIGHT_MASTERY: 25, // one-time, first time an insight reaches Leitner box 4
+  RECALL_REVIEW: 5, // per graded rating — modest to discourage grinding
+  RECALL_MASTERY: 25, // one-time, first time a recall card reaches Leitner box 4
 } as const;
 
 // ── Levels ─────────────────────────────────────────────────
@@ -60,7 +60,7 @@ export const xpForNextLevel = (level: number): number => {
 
 // ── XP Sources ─────────────────────────────────────────────
 
-export const XP_SOURCES = ['lesson_complete', 'quiz_score', 'exercise_pass', 'review_complete', 'insight_review', 'insight_mastery'] as const;
+export const XP_SOURCES = ['lesson_complete', 'quiz_score', 'exercise_pass', 'review_complete', 'recall_review', 'recall_mastery'] as const;
 export type XpSource = (typeof XP_SOURCES)[number];
 
 // ── Achievement Definitions ────────────────────────────────
@@ -74,7 +74,7 @@ export interface AchievementDefinition {
   name: string;
   description: string;
   icon: string;
-  trigger: 'lesson' | 'quiz' | 'streak' | 'level' | 'insight';
+  trigger: 'lesson' | 'quiz' | 'streak' | 'level' | 'recall';
 }
 
 export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
@@ -180,30 +180,30 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
     trigger: 'quiz',
   },
 
-  // Insights
+  // Recall cards
   {
-    id: 'insight_first',
+    id: 'recall_first',
     category: 'mastery',
     name: 'First Recall',
-    description: 'Rate your first insight',
+    description: 'Rate your first recall card',
     icon: 'sparkles',
-    trigger: 'insight',
+    trigger: 'recall',
   },
   {
-    id: 'insight_mastered_first',
+    id: 'recall_mastered_first',
     category: 'mastery',
     name: 'Committed to Memory',
-    description: 'Master your first insight',
+    description: 'Master your first recall card',
     icon: 'brain',
-    trigger: 'insight',
+    trigger: 'recall',
   },
   {
-    id: 'insight_cross_course_day',
+    id: 'recall_cross_course_day',
     category: 'mastery',
     name: 'Interleaved Mind',
-    description: 'Review insights from 3 different courses in one day',
+    description: 'Review recall cards from 3 different courses in one day',
     icon: 'shuffle',
-    trigger: 'insight',
+    trigger: 'recall',
   },
 
   // Dedication

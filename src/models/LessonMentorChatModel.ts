@@ -21,7 +21,7 @@ export interface ILessonMentorMessageAttachmentRef {
  * full rationale; same shape, different scope.
  */
 export interface ILessonMentorChatHandoff {
-  target: 'quiz' | 'insights' | 'lesson';
+  target: 'quiz' | 'recall' | 'lesson';
   moduleIndex?: number;
   lessonIndex?: number;
   label: string;
@@ -98,7 +98,7 @@ const handoffSchema = new Schema<ILessonMentorChatHandoff>(
   {
     target: {
       type: String,
-      enum: ['quiz', 'insights', 'lesson'],
+      enum: ['quiz', 'recall', 'lesson'],
       required: true,
     },
     moduleIndex: { type: Number },

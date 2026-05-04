@@ -16,7 +16,7 @@ import { AIMessage, AIMessageChunk, ToolMessage } from '@langchain/core/messages
  * valid params (success → persisted) or fallen back to plain text.
  */
 export interface PersistedMentorHandoff {
-  target: 'quiz' | 'insights' | 'lesson';
+  target: 'quiz' | 'recall' | 'lesson';
   moduleIndex?: number;
   lessonIndex?: number;
   label: string;
@@ -60,7 +60,7 @@ export const extractHandoffsFromTurn = (
     if (parsed?.ok !== true) continue;
     const target = parsed.target;
     const label = parsed.label;
-    if (target !== 'quiz' && target !== 'insights' && target !== 'lesson') continue;
+    if (target !== 'quiz' && target !== 'recall' && target !== 'lesson') continue;
     if (typeof label !== 'string' || label.length === 0) continue;
     handoffs.push({
       target,

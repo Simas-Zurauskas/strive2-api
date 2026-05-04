@@ -16,7 +16,7 @@
  *   - Marked-user-content blocks (`## User said:` / `</user>`) so the
  *     model treats user text as data, not as instructions.
  *   - Separate guardrail LLM calls on free-form input (especially
- *     insight grading where a malicious learner can free-form their
+ *     recall grading where a malicious learner can free-form their
  *     "answer").
  *   - Tool-call validation server-side (e.g. `emit_handoff` validates
  *     against the course structure rather than trusting the model's

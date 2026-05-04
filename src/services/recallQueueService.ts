@@ -7,40 +7,59 @@
  * scheduling (next-due interval bumps). The next change here should
  * extract along this seam:
  *
- *   - `insightQueueMutationService.ts` — queue mutation entry points
+ *   - `recallQueueMutationService.ts` — queue mutation entry points
  *     (the public API: enqueue / dequeue / acknowledge).
- *   - `insightSchedulingService.ts` — Leitner-v0 next-due bumps and
+ *   - `recallSchedulingService.ts` — Leitner-v0 next-due bumps and
  *     interval bookkeeping. Pure-ish logic, easy to unit-test.
- *   - This file (renamed `insightQueueEligibility.ts`) — fresh-pool
+ *   - This file (renamed `recallQueueEligibility.ts`) — fresh-pool
  *     gating + decision-tree counters that already drive the
- *     `insight_queue_fresh_reason` metric.
+ *     `recall_queue_fresh_reason` metric.
  *
  * The split lines above respect the existing test boundary
- * (`insightQueueService.test.ts`) — that test would need to follow
+ * (`recallQueueService.test.ts`) — that test would need to follow
  * whichever file holds the public API after the split.
  */
 import mongoose, { Types } from 'mongoose';
-import InsightModel, { IInsight } from '@models/InsightModel';
-import UserInsightProgressModel, {
-  IUserInsightProgress,
-} from '@models/UserInsightProgressModel';
+import RecallCardModel, { IRecallCard } from '@models/RecallCardModel';
+import UserRecallProgressModel, {
+  IUserRecallProgress,
+} from '@models/UserRecallProgressModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import CourseModel from '@models/CourseModel';
 import {
-  INSIGHT_QUEUE_DUE_LIMIT,
-  INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT,
-  INSIGHT_QUEUE_FRESH_THRESHOLD,
-  InsightMode,
-} from '@lib/insightConstants';
+  RECALL_QUEUE_DUE_LIMIT,
+  RECALL_QUEUE_FRESH_LIMIT_DEFAULT,
+  RECALL_QUEUE_FRESH_THRESHOLD,
+  RecallMode,
+} from '@lib/recallConstants';
 import {
-  bumpInsightQueueFreshReason,
-  recordInsightQueueFreshCounts,
+  bumpRecallQueueFreshReason,
+  recordRecallQueueFreshCounts,
 } from '@lib/metrics';
+import { lifecycleLog } from '@lib/loggers';
+
+// Per-user safety cap on the recall card + progress queries below. The intent
+// is fail-soft on a runaway power user (e.g. 100 courses × 100 recall cards →
+// 10K rows; an attacker driving the create path further could push this
+// higher) so we never hydrate hundreds of thousands of rows into Node and
+// drain the Mongo connection pool. 50_000 is well above any plausible
+// legitimate user — anyone hitting it is either pathological or worth a
+// product conversation about archive-on-completion semantics. We log on
+// cap-hit so the boundary is observable.
+const RECALL_USER_QUERY_CAP = 50_000;
+
+const logIfCapHit = (label: string, count: number, userId: string): void => {
+  if (count >= RECALL_USER_QUERY_CAP) {
+    lifecycleLog.warn(
+      `recall-cap-hit label=${label} user=${userId} count=${count} cap=${RECALL_USER_QUERY_CAP} — some recall cards may be invisible to this query`,
+    );
+  }
+};
 
 // ── Types ──────────────────────────────────────────────────
 
-export interface QueueInsightItem {
-  insightId: string;
+export interface QueueRecallCardItem {
+  recallCardId: string;
   courseId: string;
   courseSlug: string | null;
   courseName: string;
@@ -49,21 +68,21 @@ export interface QueueInsightItem {
   lessonIndex: number;
   lessonName: string;
   moduleName: string;
-  kind: IInsight['kind'];
+  kind: IRecallCard['kind'];
   prompt: string;
   answer: string;
   conceptTags: string[];
   sourceBlockId: string;
   /** 'new' for items with no progress row yet. */
   isNew: boolean;
-  mode: InsightMode;
+  mode: RecallMode;
   box: number;
   dueAt: string | null;
 }
 
-export interface GetInsightQueueResult {
-  due: QueueInsightItem[];
-  fresh: QueueInsightItem[];
+export interface GetRecallQueueResult {
+  due: QueueRecallCardItem[];
+  fresh: QueueRecallCardItem[];
   counts: {
     dueTotal: number;
     freshAvailable: number;
@@ -80,14 +99,14 @@ export interface GetInsightQueueResult {
 //      unread lesson just wastes retrieval practice on unfamiliar material)
 //
 // Gate (1) applies to BOTH due and fresh pools. Gate (2) applies ONLY to
-// fresh — due items are insights the user has already rated, so by definition
+// fresh — due items are recall cards the user has already rated, so by definition
 // they once engaged with the source material; we keep surfacing them.
 
 /**
- * ObjectIds of all insights that belong to this user's non-archived courses.
+ * ObjectIds of all recall cards that belong to this user's non-archived courses.
  * Bounded by the user's content volume; small enough for a `$in` filter.
  */
-const loadActiveInsightIds = async (userId: Types.ObjectId): Promise<Types.ObjectId[]> => {
+const loadActiveCardIds = async (userId: Types.ObjectId): Promise<Types.ObjectId[]> => {
   const activeCourses = await CourseModel.find({
     userId,
     status: { $ne: 'archived' },
@@ -96,19 +115,21 @@ const loadActiveInsightIds = async (userId: Types.ObjectId): Promise<Types.Objec
     .lean();
   if (activeCourses.length === 0) return [];
 
-  const insights = await InsightModel.find({
+  const cards = await RecallCardModel.find({
     courseId: { $in: activeCourses.map((c) => c._id) },
   })
     .select('_id')
+    .limit(RECALL_USER_QUERY_CAP)
     .lean();
 
-  return insights.map((i) => i._id);
+  logIfCapHit('loadActiveCardIds', cards.length, userId.toString());
+  return cards.map((i) => i._id);
 };
 
 /**
  * Set of `${courseId}:${moduleIndex}:${lessonIndex}` keys for lessons the
  * user has marked completed. Used to gate fresh-pool candidates so we never
- * surface an insight from an unread lesson.
+ * surface a recall card from an unread lesson.
  */
 const loadCompletedLessonKeys = async (userId: Types.ObjectId): Promise<Set<string>> => {
   const rows = await UserLessonProgressModel.find({ userId, status: 'completed' })
@@ -119,40 +140,40 @@ const loadCompletedLessonKeys = async (userId: Types.ObjectId): Promise<Set<stri
 
 // ── Hydration helpers ─────────────────────────────────────
 
-type LeanInsight = IInsight & { _id: Types.ObjectId };
+type LeanRecallCard = IRecallCard & { _id: Types.ObjectId };
 
 /**
- * Build a QueueInsightItem by joining lean insight + progress + course metadata.
+ * Build a QueueRecallCardItem by joining lea recall card + progress + course metadata.
  * Lookups that can't resolve (deleted course/lesson) are skipped.
  */
 const toQueueItem = (
-  insight: LeanInsight,
-  progress: IUserInsightProgress | null,
+  card: LeanRecallCard,
+  progress: IUserRecallProgress | null,
   courseInfo: CourseInfo | undefined,
-): QueueInsightItem | null => {
+): QueueRecallCardItem | null => {
   if (!courseInfo) return null;
-  const mod = courseInfo.modules[insight.moduleIndex];
+  const mod = courseInfo.modules[card.moduleIndex];
   if (!mod) return null;
-  const lesson = mod.lessons[insight.lessonIndex];
+  const lesson = mod.lessons[card.lessonIndex];
   if (!lesson) return null;
 
   return {
-    insightId: insight._id.toString(),
-    courseId: insight.courseId.toString(),
+    recallCardId: card._id.toString(),
+    courseId: card.courseId.toString(),
     courseSlug: courseInfo.slug,
     courseName: courseInfo.name,
-    lessonId: insight.lessonId.toString(),
-    moduleIndex: insight.moduleIndex,
-    lessonIndex: insight.lessonIndex,
+    lessonId: card.lessonId.toString(),
+    moduleIndex: card.moduleIndex,
+    lessonIndex: card.lessonIndex,
     lessonName: lesson.name,
     moduleName: mod.name,
-    kind: insight.kind,
-    prompt: insight.prompt,
-    answer: insight.answer,
-    conceptTags: insight.conceptTags,
-    sourceBlockId: insight.sourceBlockId,
-    // "New" = never rated. A progress row alone isn't enough: skipInsight
-    // and setInsightMode both upsert a row with reps: 0 before any rating,
+    kind: card.kind,
+    prompt: card.prompt,
+    answer: card.answer,
+    conceptTags: card.conceptTags,
+    sourceBlockId: card.sourceBlockId,
+    // "New" = never rated. A progress row alone isn't enough: skipRecall
+    // and setRecallMode both upsert a row with reps: 0 before any rating,
     // which used to flip the badge off after a mode-toggle or skip.
     isNew: !progress || progress.reps === 0,
     mode: progress?.mode ?? 'tap-reveal',
@@ -169,7 +190,7 @@ interface CourseInfo {
 
 /**
  * Fan-out of courseIds → { slug, name, module+lesson names } used to hydrate
- * insight rows without loading the entire course doc.
+ * recall card rows without loading the entire course doc.
  */
 const loadCourseInfo = async (courseIds: string[]): Promise<Map<string, CourseInfo>> => {
   if (courseIds.length === 0) return new Map();
@@ -235,12 +256,12 @@ const partitionByCourse = ({
   items,
   currentCourseId,
 }: {
-  items: QueueInsightItem[];
+  items: QueueRecallCardItem[];
   currentCourseId: string | undefined;
-}): QueueInsightItem[] => {
+}): QueueRecallCardItem[] => {
   if (!currentCourseId) return interleaveByCourse(items);
-  const active: QueueInsightItem[] = [];
-  const rest: QueueInsightItem[] = [];
+  const active: QueueRecallCardItem[] = [];
+  const rest: QueueRecallCardItem[] = [];
   for (const item of items) {
     if (item.courseId === currentCourseId) active.push(item);
     else rest.push(item);
@@ -252,16 +273,16 @@ const partitionByCourse = ({
 
 /**
  * Return the user's daily queue:
- *   • due — insights with `nextDue <= now` in non-archived courses, capped at INSIGHT_QUEUE_DUE_LIMIT
- *   • fresh — up to INSIGHT_QUEUE_FRESH_LIMIT unseen insights from non-archived
- *     courses AND from lessons the user has completed, IFF due count < INSIGHT_QUEUE_FRESH_THRESHOLD
+ *   • due — recall cards with `nextDue <= now` in non-archived courses, capped at RECALL_QUEUE_DUE_LIMIT
+ *   • fresh — up to RECALL_QUEUE_FRESH_LIMIT unseen recall cards from non-archived
+ *     courses AND from lessons the user has completed, IFF due count < RECALL_QUEUE_FRESH_THRESHOLD
  *
  * Items are interleaved across courses so the feed is cross-course by default.
  */
-export const getInsightQueue = async (params: {
+export const getRecallQueue = async (params: {
   userId: string;
   currentCourseId?: string;
-}): Promise<GetInsightQueueResult> => {
+}): Promise<GetRecallQueueResult> => {
   const userObjId = new mongoose.Types.ObjectId(params.userId);
   const { currentCourseId } = params;
   const now = new Date();
@@ -274,71 +295,75 @@ export const getInsightQueue = async (params: {
 
   // `totalLearnedCount` is independent of everything else — kick it off
   // immediately so it can complete in parallel with the two queries that
-  // gate on `activeInsightIds`.
-  const totalLearnedCountP = UserInsightProgressModel.countDocuments({
+  // gate on `activeCardIds`.
+  const totalLearnedCountP = UserRecallProgressModel.countDocuments({
     userId: userObjId,
     reps: { $gte: 1 },
   });
 
-  // Scope: insights in non-archived courses only. Used as the `$in` filter
+  // Scope: recall cards in non-archived courses only. Used as the `$in` filter
   // for every progress query below so archived content never surfaces.
-  const activeInsightIds = await loadActiveInsightIds(userObjId);
+  const activeCardIds = await loadActiveCardIds(userObjId);
 
   // ── Step 1: due items + total-due-count (both scoped to active courses) ──
   // Run in parallel: find-with-limit and countDocuments are the same filter
   // but return different shapes, so they can't be combined server-side.
-  type LeanProgress = IUserInsightProgress & { _id: Types.ObjectId };
+  type LeanProgress = IUserRecallProgress & { _id: Types.ObjectId };
   const [dueProgress, totalDueCount, totalLearnedCount] = await Promise.all([
-    activeInsightIds.length === 0
+    activeCardIds.length === 0
       ? Promise.resolve<LeanProgress[]>([])
-      : UserInsightProgressModel.find({
+      : UserRecallProgressModel.find({
         userId: userObjId,
         nextDue: { $lte: now },
-        insightId: { $in: activeInsightIds },
+        recallCardId: { $in: activeCardIds },
       })
         .sort({ nextDue: 1 })
-        .limit(INSIGHT_QUEUE_DUE_LIMIT)
+        .limit(RECALL_QUEUE_DUE_LIMIT)
         .lean<LeanProgress[]>(),
-    activeInsightIds.length === 0
+    activeCardIds.length === 0
       ? Promise.resolve(0)
-      : UserInsightProgressModel.countDocuments({
+      : UserRecallProgressModel.countDocuments({
         userId: userObjId,
         nextDue: { $lte: now },
-        insightId: { $in: activeInsightIds },
+        recallCardId: { $in: activeCardIds },
       }),
     totalLearnedCountP,
   ]);
 
-  const dueInsightIds = dueProgress.map((p) => p.insightId);
-  const dueInsights = dueInsightIds.length === 0
+  const dueCardIds = dueProgress.map((p) => p.recallCardId);
+  const dueCards = dueCardIds.length === 0
     ? []
-    : await InsightModel.find({ _id: { $in: dueInsightIds } }).lean();
-  const dueInsightMap = new Map(dueInsights.map((i) => [i._id.toString(), i]));
+    : await RecallCardModel.find({ _id: { $in: dueCardIds } }).lean();
+  const dueCardMap = new Map(dueCards.map((i) => [i._id.toString(), i]));
 
   // ── Step 2: fresh items (active courses + completed lessons only) ──
-  const shouldLoadFresh = totalDueCount < INSIGHT_QUEUE_FRESH_THRESHOLD;
-  let freshInsights: LeanInsight[] = [];
-  // Fresh-pool decision path — set on every branch. `bumpInsightQueueFreshReason`
+  const shouldLoadFresh = totalDueCount < RECALL_QUEUE_FRESH_THRESHOLD;
+  let freshCards: LeanRecallCard[] = [];
+  // Fresh-pool decision path — set on every branch. `bumpRecallQueueFreshReason`
   // is invoked once at the bottom so the distribution surfaces in /metrics.
-  let freshReason: Parameters<typeof bumpInsightQueueFreshReason>[0];
+  let freshReason: Parameters<typeof bumpRecallQueueFreshReason>[0];
 
   if (!shouldLoadFresh) {
     // Plenty of due items already — don't even probe the fresh pool.
     freshReason = 'due_gated_fresh_skipped';
-  } else if (activeInsightIds.length === 0) {
-    freshReason = 'no_active_insights';
+  } else if (activeCardIds.length === 0) {
+    freshReason = 'no_active_recall_cards';
   } else {
-    const [completedLessonKeys, seenInsightIds] = await Promise.all([
+    const [completedLessonKeys, seenCardIds] = await Promise.all([
       loadCompletedLessonKeys(userObjId),
-      UserInsightProgressModel.find({ userId: userObjId }).select('insightId').lean(),
+      UserRecallProgressModel.find({ userId: userObjId })
+        .select('recallCardId')
+        .limit(RECALL_USER_QUERY_CAP)
+        .lean(),
     ]);
+    logIfCapHit('seenCardIds', seenCardIds.length, userObjId.toString());
     completedLessonCount = completedLessonKeys.size;
 
     if (completedLessonKeys.size === 0) {
       freshReason = 'no_completed_lessons';
     } else {
       const seenIdList = Array.from(
-        new Set(seenInsightIds.map((r) => r.insightId.toString())),
+        new Set(seenCardIds.map((r) => r.recallCardId.toString())),
       ).map((id) => new Types.ObjectId(id));
 
       // Over-fetch fresh candidates by a margin, then filter by completed
@@ -350,20 +375,20 @@ export const getInsightQueue = async (params: {
       // so the active course's candidates consistently win the `perLesson`
       // dedup race even when the global createdAt-desc ordering would have
       // placed another course first. Keeps the gate + cap logic unchanged.
-      const overFetch = INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT * 6;
-      let freshCandidates: LeanInsight[];
+      const overFetch = RECALL_QUEUE_FRESH_LIMIT_DEFAULT * 6;
+      let freshCandidates: LeanRecallCard[];
       if (currentCourseId) {
         const activeCourseObjId = new Types.ObjectId(currentCourseId);
         const [activeCandidates, otherCandidates] = await Promise.all([
-          InsightModel.find({
-            _id: { $in: activeInsightIds, $nin: seenIdList },
+          RecallCardModel.find({
+            _id: { $in: activeCardIds, $nin: seenIdList },
             courseId: activeCourseObjId,
           })
             .sort({ createdAt: -1 })
             .limit(overFetch)
             .lean(),
-          InsightModel.find({
-            _id: { $in: activeInsightIds, $nin: seenIdList },
+          RecallCardModel.find({
+            _id: { $in: activeCardIds, $nin: seenIdList },
             courseId: { $ne: activeCourseObjId },
           })
             .sort({ createdAt: -1 })
@@ -372,10 +397,10 @@ export const getInsightQueue = async (params: {
         ]);
         freshCandidates = [...activeCandidates, ...otherCandidates];
       } else {
-        freshCandidates = await InsightModel.find({
-          _id: { $in: activeInsightIds, $nin: seenIdList },
+        freshCandidates = await RecallCardModel.find({
+          _id: { $in: activeCardIds, $nin: seenIdList },
         })
-          // Favor newer insights — most-recently generated lessons first.
+          // Favor newer recall cards — most-recently generated lessons first.
           .sort({ createdAt: -1 })
           .limit(overFetch)
           .lean();
@@ -386,51 +411,51 @@ export const getInsightQueue = async (params: {
         freshReason = 'candidates_zero';
       } else {
         // Apply completed-lesson gate + dedup to one card per lesson.
-        const perLesson = new Map<string, LeanInsight>();
+        const perLesson = new Map<string, LeanRecallCard>();
         for (const i of freshCandidates) {
           const lessonKey = `${i.courseId.toString()}:${i.moduleIndex}:${i.lessonIndex}`;
           if (!completedLessonKeys.has(lessonKey)) continue;
           if (!perLesson.has(i.lessonId.toString())) perLesson.set(i.lessonId.toString(), i);
-          if (perLesson.size >= INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT) break;
+          if (perLesson.size >= RECALL_QUEUE_FRESH_LIMIT_DEFAULT) break;
         }
-        freshInsights = [...perLesson.values()];
-        freshReason = freshInsights.length === 0 ? 'all_gated_by_lesson' : 'ok';
+        freshCards = [...perLesson.values()];
+        freshReason = freshCards.length === 0 ? 'all_gated_by_lesson' : 'ok';
       }
     }
   }
 
-  bumpInsightQueueFreshReason(freshReason);
-  recordInsightQueueFreshCounts({
-    activeInsightCount: activeInsightIds.length,
+  bumpRecallQueueFreshReason(freshReason);
+  recordRecallQueueFreshCounts({
+    activeCardCount: activeCardIds.length,
     completedLessonCount,
     candidateCount,
-    freshOutCount: freshInsights.length,
+    freshOutCount: freshCards.length,
   });
 
   // ── Step 3: hydrate with course/lesson names ──────
   const allCourseIds = new Set<string>();
-  for (const i of dueInsights) allCourseIds.add(i.courseId.toString());
-  for (const i of freshInsights) allCourseIds.add(i.courseId.toString());
+  for (const i of dueCards) allCourseIds.add(i.courseId.toString());
+  for (const i of freshCards) allCourseIds.add(i.courseId.toString());
 
   const courseInfoMap = await loadCourseInfo([...allCourseIds]);
 
-  const progressByInsightId = new Map<string, IUserInsightProgress>();
-  for (const p of dueProgress) progressByInsightId.set(p.insightId.toString(), p as IUserInsightProgress);
+  const progressByCardId = new Map<string, IUserRecallProgress>();
+  for (const p of dueProgress) progressByCardId.set(p.recallCardId.toString(), p as IUserRecallProgress);
 
-  const dueItems: QueueInsightItem[] = [];
+  const dueItems: QueueRecallCardItem[] = [];
   // Preserve the nextDue ordering we queried.
   for (const p of dueProgress) {
-    const insight = dueInsightMap.get(p.insightId.toString());
-    if (!insight) continue; // insight may have been deleted
-    const info = courseInfoMap.get(insight.courseId.toString());
-    const item = toQueueItem(insight, progressByInsightId.get(insight._id.toString()) ?? null, info);
+    const card = dueCardMap.get(p.recallCardId.toString());
+    if (!card) continue; // recall card may have been deleted
+    const info = courseInfoMap.get(card.courseId.toString());
+    const item = toQueueItem(card, progressByCardId.get(card._id.toString()) ?? null, info);
     if (item) dueItems.push(item);
   }
 
-  const freshItems: QueueInsightItem[] = [];
-  for (const insight of freshInsights) {
-    const info = courseInfoMap.get(insight.courseId.toString());
-    const item = toQueueItem(insight, null, info);
+  const freshItems: QueueRecallCardItem[] = [];
+  for (const card of freshCards) {
+    const info = courseInfoMap.get(card.courseId.toString());
+    const item = toQueueItem(card, null, info);
     if (item) freshItems.push(item);
   }
 
@@ -453,10 +478,10 @@ export const getInsightQueue = async (params: {
 
 // ── Stats ────────────────────────────────────────────────
 
-export interface InsightStats {
-  totalInsights: number;
+export interface RecallStats {
+  totalCards: number;
   totalReviewed: number;
-  /** Count of insights with masteredAt !== null (never regressed away). */
+  /** Count of recall cards with masteredAt !== null (never regressed away). */
   totalMastered: number;
   /** Reviews completed in the current ISO week (Mon–Sun, UTC). */
   reviewedThisWeek: number;
@@ -464,7 +489,7 @@ export interface InsightStats {
   reviewedLastWeek: number;
   dueToday: number;
   dueThisWeek: number;
-  // Distribution of learned-insight boxes (exclude 'new').
+  // Distribution of learned-card boxes (exclude 'new').
   boxDistribution: { box: number; count: number }[];
   recentHistory: {
     date: string;
@@ -473,7 +498,7 @@ export interface InsightStats {
   }[];
 }
 
-export const getInsightStats = async (params: { userId: string }): Promise<InsightStats> => {
+export const getRecallStats = async (params: { userId: string }): Promise<RecallStats> => {
   const userObjId = new mongoose.Types.ObjectId(params.userId);
   const now = new Date();
   const endOfToday = new Date(now);
@@ -495,11 +520,11 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
   fourteenDaysAgo.setUTCDate(fourteenDaysAgo.getUTCDate() - 13);
 
   // Load the user's courses once. Previous implementation did this twice:
-  // once via loadActiveInsightIds (filtered to non-archived) and again inline
-  // inside Promise.all for totalInsights (all statuses). Keeping the `status`
+  // once via loadActiveCardIds (filtered to non-archived) and again inline
+  // inside Promise.all for totalCards (all statuses). Keeping the `status`
   // field lets us partition into active and all-courses sets in memory.
   //
-  // totalInsights counts every card the user has ever had — archived content
+  // totalCards counts every card the user has ever had — archived content
   // stays part of the learning record. Active set scopes the scheduler
   // queries (dueToday/dueThisWeek) so archived courses don't nag.
   const allCourses = await CourseModel.find({ userId: userObjId })
@@ -510,18 +535,21 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
     .filter((c) => c.status !== 'archived')
     .map((c) => c._id);
 
-  const activeInsightIds = activeCourseIds.length === 0
+  const activeCardIds = activeCourseIds.length === 0
     ? []
-    : (
-      await InsightModel.find({ courseId: { $in: activeCourseIds } })
+    : await (async () => {
+      const rows = await RecallCardModel.find({ courseId: { $in: activeCourseIds } })
         .select('_id')
-        .lean()
-    ).map((i) => i._id);
+        .limit(RECALL_USER_QUERY_CAP)
+        .lean();
+      logIfCapHit('getRecallStats:activeCardIds', rows.length, userObjId.toString());
+      return rows.map((i) => i._id);
+    })();
 
   // Single $facet replaces the previous pattern of loading every progress
   // row's full history[] array into Node memory and iterating three times.
   // MongoDB does the grouping; we just fill 14-day zeros on the JS side.
-  const historyFacetP = UserInsightProgressModel.aggregate<{
+  const historyFacetP = UserRecallProgressModel.aggregate<{
     byBox: { _id: number; count: number }[];
     weekly: { _id: null; thisWeek: number; lastWeek: number }[];
     daily: { _id: string; reviews: number; sumRating: number }[];
@@ -591,7 +619,7 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
   ]);
 
   const [
-    totalInsights,
+    totalCards,
     totalReviewed,
     totalMastered,
     dueToday,
@@ -600,22 +628,22 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
   ] = await Promise.all([
     allCourseIds.length === 0
       ? Promise.resolve(0)
-      : InsightModel.countDocuments({ courseId: { $in: allCourseIds } }),
-    UserInsightProgressModel.countDocuments({ userId: userObjId, reps: { $gte: 1 } }),
-    UserInsightProgressModel.countDocuments({ userId: userObjId, masteredAt: { $ne: null } }),
-    activeInsightIds.length === 0
+      : RecallCardModel.countDocuments({ courseId: { $in: allCourseIds } }),
+    UserRecallProgressModel.countDocuments({ userId: userObjId, reps: { $gte: 1 } }),
+    UserRecallProgressModel.countDocuments({ userId: userObjId, masteredAt: { $ne: null } }),
+    activeCardIds.length === 0
       ? Promise.resolve(0)
-      : UserInsightProgressModel.countDocuments({
+      : UserRecallProgressModel.countDocuments({
         userId: userObjId,
         nextDue: { $lte: endOfToday },
-        insightId: { $in: activeInsightIds },
+        recallCardId: { $in: activeCardIds },
       }),
-    activeInsightIds.length === 0
+    activeCardIds.length === 0
       ? Promise.resolve(0)
-      : UserInsightProgressModel.countDocuments({
+      : UserRecallProgressModel.countDocuments({
         userId: userObjId,
         nextDue: { $lte: endOfWeek },
-        insightId: { $in: activeInsightIds },
+        recallCardId: { $in: activeCardIds },
       }),
     historyFacetP,
   ]);
@@ -635,7 +663,7 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
     byDate.set(d._id, { reviews: d.reviews, sumRating: d.sumRating });
   }
 
-  const recentHistory: InsightStats['recentHistory'] = [];
+  const recentHistory: RecallStats['recentHistory'] = [];
   const cursor = new Date(fourteenDaysAgo);
   while (cursor <= now) {
     const key = cursor.toISOString().slice(0, 10);
@@ -649,7 +677,7 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
   }
 
   return {
-    totalInsights,
+    totalCards,
     totalReviewed,
     totalMastered,
     reviewedThisWeek,
@@ -663,14 +691,14 @@ export const getInsightStats = async (params: { userId: string }): Promise<Insig
 
 // ── Cheap count for dashboard widget ─────────────────────
 
-export const getInsightsDueCount = async (params: { userId: string }): Promise<number> => {
+export const getRecallDueCount = async (params: { userId: string }): Promise<number> => {
   const userObjId = new mongoose.Types.ObjectId(params.userId);
-  const activeInsightIds = await loadActiveInsightIds(userObjId);
-  if (activeInsightIds.length === 0) return 0;
+  const activeCardIds = await loadActiveCardIds(userObjId);
+  if (activeCardIds.length === 0) return 0;
 
-  return UserInsightProgressModel.countDocuments({
+  return UserRecallProgressModel.countDocuments({
     userId: userObjId,
     nextDue: { $lte: new Date() },
-    insightId: { $in: activeInsightIds },
+    recallCardId: { $in: activeCardIds },
   });
 };

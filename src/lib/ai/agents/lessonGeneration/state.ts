@@ -1,7 +1,7 @@
 import { Annotation } from '@langchain/langgraph';
 import { CourseDomain } from '@lib/constants';
 import { ILessonBlock } from '@models/LessonContentModel';
-import { GeneratedInsight } from '@services/insightContentService';
+import { GeneratedRecallCard } from '@services/recallContentService';
 
 export const LessonStateAnnotation = Annotation.Root({
   // ── Input (set at invocation) ──────────────────────────
@@ -70,7 +70,7 @@ export const LessonStateAnnotation = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => null,
   }),
-  insights: Annotation<GeneratedInsight[]>({
+  recallCards: Annotation<GeneratedRecallCard[]>({
     reducer: (_prev, next) => next,
     default: () => [],
   }),

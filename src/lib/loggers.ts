@@ -22,7 +22,7 @@
  *   jobLog           async job orchestration: claim/complete/fail/cancel,
  *                    course active-job mutex, orphan-job reaper
  *   genLog           AI content-generation pipelines (course structure,
- *                    lessons, quizzes, interactive, insights, hero, links)
+ *                    lessons, quizzes, interactive, recall, hero, links)
  *   chatLog          mentor/design chat agents (lesson, course, design)
  *   ragLog           Pinecone vector index ops + OpenAI embedding calls
  *   ttsLog           Google TTS narration synth + S3 dedup cache
@@ -132,12 +132,12 @@ export const jobLog = createLogger({ tag: 'job', color: 'yellow', enabled: true 
 /**
  * AI content-generation pipelines. Covers course-structure planning,
  * per-lesson content generation + validation + repair, interactive block
- * authoring, quiz/distractor generation, insight extraction, hero image
+ * authoring, quiz/distractor generation, recall card extraction, hero image
  * synthesis, and the link-curation sub-pipeline (query plan → search →
  * fetch → dedupe → rerank → select).
  *
  * Format: `<scope>:<phase> <event> [k=v …]`
- *   - scope ∈ { course | lesson | quiz | interactive | insights |
+ *   - scope ∈ { course | lesson | quiz | interactive | recall |
  *               hero | links }
  *   - phase ∈ { plan | generate | validate | repair | finalize | … }
  *

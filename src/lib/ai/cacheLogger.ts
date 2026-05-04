@@ -5,7 +5,7 @@
  * Why this exists: every model in `lib/langchain.ts` is configured with
  * `cache_control: { type: 'ephemeral' }`, but we previously only logged cache
  * hits from one call site (courseDesign/nodes/chat.ts). We had no signal
- * whether the rest of the LLM traffic — lesson, interactive, insight, quiz,
+ * whether the rest of the LLM traffic — lesson, interactive, recall, quiz,
  * links — was actually getting cache hits, no way to spot regressions when a
  * prompt edit invalidates the cached prefix, and no aggregate visible at
  * `/metrics`.
@@ -315,7 +315,7 @@ export const logCacheUsage = ({ label, usage, model }: { label: string; usage: C
  * Label resolution: each model passes its own label via
  * `metadata: { llmLabel: 'foo:bar' }` when invoked, OR the handler falls
  * back to `metadata.llmLabelDefault` set at construction. This lets
- * `quiz:generate`, `lesson:interactive`, `lesson:insights`, etc. all share
+ * `quiz:generate`, `lesson:interactive`, `lesson:recall`, etc. all share
  * one handler instance but emit distinct labels.
  *
  * `handleLLMEnd` receives the raw `LLMResult`. For ChatAnthropic, the

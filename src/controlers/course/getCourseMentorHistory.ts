@@ -5,10 +5,10 @@ import LessonContentModel from '@models/LessonContentModel';
 import CourseMentorChatModel from '@models/CourseMentorChatModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
-import UserInsightProgressModel from '@models/UserInsightProgressModel';
-import InsightModel from '@models/InsightModel';
+import UserRecallProgressModel from '@models/UserRecallProgressModel';
+import RecallCardModel from '@models/RecallCardModel';
 
-const MAX_PROMPTS = 2;
+const MAX_PROMPTS = 3;
 /** A "long gap" since last activity — triggers the refresh-me prompt. */
 const LONG_GAP_DAYS = 7;
 
@@ -17,14 +17,17 @@ const LONG_GAP_DAYS = 7;
  *
  * Distinct from the lesson mentor's prompt set: those are about THIS
  * lesson; these are about NEXT-MOVE decisions across the course. Strict
- * priority order, max two prompts shown:
+ * priority order, max three prompts shown:
  *
  *   1. Long gap since last activity → "Refresh me on what I've covered"
- *   2. Insights due across the course → "I have N insights due — where should I start?"
+ *   2. Recall cards due across the course → "I have N recall cards due — where should I start?"
  *   3. A module is ripe for its quiz (all lessons complete, quiz not taken)
  *      → "Help me prep before the module M quiz"
  *   4. Mid-course (1+ completed, not all) → "Connect what I just learned to what's next"
- *   5. Cold start (zero progress) → orientation prompts
+ *   5. Cold start (zero progress) → orientation prompts (overview / goal /
+ *      prereqs) — explicitly NOT navigation prompts because at cold start
+ *      there's only one place to start, so "Where should I start?" isn't
+ *      a real question.
  *   6. Always-on fallback → "I'm stuck somewhere — help me figure out where"
  *
  * Lesson-specific prompts (`LessonContent.suggestedMentorPrompts`) are
@@ -36,14 +39,14 @@ const computeCourseSuggestedPrompts = ({
   lessonsCompleted,
   totalLessons,
   daysSinceLastActivity,
-  insightsDue,
+  recallDue,
   ripeModule,
 }: {
   courseGenerated: boolean;
   lessonsCompleted: number;
   totalLessons: number;
   daysSinceLastActivity: number | null;
-  insightsDue: number;
+  recallDue: number;
   /** Module index where all lessons are complete and the quiz hasn't been taken. */
   ripeModule: number | null;
 }): string[] => {
@@ -51,13 +54,17 @@ const computeCourseSuggestedPrompts = ({
 
   const prompts: string[] = [];
 
-  // Cold start: no progress yet. Two orientation prompts; the always-on
-  // fallback below isn't appended here because it implies the learner
-  // has been working, which they haven't.
+  // Cold start: no progress yet. Three orientation prompts — overview /
+  // goal-alignment / prereqs. We deliberately skip "Where should I start?"
+  // because at cold start there is only one place to start (Module 1
+  // Lesson 1), so it isn't a real question. The always-on fallback below
+  // isn't appended here because it implies the learner has been working,
+  // which they haven't.
   if (lessonsCompleted === 0) {
     return [
-      "What's the overall arc of this course?",
-      'Where should I start?',
+      "What's the arc of this course?",
+      'How does this map to my goal?',
+      'Anything I should brush up on first?',
     ];
   }
 
@@ -66,9 +73,9 @@ const computeCourseSuggestedPrompts = ({
     prompts.push("Refresh me on what I've covered");
   }
 
-  if (insightsDue > 0 && prompts.length < MAX_PROMPTS) {
+  if (recallDue > 0 && prompts.length < MAX_PROMPTS) {
     prompts.push(
-      `I have ${insightsDue} insight${insightsDue > 1 ? 's' : ''} due — where should I start?`,
+      `I have ${recallDue} card${recallDue > 1 ? 's' : ''} due — where should I start?`,
     );
   }
 
@@ -123,7 +130,7 @@ export const getCourseMentorHistoryController = asyncHandler(async (req, res) =>
   const courseId = course._id;
   const userObjectId = new Types.ObjectId(userId);
 
-  const [session, lessonProgressRows, moduleQuizzes, anyLessonGenerated, insightIds] = await Promise.all([
+  const [session, lessonProgressRows, moduleQuizzes, anyLessonGenerated, recallCardIds] = await Promise.all([
     CourseMentorChatModel.findOne({ courseId, userId }).lean(),
     UserLessonProgressModel.find({ userId: userObjectId, courseId })
       .select('moduleIndex lessonIndex status completedAt')
@@ -132,13 +139,13 @@ export const getCourseMentorHistoryController = asyncHandler(async (req, res) =>
       .select('moduleIndex')
       .lean(),
     LessonContentModel.exists({ courseId, completed: true }),
-    InsightModel.distinct('_id', { courseId }) as Promise<Types.ObjectId[]>,
+    RecallCardModel.distinct('_id', { courseId }) as Promise<Types.ObjectId[]>,
   ]);
 
-  const insightsDue = insightIds.length > 0
-    ? await UserInsightProgressModel.countDocuments({
+  const recallDue = recallCardIds.length > 0
+    ? await UserRecallProgressModel.countDocuments({
         userId: userObjectId,
-        insightId: { $in: insightIds },
+        recallCardId: { $in: recallCardIds },
         nextDue: { $lte: new Date() },
       })
     : 0;
@@ -197,7 +204,7 @@ export const getCourseMentorHistoryController = asyncHandler(async (req, res) =>
     lessonsCompleted,
     totalLessons,
     daysSinceLastActivity,
-    insightsDue,
+    recallDue,
     ripeModule,
   });
 

@@ -23,13 +23,13 @@
  * surface of the dispatch file. Per-handler tests can be added later
  * once handlers are extracted.
  */
-import * as Sentry from '@sentry/node';
 import mongoose from 'mongoose';
 import UserModel from '@models/UserModel';
 import CreditLedgerModel, { CreditLedgerReason } from '@models/CreditLedgerModel';
 import { PLANS, PlanKey } from '@lib/creditPricing';
 import { emitCreditsUpdated } from '@lib/creditSocket';
 import { monetizationLog } from '@lib/loggers';
+import { captureError } from '@lib/errorReporter';
 import { getStripe, mapPriceIdToPlan } from './stripeService';
 import Stripe from 'stripe';
 
@@ -206,9 +206,10 @@ const onSubscriptionCheckoutCompleted = async ({
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (code !== 'resource_missing') {
-        Sentry.captureException(err, {
+        captureError(err, {
           tags: { area: 'stripe.replaceSubscription' },
           extra: { replacingId, newId: subscriptionId, userId },
+          fingerprint: ['stripe', 'replaceSubscription'],
         });
       }
     }
@@ -291,9 +292,10 @@ const onTopupCheckoutCompleted = async ({
         monetizationLog.error(
           `Top-up race: failed to roll back duplicate $inc for user=${userId} event=${event.id} — credit balance may be off by ${credits}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
         );
-        Sentry.captureException(rollbackErr, {
+        captureError(rollbackErr, {
           tags: { area: 'stripe.webhook.topup.rollback' },
           extra: { userId, eventId: event.id, credits },
+          fingerprint: ['stripe', 'topup', 'rollback'],
         });
       });
       monetizationLog.info(`Top-up: duplicate event race ${event.id}, rolled back $inc`);
@@ -394,9 +396,10 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
               monetizationLog.error(
                 `Upgrade race: failed to roll back duplicate $inc for user=${user._id} event=${event.id} — allowance off by ${deltaAllowance}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
               );
-              Sentry.captureException(rollbackErr, {
+              captureError(rollbackErr, {
                 tags: { area: 'stripe.webhook.upgrade.rollback' },
                 extra: { userId: user._id.toString(), eventId: event.id, deltaAllowance },
+                fingerprint: ['stripe', 'upgrade', 'rollback'],
               });
             });
             monetizationLog.info(`Plan upgrade: duplicate event race ${event.id}, rolled back $inc`);
@@ -834,7 +837,11 @@ const writeLedger = async ({
     });
   } catch (err) {
     if (isDuplicateKeyError(err)) return; // already processed
-    Sentry.captureException(err, { tags: { area: 'stripe.webhook.ledger' } });
+    captureError(err, {
+      tags: { area: 'stripe.webhook.ledger' },
+      extra: { stripeEventId, reason },
+      fingerprint: ['stripe', 'ledger', String(reason)],
+    });
     throw err;
   }
 };

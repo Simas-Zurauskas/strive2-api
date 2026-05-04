@@ -1,12 +1,12 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourseLean } from '@services/courseDbService';
 import LessonContentModel from '@models/LessonContentModel';
-import InsightModel from '@models/InsightModel';
+import RecallCardModel from '@models/RecallCardModel';
 import { parseIndexParam } from './validation';
 
 /**
  * Debug-only: returns per-lesson generation metadata that the regular
- * lesson-content endpoint does not expose (insight count, link count). Used by
+ * lesson-content endpoint does not expose (recall count, link count). Used by
  * the debug orchestrator to evaluate generation quality without scraping
  * server logs. Gated to `development` in courseRoutes.
  */
@@ -33,7 +33,7 @@ export const getLessonContentStatsController = asyncHandler(async (req, res) => 
     ? (linksBlock.content.match(/^- \[/gm) ?? []).length
     : 0;
 
-  const insightCount = await InsightModel.countDocuments({
+  const recallCardCount = await RecallCardModel.countDocuments({
     courseId,
     moduleIndex,
     lessonIndex,
@@ -48,7 +48,7 @@ export const getLessonContentStatsController = asyncHandler(async (req, res) => 
     data: {
       blockCount: content.blocks.length,
       blockCountsByType,
-      insightCount,
+      recallCardCount,
       linkCount,
     },
   });

@@ -1,5 +1,5 @@
-import * as Sentry from '@sentry/node';
 import { lifecycleLog } from '@lib/loggers';
+import { captureError } from '@lib/errorReporter';
 
 /**
  * Canonical error handler for fire-and-forget background operations.
@@ -17,9 +17,11 @@ import { lifecycleLog } from '@lib/loggers';
  * The returned handler:
  *   - logs one error line on `lifecycleLog` (cross-cutting fire-and-forget
  *     channel — not bound to a single domain), tagged with the context label,
- *   - captures the error in Sentry tagged with `background_task: <context>`
- *     so dashboards can group recurring bg failures separately from
- *     request-path errors.
+ *   - reports to Sentry via `captureError` so the event picks up the
+ *     active usageContext (userId/plan/jobId), gets tagged
+ *     `background_task: <context>` for dashboard grouping, and is
+ *     fingerprinted by `context` so a flapping background task collapses
+ *     into a single Sentry issue instead of N copies.
  *
  * It deliberately does NOT rethrow — callers rely on the fire-and-forget
  * contract.
@@ -27,5 +29,8 @@ import { lifecycleLog } from '@lib/loggers';
 export const bgError = (context: string) => (err: unknown): void => {
   const message = err instanceof Error ? err.message : String(err);
   lifecycleLog.error(`bg:${context} ${message}`);
-  Sentry.captureException(err, { tags: { background_task: context } });
+  captureError(err, {
+    tags: { background_task: context },
+    fingerprint: ['bg', context],
+  });
 };

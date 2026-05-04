@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import * as Sentry from '@sentry/node';
 import { runWithUsageContext } from '@lib/usageContext';
 import UserModel from '@models/UserModel';
 import { bgError } from '@lib/bg';
@@ -6,7 +7,7 @@ import { bgError } from '@lib/bg';
 /**
  * Enter an AsyncLocalStorage scope stamped with the authenticated user for
  * the duration of this request. Paid actions triggered inline in the request
- * path (course clarify, chat stream, insight grading, code execution) read
+ * path (course clarify, chat stream, recall grading, code execution) read
  * from it via `getUsageContext()` and attribute their cost back to the user.
  *
  * Must be mounted AFTER `protect` so `req.userId` is populated; requests
@@ -32,6 +33,20 @@ export const usageContextMiddleware = async (req: Request, _res: Response, next:
       bgError('usageContextMiddleware.userLookup')(e);
       return null;
     });
+
+  // Refine the Sentry scope with plan/subscription tags so any downstream
+  // capture in this request can be sliced by tier. The user id was already
+  // tagged by `protect` (or `optionalProtect`) — these tags layer on top.
+  // Wrapped in try/catch so a misconfigured Sentry can never block a
+  // legitimate request from proceeding.
+  try {
+    const scope = Sentry.getCurrentScope();
+    if (user?.subscription?.plan) scope.setTag('plan', user.subscription.plan);
+    if (user?.subscription?.status) scope.setTag('subscription_status', user.subscription.status);
+  } catch {
+    // ignored
+  }
+
   runWithUsageContext({
     ctx: {
       userId,
