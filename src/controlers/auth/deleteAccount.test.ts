@@ -19,14 +19,7 @@
 import assert from 'node:assert/strict';
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { setupTestDb } from '../../../test-helpers/db';
-import {
-  makeUser,
-  makeCourse,
-  makeJob,
-  UserModel,
-  CourseModel,
-  JobModel,
-} from '../../../test-helpers/factories';
+import { makeUser, makeCourse, makeJob, UserModel, CourseModel, JobModel } from '../../../test-helpers/factories';
 import { buildReqRes, invokeController } from '../../../test-helpers/express';
 import { AuthProvider } from '@lib/constants';
 import CreditLedgerModel from '@models/CreditLedgerModel';
@@ -135,16 +128,13 @@ describe('deleteAccountController — happy paths', () => {
     expect(await UserModel.findById(user._id)).toBeNull();
   });
 
-  test('cascades favorites pull on OTHER users referencing this user\'s courses', async () => {
+  test("cascades favorites pull on OTHER users referencing this user's courses", async () => {
     const owner = await makeUser({ email: 'owner@example.com', plainPassword: 'pw12345678' });
     const course = await makeCourse({ userId: owner._id });
 
     // Other user has this course favorited
     const peer = await makeUser({ email: 'peer@example.com' });
-    await UserModel.updateOne(
-      { _id: peer._id },
-      { $push: { favoriteCourseIds: course._id } },
-    );
+    await UserModel.updateOne({ _id: peer._id }, { $push: { favoriteCourseIds: course._id } });
 
     const { req, res } = buildReqRes({
       userId: owner._id.toString(),
@@ -153,9 +143,7 @@ describe('deleteAccountController — happy paths', () => {
     await invokeController(deleteAccountController, req, res);
 
     const peerAfter = await UserModel.findById(peer._id).lean();
-    expect(peerAfter?.favoriteCourseIds.map((id) => id.toString())).not.toContain(
-      course._id.toString(),
-    );
+    expect(peerAfter?.favoriteCourseIds.map((id) => id.toString())).not.toContain(course._id.toString());
   });
 
   test('credit ledger rows are purged for the deleted user', async () => {
@@ -163,11 +151,11 @@ describe('deleteAccountController — happy paths', () => {
     await CreditLedgerModel.create({
       userId: user._id,
       timestamp: new Date(),
-      delta: 130,
-      allowanceDelta: 130,
+      delta: 110,
+      allowanceDelta: 110,
       bonusDelta: 0,
       balanceBefore: 0,
-      balanceAfter: 130,
+      balanceAfter: 110,
       bonusBefore: 0,
       bonusAfter: 0,
       reason: 'signup_grant',
@@ -184,10 +172,7 @@ describe('deleteAccountController — happy paths', () => {
 
   test('user with Stripe customer id: cancelAllSubscriptionsForCustomer fires', async () => {
     const user = await makeUser({ email: 'stripe-del@example.com', plainPassword: 'pw12345678' });
-    await UserModel.updateOne(
-      { _id: user._id },
-      { $set: { 'subscription.stripeCustomerId': 'cus_test_xyz' } },
-    );
+    await UserModel.updateOne({ _id: user._id }, { $set: { 'subscription.stripeCustomerId': 'cus_test_xyz' } });
 
     const { req, res } = buildReqRes({
       userId: user._id.toString(),
@@ -246,10 +231,7 @@ describe('deleteAccountController — failure paths', () => {
   test('Stripe cancel throws: deletion still proceeds (right-to-erasure takes priority)', async () => {
     fakeCancelAllSubs.mockRejectedValueOnce(new Error('Stripe down'));
     const user = await makeUser({ email: 'sf@example.com', plainPassword: 'pw12345678' });
-    await UserModel.updateOne(
-      { _id: user._id },
-      { $set: { 'subscription.stripeCustomerId': 'cus_test_fails' } },
-    );
+    await UserModel.updateOne({ _id: user._id }, { $set: { 'subscription.stripeCustomerId': 'cus_test_fails' } });
 
     const { req, res, status } = buildReqRes({
       userId: user._id.toString(),

@@ -53,6 +53,13 @@ import 'colors';
 
 type ColorName = 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'gray' | 'white';
 
+// Modifiers carry semantic weight in the catalog below — bold = operator
+// should notice, italic = background hum, dim = high-volume / low-priority
+// per-line. They also disambiguate two loggers that share a color (chat
+// vs. llm both cyan; tts vs. monetization both magenta) without expanding
+// the foreground palette into colors that read as alarms (red, bgRed).
+type Modifier = 'bold' | 'italic' | 'dim' | 'underline';
+
 export interface Logger {
   readonly tag: string;
   /** Mutable — flip at any time to silence the domain. */
@@ -65,17 +72,27 @@ export interface Logger {
 export const createLogger = ({
   tag,
   color,
+  modifiers = [],
   enabled = true,
 }: {
   tag: string;
   color: ColorName;
+  modifiers?: Modifier[];
   enabled?: boolean;
 }): Logger => {
   const state = { enabled };
 
-  // `colors` augments String.prototype with color-named getters, so dynamic
-  // selection by config name needs a cast from the keyed-access type.
-  const paint = (s: string): string => (s as unknown as Record<ColorName, string>)[color];
+  // `colors` augments String.prototype with color/modifier getters, so
+  // dynamic selection by config name needs a cast from the keyed-access
+  // type. Modifiers compose left-to-right via the same chained-getter API
+  // (`'foo'.cyan.dim`); applying them after the color keeps the resulting
+  // ANSI sequence in the conventional `<color><attr>…` order.
+  const paint = (s: string): string => {
+    type Stylable = Record<ColorName | Modifier, string>;
+    let out = (s as unknown as Stylable)[color];
+    for (const m of modifiers) out = (out as unknown as Stylable)[m];
+    return out;
+  };
   const prefix = paint(`[${tag}]`);
 
   return {
@@ -109,7 +126,12 @@ export const createLogger = ({
  * Pairs with health probes (`/live`, `/ready`) which return state to the
  * load balancer; this logger explains *why* the state changed.
  */
-export const lifecycleLog = createLogger({ tag: 'lifecycle', color: 'gray', enabled: true });
+export const lifecycleLog = createLogger({
+  tag: 'lifecycle',
+  color: 'gray',
+  modifiers: ['italic'],
+  enabled: true,
+});
 
 /**
  * Async job orchestration. The job runner (`services/jobRunner.ts`) and
@@ -127,7 +149,12 @@ export const lifecycleLog = createLogger({ tag: 'lifecycle', color: 'gray', enab
  * Doesn't log: the AI-generation chatter that fires *inside* a job —
  * that's `genLog`. Token spend per call is `llmLog`.
  */
-export const jobLog = createLogger({ tag: 'job', color: 'yellow', enabled: true });
+export const jobLog = createLogger({
+  tag: 'job',
+  color: 'yellow',
+  modifiers: ['bold'],
+  enabled: true,
+});
 
 /**
  * AI content-generation pipelines. Covers course-structure planning,
@@ -201,7 +228,12 @@ export const ragLog = createLogger({ tag: 'rag', color: 'blue', enabled: true })
  *   [tts] dedup:hit   hash=ab… lesson=…
  *   [tts] synth:fail  lesson=… reason=quota_exceeded
  */
-export const ttsLog = createLogger({ tag: 'tts', color: 'white', enabled: true });
+export const ttsLog = createLogger({
+  tag: 'tts',
+  color: 'magenta',
+  modifiers: ['italic'],
+  enabled: true,
+});
 
 /**
  * Money in/out of users' balances: Stripe webhooks (checkout, subscription
@@ -212,7 +244,12 @@ export const ttsLog = createLogger({ tag: 'tts', color: 'white', enabled: true }
  * Per-token usage accounting is on `llmLog` + `UsageEventModel` —
  * this domain is dollars in/out only.
  */
-export const monetizationLog = createLogger({ tag: 'monetization', color: 'magenta', enabled: true });
+export const monetizationLog = createLogger({
+  tag: 'monetization',
+  color: 'magenta',
+  modifiers: ['bold'],
+  enabled: true,
+});
 
 /**
  * External HTTP integrations: Jina reader, Tavily search transport,
@@ -232,7 +269,7 @@ export const monetizationLog = createLogger({ tag: 'monetization', color: 'magen
  * The orchestration narrative ("this Tavily call was for lesson X step
  * 'rerank'") stays on `genLog`; this domain is transport-only.
  */
-export const integrationLog = createLogger({ tag: 'integration', color: 'red', enabled: true });
+export const integrationLog = createLogger({ tag: 'integration', color: 'white', enabled: true });
 
 /**
  * Per-call LLM token usage + cache-hit telemetry. Single source of truth
@@ -250,4 +287,9 @@ export const integrationLog = createLogger({ tag: 'integration', color: 'red', e
  *   [llm] quiz:generate      read=0    write=4820 uncached=120 out=1420 hit=0%
  *   [llm] mentor:lesson.tool read=2310 write=0 uncached=0 out=120 hit=100%
  */
-export const llmLog = createLogger({ tag: 'llm', color: 'cyan', enabled: true });
+export const llmLog = createLogger({
+  tag: 'llm',
+  color: 'cyan',
+  modifiers: ['dim'],
+  enabled: true,
+});

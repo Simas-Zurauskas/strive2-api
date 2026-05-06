@@ -65,7 +65,7 @@ const UNIVERSAL_FEATURES = {
 // Allowance is surfaced to users as integer multiples of the Free grant
 // (1×, 5×, 15×, 40×). Keep every `monthlyAllowance` an exact multiple of
 // `PLANS.free.monthlyAllowance` so the pricing page never displays "~5×" —
-// the client's `CREDITS_PER_ALLOWANCE` constant (currently 130) MUST match
+// the client's `CREDITS_PER_ALLOWANCE` constant (currently 110) MUST match
 // `PLANS.free.monthlyAllowance` here.
 const ALLOWANCE_UNIT = 130;
 
@@ -97,7 +97,7 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
       'Monthly plan for active learners. Substantially larger recurring AI-generation allowance — comfortable headroom for ongoing course building, frequent lesson regeneration, and intensive review and code practice.',
     monthlyUsd: 24.99,
     annualMonthlyUsd: 19.99,
-    monthlyAllowance: ALLOWANCE_UNIT * 15,
+    monthlyAllowance: ALLOWANCE_UNIT * 12,
     ...UNIVERSAL_FEATURES,
   },
   studio: {
@@ -107,7 +107,7 @@ export const PLANS: Record<PlanKey, PlanDefinition> = {
       'Monthly plan for power users and educators. Our largest recurring AI-generation allowance, designed for heavy continuous use — building several courses in parallel and frequent re-generation across the platform.',
     monthlyUsd: 49.99,
     annualMonthlyUsd: 39.99,
-    monthlyAllowance: ALLOWANCE_UNIT * 40,
+    monthlyAllowance: ALLOWANCE_UNIT * 30,
     ...UNIVERSAL_FEATURES,
   },
 };

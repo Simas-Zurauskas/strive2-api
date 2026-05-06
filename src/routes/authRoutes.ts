@@ -17,6 +17,8 @@ import {
   updatePreferencesController,
   requestSecurityActionCodeController,
   refreshTokenController,
+  getMarketingPreferenceController,
+  updateMarketingPreferenceController,
 } from '@controlers/auth';
 import { protect } from '@middleware/authMiddleware';
 import { perEmailRateLimit } from '@middleware/perEmailRateLimit';
@@ -69,6 +71,8 @@ router.post('/set-password', authLimiter, protect, setPasswordController);
 router.post('/change-password', authLimiter, protect, changePasswordController);
 router.get('/me', protect, getMeController);
 router.patch('/me/preferences', protect, updatePreferencesController);
+router.get('/me/marketing-preference', protect, getMarketingPreferenceController);
+router.patch('/me/marketing-preference', protect, updateMarketingPreferenceController);
 router.post('/logout', protect, logoutController);
 // Sliding-refresh: issues a fresh 7-day access token to a still-valid
 // session. Re-checks `tokenVersion` against the DB so revoked tokens

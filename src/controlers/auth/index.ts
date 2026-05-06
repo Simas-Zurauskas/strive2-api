@@ -14,3 +14,5 @@ export * from './changePassword';
 export * from './updatePreferences';
 export * from './securityActions';
 export * from './refresh';
+export * from './getMarketingPreference';
+export * from './updateMarketingPreference';

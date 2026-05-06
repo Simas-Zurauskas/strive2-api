@@ -42,7 +42,7 @@ describe('resolveSignupAllowance', () => {
       firstSeenAt: new Date(),
       lastSignupAt: new Date(),
       signupCount: 1,
-      lifetimeCreditsGranted: 130,
+      lifetimeCreditsGranted: 110,
       lifetimeCreditsConsumed: 50,
       retentionUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
     });
@@ -111,16 +111,16 @@ describe('recordAccountDeletion', () => {
 
   test('aggregates lifetime credits from CreditLedgerModel: sums positive deltas + abs(negative deltas)', async () => {
     const user = await makeUser({ email: 'spent@example.com' });
-    // Seed a real ledger: +130 grant, -20 debit, +50 topup, -30 debit
+    // Seed a real ledger: +110 grant, -20 debit, +50 topup, -30 debit
     await CreditLedgerModel.create([
       {
         userId: user._id,
         timestamp: new Date(),
-        delta: 130,
-        allowanceDelta: 130,
+        delta: 110,
+        allowanceDelta: 110,
         bonusDelta: 0,
         balanceBefore: 0,
-        balanceAfter: 130,
+        balanceAfter: 110,
         bonusBefore: 0,
         bonusAfter: 0,
         reason: 'signup_grant',
@@ -131,7 +131,7 @@ describe('recordAccountDeletion', () => {
         delta: -20,
         allowanceDelta: -20,
         bonusDelta: 0,
-        balanceBefore: 130,
+        balanceBefore: 110,
         balanceAfter: 110,
         bonusBefore: 0,
         bonusAfter: 0,
@@ -168,7 +168,7 @@ describe('recordAccountDeletion', () => {
     const row = await AbuseLogModel.findOne({
       emailHash: hashCanonicalEmail('spent@example.com'),
     }).lean();
-    expect(row?.lifetimeCreditsGranted).toBe(180); // 130 + 50
+    expect(row?.lifetimeCreditsGranted).toBe(180); // 110 + 50
     expect(row?.lifetimeCreditsConsumed).toBe(50); // 20 + 30 (abs)
   });
 
