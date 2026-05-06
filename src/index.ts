@@ -27,6 +27,8 @@ import { gamificationRoutes } from '@routes/gamificationRoutes';
 import { recallRoutes } from '@routes/recallRoutes';
 import { productKbRoutes } from '@routes/productKbRoutes';
 import { usageRoutes } from '@routes/usageRoutes';
+import { devRoutes } from '@routes/devRoutes';
+import { adminRoutes } from '@routes/adminRoutes';
 import { stripeWebhookController } from '@controlers/billing';
 import mongoose from 'mongoose';
 import { getIO, initSocketIO } from '@lib/socket';
@@ -222,6 +224,7 @@ app.use('/api/gamification', gamificationRoutes);
 app.use('/api/recall', recallRoutes);
 app.use('/api/product-kb', productKbRoutes);
 app.use('/api/usage', usageRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Swagger UI + the raw `/swagger.json` spec are exposed in non-production
 // only. In production the full route table + body schemas + errorCode
@@ -243,6 +246,10 @@ if (ENVIRONMENT !== 'production') {
       swaggerOptions: { filter: true },
     }),
   );
+
+  // Browser-visible email template previews. Renders the same builders
+  // production uses; never sends mail. Index at `/dev/email-preview`.
+  app.use('/dev', devRoutes);
 }
 
 app.use((req, res, next) => {
