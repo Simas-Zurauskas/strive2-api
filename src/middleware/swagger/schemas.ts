@@ -832,6 +832,16 @@ export const schemas: SchemaMap = {
         description: 'Terminal status only — progress updates use the job:progress channel.',
       },
       error: { type: 'string', nullable: true },
+      errorCode: {
+        type: 'string',
+        description:
+          'Structured error code for failures the client must handle specifically — e.g. INSUFFICIENT_CREDITS triggers the Out-of-Credits modal instead of a toast. Mirrors the value the HTTP error middleware would have returned for a synchronous 4xx.',
+      },
+      errorMeta: {
+        type: 'object',
+        additionalProperties: true,
+        description: 'Optional metadata that pairs with errorCode (e.g. `{ need, have }` for INSUFFICIENT_CREDITS).',
+      },
       courseId: { type: 'string' },
       type: { $ref: '#/components/schemas/JobType' },
       moduleIndex: { type: 'integer' },
