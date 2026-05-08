@@ -24,6 +24,21 @@ export interface JobStatusEvent {
   jobId: string;
   status: 'completed' | 'failed';
   error?: string | null;
+  /**
+   * Structured error code for failures the client needs to handle as
+   * something other than a generic "try again" toast — e.g.
+   * `INSUFFICIENT_CREDITS`, where the FE pops the Out-of-Credits modal
+   * instead of toasting. Same value the corresponding HTTP error
+   * middleware would have set on a synchronous 4xx response. Only set
+   * when `status === 'failed'`.
+   */
+  errorCode?: string;
+  /**
+   * Optional metadata associated with `errorCode` — mirrors the `meta`
+   * field on the synchronous error envelope. For INSUFFICIENT_CREDITS,
+   * carries `{ need, have }`.
+   */
+  errorMeta?: Record<string, unknown>;
   courseId: string;
   type: JobType;
   moduleIndex?: number;

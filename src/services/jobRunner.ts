@@ -805,6 +805,12 @@ const processJob = async (jobId: string): Promise<void> => {
 
   let status: 'completed' | 'failed' = 'failed';
   let errorMessage: string | undefined;
+  // Capture the structured fields of typed errors (e.g. InsufficientCreditsError)
+  // so we can include them on the `job:status` socket payload — the FE
+  // routes INSUFFICIENT_CREDITS to the Out-of-Credits modal instead of a
+  // generic toast, but only when the payload carries the errorCode.
+  let errorCode: string | undefined;
+  let errorMeta: Record<string, unknown> | undefined;
 
   const jobMetadata = (job.metadata ?? {}) as Record<string, unknown>;
 
@@ -883,6 +889,17 @@ const processJob = async (jobId: string): Promise<void> => {
     jobLog.info(`${job.type}:done jobId=${jobId} ms=${Date.now() - startedAt}`);
   } catch (error: unknown) {
     errorMessage = error instanceof Error ? error.message : String(error);
+    // Lift errorCode/meta from typed errors (InsufficientCreditsError,
+    // MaxConcurrentJobsError, …) so the failure socket event carries the
+    // same structure synchronous 4xx responses do. Duck-typed because the
+    // error classes live in different services and don't share a base.
+    const structured = error as { errorCode?: unknown; meta?: unknown };
+    if (typeof structured.errorCode === 'string') {
+      errorCode = structured.errorCode;
+    }
+    if (structured.meta && typeof structured.meta === 'object') {
+      errorMeta = structured.meta as Record<string, unknown>;
+    }
     jobLog.error(`${job.type}:fail jobId=${jobId} ms=${Date.now() - startedAt} msg=${errorMessage}`);
     // Fingerprint by job type + error class so retries of the same job type
     // hitting the same failure mode collapse into a single Sentry issue.
@@ -917,7 +934,16 @@ const processJob = async (jobId: string): Promise<void> => {
       jobEvents.emit(`job:${jobId}`, completedPayload);
       jobEvents.emit('update', completedPayload);
     } else {
-      const failedPayload = { jobId, status: 'failed' as const, error: errorMessage, courseId: job.courseId.toString(), type: job.type, userId: job.userId.toString() };
+      const failedPayload = {
+        jobId,
+        status: 'failed' as const,
+        error: errorMessage,
+        ...(errorCode ? { errorCode } : {}),
+        ...(errorMeta ? { errorMeta } : {}),
+        courseId: job.courseId.toString(),
+        type: job.type,
+        userId: job.userId.toString(),
+      };
       jobEvents.emit(`job:${jobId}`, failedPayload);
       jobEvents.emit('update', failedPayload);
     }
