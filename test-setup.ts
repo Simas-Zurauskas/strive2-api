@@ -47,6 +47,12 @@ stub('PINECONE_INDEX_NAME', 'test-index');
 // fail a test).
 stub('SENTRY_DSN', 'https://public@o0.ingest.sentry.io/0');
 stub('GOOGLE_TTS_CREDENTIALS_JSON', '{}');
+// Mixpanel — required by `lib/analytics.ts` at module load. The wrapper
+// short-circuits when ENVIRONMENT === 'test' so no HTTP traffic is emitted,
+// but the env vars must still be parseable for module-level imports to
+// succeed.
+stub('MIXPANEL_PROJECT_TOKEN', 'mp_test_token');
+stub('MIXPANEL_SECRET', 'mp_test_secret');
 
 // Subscription Stripe price IDs — only used by stripeService tests, but
 // stubbed here so any module that pulls them in at load time also sees them.

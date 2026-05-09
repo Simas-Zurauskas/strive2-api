@@ -3,6 +3,7 @@ import { AuthProvider } from '@lib/constants';
 import { hashPassword, hashVerificationToken } from '@lib/auth';
 import { AppError } from '@middleware/errorMiddleware';
 import asyncHandler from 'express-async-handler';
+import { analytics } from '@lib/analytics';
 import { resetPasswordSchema } from './validation';
 
 /**
@@ -103,6 +104,8 @@ export const resetPasswordController = asyncHandler(async (req, res) => {
       $inc: { tokenVersion: 1 },
     },
   );
+
+  analytics.track(user._id.toString(), 'password_reset_completed');
 
   res.status(200).json({ data: { message: 'Password reset successfully' } });
 });

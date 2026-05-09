@@ -333,18 +333,15 @@ export const courseMentorChatController = asyncHandler(async (req, res) => {
     scope: 'course',
   });
 
-  if (!ok) {
-    chatLog.warn(`course:turn done ok=false ms=${Date.now() - turnStartedAt}`);
-    return;
-  }
-  chatLog.info(`course:turn done ok=true ms=${Date.now() - turnStartedAt}`);
+  chatLog.info(`course:turn done ok=${ok} ms=${Date.now() - turnStartedAt}`);
 
-  // Debit credit spend accumulated during this chat turn. Distinct
-  // jobType keeps course-mentor traffic separable from lesson-mentor
-  // traffic in the analytics dashboard.
+  // Debit ALWAYS — including on client disconnect (see lessonChat.ts for
+  // the rationale). 500 μ¢ forgiveness threshold protects the unfair
+  // tab-close-before-streaming case.
   await debitActualSpend({
     userId,
     jobId: new Types.ObjectId(),
     jobType: 'course_mentor_chat',
-  }).catch(bgError('courseMentorChat.debitOnSuccess'));
+    minMicroCents: 500,
+  }).catch(bgError('courseMentorChat.debit'));
 });

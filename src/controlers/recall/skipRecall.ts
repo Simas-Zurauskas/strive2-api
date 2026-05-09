@@ -1,5 +1,6 @@
 import asyncHandler from 'express-async-handler';
 import { skipRecall } from '@services/recallSchedulerService';
+import { analytics } from '@lib/analytics';
 import { loadAuthorizedRecallCard } from './authorize';
 import { parseRecallCardIdParam } from './validation';
 
@@ -40,8 +41,12 @@ export const skipRecallController = asyncHandler(async (req, res) => {
 
   // Ownership-gated load — see authorize.ts. Rejects with 404 if either
   // the recall card doesn't exist or the caller doesn't own its course.
-  await loadAuthorizedRecallCard({ userId, recallCardId });
+  const card = await loadAuthorizedRecallCard({ userId, recallCardId });
 
   const progress = await skipRecall({ userId, recallCardId });
+  analytics.track(userId, 'recall_card_skipped', {
+    card_id: recallCardId,
+    course_id: card.courseId.toString(),
+  });
   res.status(200).json({ data: { nextDue: progress.nextDue } });
 });

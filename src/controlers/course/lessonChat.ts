@@ -314,16 +314,17 @@ export const lessonChatController = asyncHandler(async (req, res) => {
     scope: 'lesson',
   });
 
-  if (!ok) {
-    chatLog.warn(`lesson:turn done ok=false ms=${Date.now() - turnStartedAt}`);
-    return;
-  }
-  chatLog.info(`lesson:turn done ok=true ms=${Date.now() - turnStartedAt}`);
+  chatLog.info(`lesson:turn done ok=${ok} ms=${Date.now() - turnStartedAt}`);
 
-  // Debit credit spend accumulated during this chat turn
+  // Debit ALWAYS — including on client disconnect. Otherwise a stop-and-go
+  // pattern (start stream, kill connection mid-token) gives unbounded free
+  // mentor turns. The 500 μ¢ forgiveness threshold (≈10% of one credit)
+  // protects against the unfair-charge case where a tab-close fires
+  // before any meaningful provider tokens streamed.
   await debitActualSpend({
     userId,
     jobId: new Types.ObjectId(),
     jobType: 'mentor_chat',
-  }).catch(bgError('lessonChat.debitOnSuccess'));
+    minMicroCents: 500,
+  }).catch(bgError('lessonChat.debit'));
 });

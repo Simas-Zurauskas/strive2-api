@@ -1,5 +1,4 @@
 import asyncHandler from 'express-async-handler';
-import CourseModel from '@models/CourseModel';
 import { submitJob } from '@services/jobRunner';
 import { getUserCourseLean } from '@services/courseDbService';
 import { generateLessonSchema, assertPreviousLessonGenerated } from './validation';
@@ -88,18 +87,18 @@ export const generateLessonController = asyncHandler(async (req, res) => {
 
   // Image/links flags pass through to the agent unchanged. All plans get
   // full feature access — credits cost reflects what was used.
+  // `activeLesson` is threaded into submitJob so it lands in the SAME
+  // atomic claim as activeJobId. The previous controller-level
+  // findByIdAndUpdate after submitJob raced with processJob's finally —
+  // a fast pre-flight failure could clear activeLesson:null before the
+  // controller's write committed, leaving a ghost activeLesson.
   const jobId = await submitJob({
     userId,
     courseId,
     type: 'generate_lesson',
     metadata: { moduleIndex, lessonIndex, includeImage, includeLinks },
+    activeLesson: { moduleIndex, lessonIndex },
   });
-
-  // Stamp the course so a reloaded client knows — synchronously, off a
-  // single GET /course — that THIS lesson is being generated, without
-  // round-tripping through /course/job/:jobId to read the metadata.
-  // Cleared alongside activeJobId in jobRunner.processJob's finally.
-  await CourseModel.findByIdAndUpdate(courseId, { activeLesson: { moduleIndex, lessonIndex } });
 
   res.status(202).json({ data: { jobId } });
 });

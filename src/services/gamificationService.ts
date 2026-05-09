@@ -21,6 +21,7 @@
  * feature lands.
  */
 import mongoose from 'mongoose';
+import { analytics } from '@lib/analytics';
 import UserGamificationModel, { IUserGamification } from '@models/UserGamificationModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
@@ -134,6 +135,14 @@ export interface AwardXpResult {
 export const awardXp = async ({ userId, amount, source }: { userId: string; amount: number; source: XpSource }): Promise<AwardXpResult> => {
   if (amount <= 0) return { xpAwarded: 0, totalXp: 0, level: 1, leveledUp: false, newAchievements: [] };
 
+  // Mixpanel: emit at function entry so a downstream save failure can't
+  // suppress the event. The cumulative `total_xp` sum is best computed
+  // by Mixpanel from the event log; we just send the delta + source.
+  analytics.track(userId, 'xp_awarded', {
+    xp_amount: amount,
+    source,
+  });
+
   const today = todayStr();
   const doc = await UserGamificationModel.findOneAndUpdate(
     { userId: new mongoose.Types.ObjectId(userId) },
@@ -171,8 +180,21 @@ export const awardXp = async ({ userId, amount, source }: { userId: string; amou
     );
   }
 
+  if (leveledUp) {
+    analytics.track(userId, 'level_up', {
+      from_level: doc!.level,
+      to_level: newLevel,
+    });
+  }
+
   // Check level-based achievements
   const newAchievements = await checkAchievements({ userId, trigger: 'level', context: { level: newLevel } });
+  for (const achievement of newAchievements) {
+    analytics.track(userId, 'achievement_unlocked', {
+      achievement_id: achievement.id,
+      achievement_category: (achievement as { category?: string }).category ?? 'level',
+    });
+  }
 
   return {
     xpAwarded: amount,
@@ -203,13 +225,17 @@ export const recordActivity = async (userId: string): Promise<RecordActivityResu
   // worth of deserialization.
   const current = await UserGamificationModel.findOne({ userId: userObjId })
     .select('lastActiveDate currentStreak longestStreak')
+    .read('primary')
     .lean();
 
   if (!current) {
     // First-ever activity — create the profile (upsert), then recurse once
     // so the new row is picked up by the normal path. `getOrCreateProfile`
     // uses `$setOnInsert` + upsert, so this is race-safe under concurrent
-    // first-time activities.
+    // first-time activities. The recurse forces a primary read above so a
+    // secondary-read replication lag can't loop forever — under default
+    // `readPreference=primary` this is already safe; the explicit `.read`
+    // above pins it even if the connection-level preference changes.
     await getOrCreateProfile(userId);
     return recordActivity(userId);
   }
@@ -243,7 +269,22 @@ export const recordActivity = async (userId: string): Promise<RecordActivityResu
     },
   );
 
+  // Mixpanel: a `nextStreak` greater than the previous streak is an extension;
+  // a reset to 1 (when the previous streak was >= 2) is a break. Day-1
+  // first-ever activity falls through both branches.
+  if (nextStreak > current.currentStreak && current.currentStreak >= 1) {
+    analytics.track(userId, 'streak_extended', { streak_days: nextStreak });
+  } else if (nextStreak === 1 && current.currentStreak >= 2) {
+    analytics.track(userId, 'streak_broken', { lost_streak_days: current.currentStreak });
+  }
+
   const newAchievements = await checkAchievements({ userId, trigger: 'streak', context: { streak: nextStreak } });
+  for (const achievement of newAchievements) {
+    analytics.track(userId, 'achievement_unlocked', {
+      achievement_id: achievement.id,
+      achievement_category: (achievement as { category?: string }).category ?? 'streak',
+    });
+  }
 
   return {
     currentStreak: nextStreak,

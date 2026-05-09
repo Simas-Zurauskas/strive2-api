@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import {
   createCourseController,
   listCoursesController,
@@ -50,6 +51,7 @@ import { ENVIRONMENT } from '@conf/env';
 import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
 import { usageContextMiddleware } from '@middleware/usageContext';
 import { requireCredits } from '@middleware/requireCredits';
+import { limitChatStreamConcurrency } from '@middleware/streamConcurrency';
 import { validateObjectId } from '@middleware/validateObjectId';
 import {
   attachmentUpload,
@@ -65,9 +67,25 @@ const router = Router();
 // request's controller triggers (chat stream, clarify, code exec, …).
 router.use(protect, requireVerified, usageContextMiddleware);
 
+// Per-user limit on Judge0 invocations. Each call is `wait=true` with a
+// 5s CPU limit and a non-trivial RapidAPI cost (~$0.0002/call), so without
+// a bound a user with 1 credit could burn ~100 calls/min indefinitely.
+// 30/min ≈ one execution every 2s — generous for hand-typed iteration on
+// an exercise. In-memory limiter; per-process — single-instance backend
+// per CLAUDE.md, so this is sufficient until the deployment splits.
+const executeCodeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { message: 'Too many code-execution requests — slow down.' },
+  keyGenerator: (req) => req.userId ?? req.ip ?? 'anon',
+  validate: { keyGeneratorIpFallback: false },
+});
+
 // Static paths (must be before /:id to avoid route conflict)
 router.get('/job/:jobId', validateObjectId('jobId'), getJobStatusController);
-router.post('/execute-code', requireCredits(), executeCodeController);
+router.post('/execute-code', executeCodeLimiter, requireCredits(), executeCodeController);
 router.get('/continue', getContinueLearningController);
 router.get('/progress-summary', getProgressSummaryController);
 router.get('/reviews-due', getReviewsDueController);
@@ -89,12 +107,13 @@ router.delete('/:id', deleteCourseController);
 router.get('/:courseId/edit-impact', getEditImpactController);
 
 // Chat (course design agent)
-router.post('/:courseId/chat', requireCredits(), chatStreamController);
+router.post('/:courseId/chat', limitChatStreamConcurrency, requireCredits(), chatStreamController);
 router.get('/:courseId/chat/history', getChatHistoryController);
 
 // Mentor chat (lesson-scoped AI tutor)
 router.post(
   '/:courseId/lesson/:moduleIndex/:lessonIndex/mentor/chat',
+  limitChatStreamConcurrency,
   requireCredits(),
   lessonChatController,
 );
@@ -122,7 +141,7 @@ router.post(
 // and helps with between-lessons decisions, cross-module synthesis, and
 // orientation. Distinct from the lesson-scoped mentor above; one chat
 // session per (userId, courseId).
-router.post('/:courseId/mentor/chat', requireCredits(), courseMentorChatController);
+router.post('/:courseId/mentor/chat', limitChatStreamConcurrency, requireCredits(), courseMentorChatController);
 router.get('/:courseId/mentor/chat/history', getCourseMentorHistoryController);
 router.delete('/:courseId/mentor/chat', clearCourseMentorController);
 

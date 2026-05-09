@@ -34,6 +34,7 @@ import CourseModel, { ICourse } from '@models/CourseModel';
 import LessonContentModel, { ILessonBlock } from '@models/LessonContentModel';
 import RecallCardModel from '@models/RecallCardModel';
 import { JobType, CourseDepth } from '@lib/constants';
+import { analytics } from '@lib/analytics';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
 import { contextLoad, imageGeneration, linksGeneration } from '@lib/ai/agents/lessonGeneration/nodes';
 import type { LessonState } from '@lib/ai/agents/lessonGeneration/state';
@@ -102,6 +103,19 @@ const formatCourseAnswers = (course: Pick<ICourse, 'answers' | 'clarifyData'>): 
   });
 };
 
+// ── Mixpanel job-type mapping ───────────────────────────────
+//
+// Generation jobs we want to fire analytics events for. The base name
+// is suffixed with `_started`/`_succeeded`/`_failed` at emit time. Any
+// job type not in this map fires no Mixpanel event — by design, since
+// utility flows (regenerate-hero, clarify, depth-previews, narration)
+// are noise in the conversion/generation-success funnel.
+const JOB_TO_ANALYTICS_BASE: Partial<Record<JobType, string>> = {
+  generate_structure: 'course_generation',
+  generate_lesson: 'lesson_generation',
+  generate_module_quiz: 'module_quiz_generation',
+};
+
 // ── Types ──────────────────────────────────────────────────
 
 interface SubmitJobParams {
@@ -109,6 +123,15 @@ interface SubmitJobParams {
   courseId: string;
   type: JobType;
   metadata?: Record<string, unknown>;
+  /**
+   * Stamp `course.activeLesson` atomically with the activeJobId claim. Set
+   * by `generate_lesson` jobs so the UI's "this lesson is generating"
+   * indicator can never lag behind the activeJobId. Without this, a fast
+   * pre-flight failure inside processJob's finally clears activeLesson:null
+   * BEFORE the controller's separate findByIdAndUpdate writes it — leaving
+   * a ghost activeLesson on the next user load.
+   */
+  activeLesson?: { moduleIndex: number; lessonIndex: number };
 }
 
 // ── Submit ─────────────────────────────────────────────────
@@ -172,6 +195,12 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
       monetizationLog.info(
         `Job rejected (concurrency): user=${params.userId} plan=${planKey} active=${active}/${limit} type=${params.type}`,
       );
+      analytics.track(params.userId, 'concurrency_cap_blocked', {
+        cap: limit,
+        current_active_jobs: active,
+        plan: planKey,
+        job_type: params.type,
+      });
       throw new MaxConcurrentJobsError({ active, limit });
     }
   } catch (err) {
@@ -184,7 +213,10 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
       _id: params.courseId,
       $or: [{ activeJobId: null }, { activeJobId: { $exists: false } }],
     },
-    { activeJobId: job._id },
+    {
+      activeJobId: job._id,
+      ...(params.activeLesson ? { activeLesson: params.activeLesson } : {}),
+    },
     { returnDocument: 'after' },
   );
 
@@ -476,6 +508,12 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
             `generate_lesson:abandon jobId=${jobId} course=${courseId} module=${moduleIndex} lesson=${lessonIndex} reason=course_deleted_midflight`,
           );
           if (saveTimer) clearTimeout(saveTimer);
+          // Wait for any in-flight debounced save to settle BEFORE returning,
+          // otherwise the save can land after the controller's caller has
+          // already cleaned up the parent records and resurrects an orphan
+          // LessonContent row. Catch swallows save errors here so they don't
+          // mask the abandon path.
+          await savePromise.catch(() => {});
           return;
         }
 
@@ -500,19 +538,26 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
           );
         }
 
-        const existing = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
+        // Atomic version bump. Two concurrent regens of the same lesson
+        // would otherwise both read version=N and both compute N+1, with
+        // the second clobbering the first — version monotonicity broken,
+        // downstream cache-busting misses an invalidation. `$inc` on a
+        // non-existent field initialises to 0+1=1, so first creation
+        // gets version=1 without a separate `setOnInsert`.
         await LessonContentModel.findOneAndUpdate(
           { courseId, moduleIndex, lessonIndex },
           {
-            courseId,
-            moduleIndex,
-            lessonIndex,
-            blocks: allBlocks,
-            summary: capturedSummary,
-            heroImageUrl: savedHeroImageUrl,
-            includeHeroImage: includeImage,
-            completed: true,
-            version: existing ? existing.version + 1 : 1,
+            $set: {
+              courseId,
+              moduleIndex,
+              lessonIndex,
+              blocks: allBlocks,
+              summary: capturedSummary,
+              heroImageUrl: savedHeroImageUrl,
+              includeHeroImage: includeImage,
+              completed: true,
+            },
+            $inc: { version: 1 },
           },
           { upsert: true, returnDocument: 'after' },
         );
@@ -573,6 +618,14 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         return;
       } catch (e) {
         if (saveTimer) clearTimeout(saveTimer);
+        // Wait for any in-flight debounced save to settle BEFORE the
+        // cleanup deleteOne. Otherwise the save can resolve AFTER
+        // deleteOne and resurrect a stale partial-content row that
+        // outlives the failed job — visible to the user as a "lesson
+        // failed but I see content" UI bug. Catch swallows save errors
+        // so they don't mask the original cause that drove us here.
+        await savePromise.catch(() => {});
+
         // Clean up partial content so the reloaded client (which would
         // otherwise see `completed: false` rows with the debounced writes)
         // gets a clean slate on retry. Matches the cleanup path the SSE
@@ -814,6 +867,28 @@ const processJob = async (jobId: string): Promise<void> => {
 
   const jobMetadata = (job.metadata ?? {}) as Record<string, unknown>;
 
+  // Mixpanel: emit `*_started` only for the job types that map to a
+  // user-meaningful generation funnel. Utility flows (`clarify`,
+  // `refine_structure`, `regenerate_*`, `generate_depth_previews`,
+  // `lesson_narration`) are intentionally not instrumented here — they'd
+  // dilute the funnel without adding signal. Map kept in sync with the
+  // matching emit in the `finally` block below.
+  const userIdStr = job.userId.toString();
+  const courseIdStr = job.courseId.toString();
+  const lessonId = (jobMetadata as { lessonId?: string }).lessonId;
+  const moduleIndex = (jobMetadata as { moduleIndex?: number }).moduleIndex;
+  const lessonIndex = (jobMetadata as { lessonIndex?: number }).lessonIndex;
+  const analyticsBase = JOB_TO_ANALYTICS_BASE[job.type as keyof typeof JOB_TO_ANALYTICS_BASE];
+  if (analyticsBase) {
+    analytics.track(userIdStr, `${analyticsBase}_started`, {
+      course_id: courseIdStr,
+      job_type: job.type,
+      ...(lessonId && { lesson_id: lessonId }),
+      ...(typeof moduleIndex === 'number' && { module_index: moduleIndex }),
+      ...(typeof lessonIndex === 'number' && { lesson_index: lessonIndex }),
+    });
+  }
+
   // Drop a breadcrumb at job start so any error captured deep inside the
   // agent graph has a trail back to the originating job. Cheap (no
   // network call) and correlates the error with the job in a single click
@@ -946,6 +1021,36 @@ const processJob = async (jobId: string): Promise<void> => {
       };
       jobEvents.emit(`job:${jobId}`, failedPayload);
       jobEvents.emit('update', failedPayload);
+    }
+
+    // Mixpanel: pair the start emit above with success/failure terminal
+    // events. Duration in seconds keeps the property comparable across
+    // job types (the doc convention). `failure_stage` is left
+    // approximate at the job-type level for now — finer granularity
+    // (design vs modules vs lessons within a single course-generation
+    // job) is captured by Sentry's `job_type` tag, not by Mixpanel.
+    if (analyticsBase) {
+      const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+      if (status === 'completed') {
+        analytics.track(userIdStr, `${analyticsBase}_succeeded`, {
+          course_id: courseIdStr,
+          job_type: job.type,
+          duration_seconds: durationSeconds,
+          ...(lessonId && { lesson_id: lessonId }),
+          ...(typeof moduleIndex === 'number' && { module_index: moduleIndex }),
+          ...(typeof lessonIndex === 'number' && { lesson_index: lessonIndex }),
+        });
+      } else {
+        analytics.track(userIdStr, `${analyticsBase}_failed`, {
+          course_id: courseIdStr,
+          job_type: job.type,
+          duration_seconds: durationSeconds,
+          failure_stage: job.type,
+          ...(errorCode && { error_code: errorCode }),
+          ...(errorMessage && { error_message: errorMessage.slice(0, 200) }),
+          ...(lessonId && { lesson_id: lessonId }),
+        });
+      }
     }
   }
 };

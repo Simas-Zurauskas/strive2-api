@@ -2,6 +2,7 @@ import UserModel from '@models/UserModel';
 import { generateVerificationToken, PASSWORD_RESET_TOKEN_EXPIRY_MS } from '@lib/auth';
 import { sendPasswordResetEmailAsync } from '@services/emailService';
 import asyncHandler from 'express-async-handler';
+import { analytics } from '@lib/analytics';
 import { forgotPasswordSchema } from './validation';
 
 /**
@@ -58,7 +59,12 @@ export const forgotPasswordController = asyncHandler(async (req, res) => {
     );
 
     sendPasswordResetEmailAsync({ to: email, token: plainToken });
+
+    analytics.track(user._id.toString(), 'password_reset_requested');
   }
+  // No-event branch when the user doesn't exist preserves the
+  // enumeration-safety guarantee — even Mixpanel mustn't surface "this
+  // email is registered" via a fired event.
 
   res.status(200).json({
     data: { message: 'If an account exists for that email, a reset link has been sent.' },

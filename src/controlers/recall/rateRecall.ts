@@ -3,6 +3,7 @@ import { rateRecall } from '@services/recallSchedulerService';
 import * as gamificationService from '@services/gamificationService';
 import { RecallRating } from '@lib/recallConstants';
 import { bgError } from '@lib/bg';
+import { analytics } from '@lib/analytics';
 import { loadAuthorizedRecallCard } from './authorize';
 import { parseRecallCardIdParam, rateRecallSchema } from './validation';
 
@@ -59,6 +60,10 @@ export const rateRecallController = asyncHandler(async (req, res) => {
   // without an extra query.
   const card = await loadAuthorizedRecallCard({ userId, recallCardId });
 
+  // Snapshot the previous box BEFORE the scheduler advances it so the
+  // analytics event can carry both the from-box and the to-box without
+  // a follow-up query.
+  const previousBox = (card as { box?: number }).box ?? null;
   const { progress, justMastered } = await rateRecall({
     userId,
     recallCardId,
@@ -67,6 +72,15 @@ export const rateRecallController = asyncHandler(async (req, res) => {
   });
 
   const courseId = card.courseId.toString();
+  analytics.track(userId, 'recall_card_rated', {
+    card_id: recallCardId,
+    course_id: courseId,
+    rating,
+    ...(previousBox !== null && { previous_box: previousBox }),
+    next_box: progress.box,
+    mastered_now: justMastered === true,
+    ...(typeof typedMatch === 'number' && { similarity_score: typedMatch }),
+  });
   // Fire-and-forget gamification side effects (XP + streak + achievements).
   // Never fail the rating response on a gamification error.
   gamificationService.onRecallReview({ userId, recallCardId, courseId }).catch(bgError('gamification.onRecallReview'));

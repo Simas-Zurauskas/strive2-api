@@ -180,7 +180,19 @@ const applyFreePeriodReset = async ({
 
 // ── Debit real spend on job completion ────────────────────────
 
-const MAX_DEBIT_RETRIES = 3;
+// Bumped 3 → 10 with jittered backoff after the audit flagged silent debit
+// drops as the dominant revenue-leak mode under bursty concurrency. CAS
+// loss is the typical cause; spreading retries over ~50–500ms gives
+// concurrent writers room to finish so each attempt sees a fresh balance
+// rather than racing the same tick. The exhaustion metric + Sentry warn
+// stay so we can monitor the (now much smaller) residual rate.
+const MAX_DEBIT_RETRIES = 10;
+const debitBackoffMs = (attempt: number): number => {
+  // Exponential with cap + 50% jitter: 5, 10, 20, 40, 80, 160, 320, 320, 320, 320 ms (± jitter).
+  const base = Math.min(320, 5 * 2 ** attempt);
+  return Math.floor(base * (0.5 + Math.random() * 0.5));
+};
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Charge the user for real provider spend accumulated during a job.
@@ -197,18 +209,29 @@ const MAX_DEBIT_RETRIES = 3;
  * committed, and a slight overshoot on the user's last credit is a
  * bounded loss not worth mid-job abort or overdraft accounting.
  *
- * Called exclusively on the SUCCESS path. Failed / canceled jobs never
- * invoke this — provider cost incurred before a failure is written off
- * (consistent with the old "full refund on failure" behavior).
+ * Called on success AND on chat-stream disconnect. The disconnect path
+ * passes a `minMicroCents` forgiveness threshold so a transient network
+ * blip mid-stream (no meaningful provider spend yet) doesn't charge the
+ * user a credit for content they didn't see, while a deliberate
+ * stop-and-go to dodge the debit still pays.
  */
 export const debitActualSpend = async ({
   userId,
   jobId,
   jobType,
+  minMicroCents = 0,
 }: {
   userId: string | mongoose.Types.ObjectId;
   jobId: mongoose.Types.ObjectId;
   jobType: string;
+  /**
+   * Forgiveness threshold in microcents. If the accumulated spend is below
+   * this, skip the debit silently. Set on chat controllers (where a tab
+   * close can fire before any meaningful tokens stream) to avoid charging
+   * a full credit for a near-zero turn. 0 = no forgiveness (default;
+   * matches the prior on-success-only behaviour).
+   */
+  minMicroCents?: number;
 }): Promise<void> => {
   const ctx = getUsageContext();
   // No context == no job scope == no accumulator. Caller shouldn't invoke
@@ -217,6 +240,12 @@ export const debitActualSpend = async ({
   if (!ctx) return;
 
   const microCents = ctx.spendMicroCents.current;
+  if (microCents < minMicroCents) {
+    monetizationLog.info(
+      `Debit forgiven: user=${String(userId)} job=${jobType} spent=${microCents}μ¢ < threshold ${minMicroCents}μ¢`,
+    );
+    return;
+  }
   const credits = microCentsToCredits(microCents);
   if (credits <= 0) return; // the job finished without any paid API calls
 
@@ -316,7 +345,8 @@ export const debitActualSpend = async ({
 
       return;
     }
-    // Race: retry with a fresh read.
+    // Race: backoff briefly then retry with a fresh read.
+    if (attempt < MAX_DEBIT_RETRIES - 1) await sleep(debitBackoffMs(attempt));
   }
   // All retries lost — rare. Skip the debit (user gets free work this time)
   // rather than half-apply the debit with inconsistent accounting. The
