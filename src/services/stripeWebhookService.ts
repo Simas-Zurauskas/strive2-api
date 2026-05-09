@@ -23,13 +23,15 @@
  * surface of the dispatch file. Per-handler tests can be added later
  * once handlers are extracted.
  */
-import mongoose from 'mongoose';
+import mongoose, { ClientSession } from 'mongoose';
 import UserModel from '@models/UserModel';
 import CreditLedgerModel, { CreditLedgerReason } from '@models/CreditLedgerModel';
 import { PLANS, PlanKey } from '@lib/creditPricing';
 import { emitCreditsUpdated } from '@lib/creditSocket';
 import { monetizationLog } from '@lib/loggers';
 import { captureError } from '@lib/errorReporter';
+import { analytics } from '@lib/analytics';
+import { withCreditTransaction } from '@lib/dbTransaction';
 import { getStripe, mapPriceIdToPlan } from './stripeService';
 import Stripe from 'stripe';
 
@@ -154,6 +156,19 @@ const onSubscriptionCheckoutCompleted = async ({
   const plan = PLANS[planInfo.plan];
   const period = getSubscriptionPeriod(subscription);
 
+  // Idempotency: pre-check stripeEventId BEFORE the allowance reset. Without
+  // this, a Stripe redelivery of the same `checkout.session.completed` would
+  // re-reset `allowanceBalance` to the plan's monthly grant, refilling any
+  // credits the user has spent in the meantime. The ledger insert at the end
+  // would then trip E11000, but the damage (the refill) has already happened.
+  // Mirrors `onTopupCheckoutCompleted` and the `handleSubscriptionUpdated`
+  // upgrade branch.
+  const existing = await CreditLedgerModel.findOne({ stripeEventId: event.id }).select('_id').lean();
+  if (existing) {
+    monetizationLog.info(`Duplicate subscription checkout event ${event.id}, skipping`);
+    return;
+  }
+
   await UserModel.updateOne(
     { _id: userId },
     {
@@ -199,21 +214,78 @@ const onSubscriptionCheckoutCompleted = async ({
   // `findOne({ stripeSubscriptionId: <old id> })` won't match — we
   // updated the user to the new id a few lines above.
   const replacingId = session.metadata?.replacingSubscriptionId;
+
+  // Mixpanel: subscription checkout completed. `intent` distinguishes
+  // first-time conversion ("new") from a paid-to-paid plan change
+  // initiated via Checkout ("upgrade"). Cents-level fields use the
+  // `*_usd_cents` suffix per the property convention; `amount_usd`
+  // mirrors as a decimal for dashboard readability.
+  analytics.setUserProps(userId, {
+    plan: planInfo.plan,
+    billing_cycle: planInfo.cadence,
+  });
+  const totalCents = session.amount_total ?? 0;
+  analytics.track(userId, 'checkout_completed', {
+    plan: planInfo.plan,
+    cycle: planInfo.cadence,
+    intent: replacingId && replacingId !== subscriptionId ? 'upgrade' : 'new',
+    amount_usd_cents: totalCents,
+    amount_usd: Number((totalCents / 100).toFixed(2)),
+    currency: session.currency ?? 'usd',
+  });
   if (replacingId && replacingId !== subscriptionId) {
     try {
       await stripe.subscriptions.cancel(replacingId);
       monetizationLog.info(`Replaced subscription ${replacingId} → ${subscriptionId} for user=${userId}`);
     } catch (err) {
       const code = (err as { code?: string })?.code;
-      if (code !== 'resource_missing') {
-        captureError(err, {
-          tags: { area: 'stripe.replaceSubscription' },
-          extra: { replacingId, newId: subscriptionId, userId },
-          fingerprint: ['stripe', 'replaceSubscription'],
-        });
+      // `resource_missing` is the idempotent self-short-circuit — the
+      // subscription was already cancelled (often by an earlier webhook
+      // delivery), nothing to do.
+      if (code === 'resource_missing') return;
+
+      // Transient Stripe failures (network blip, 429 rate-limit, 5xx)
+      // would previously be Sentry-captured + swallowed — leaving BOTH
+      // the old AND new subscription billing because the cancel never
+      // landed. Promote them to RetryableWebhookError so the webhook
+      // controller returns 5xx and Stripe retries the entire event
+      // (idempotent now that C1's pre-checks short-circuit duplicate
+      // ledger inserts).
+      if (isTransientStripeError(err)) {
+        throw new RetryableWebhookError(
+          `Transient failure cancelling replaced subscription ${replacingId}`,
+          err,
+        );
       }
+
+      // Deterministic Stripe errors (invalid_request_error etc.) — log
+      // and continue. Manual reconciliation needed; loud Sentry breadcrumb
+      // surfaces the case.
+      captureError(err, {
+        tags: { area: 'stripe.replaceSubscription' },
+        extra: { replacingId, newId: subscriptionId, userId },
+        fingerprint: ['stripe', 'replaceSubscription'],
+      });
     }
   }
+};
+
+/**
+ * Classify a Stripe SDK error as transient (worth retrying) or deterministic
+ * (manual review). Used by handlers where a retry would be safe AND useful.
+ *
+ * Transient: network errors, 429 rate-limit, 5xx server errors, 408 timeout.
+ * Deterministic: 4xx client errors (validation, missing resource, etc.).
+ */
+const isTransientStripeError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { type?: string; statusCode?: number; code?: string };
+  if (e.type === 'StripeConnectionError') return true;
+  if (e.type === 'StripeRateLimitError') return true;
+  if (typeof e.statusCode === 'number' && (e.statusCode >= 500 || e.statusCode === 408 || e.statusCode === 429)) {
+    return true;
+  }
+  return false;
 };
 
 const onTopupCheckoutCompleted = async ({
@@ -262,51 +334,63 @@ const onTopupCheckoutCompleted = async ({
   const user = await UserModel.findById(userId).select('credits').lean();
   if (!user) return;
 
-  await UserModel.updateOne({ _id: userId }, { $inc: { 'credits.bonusBalance': credits } });
+  // Atomic: $inc + ledger insert commit together (or roll back together) so a
+  // transient ledger-write failure can't leave the bonus $inc applied while
+  // Stripe retries the webhook — the prior pattern leaked a double-grant by
+  // the time the retry's pre-check fired (the first $inc had landed, the
+  // ledger row hadn't, so the retry's pre-check missed and $inc'd again).
+  // E11000 from the ledger insert means a concurrent racing duplicate slipped
+  // past the pre-check; abort the transaction so $inc rolls back.
+  const ledgerArgs: LedgerArgs = {
+    userId,
+    stripeEventId: event.id,
+    reason: 'topup_purchase',
+    allowanceDelta: 0,
+    bonusDelta: credits,
+    balanceBefore: user.credits.allowanceBalance,
+    balanceAfter: user.credits.allowanceBalance,
+    bonusBefore: user.credits.bonusBalance,
+    bonusAfter: user.credits.bonusBalance + credits,
+    // User-visible ledger row — credit count is intentionally omitted so
+    // the UI stays consistent with the "hide raw credits" policy. Dollar
+    // amount alone tells the user what they spent.
+    notes: `Top-up: $${amountUsd}`,
+  };
 
   try {
-    await writeLedger({
-      userId,
-      stripeEventId: event.id,
-      reason: 'topup_purchase',
-      allowanceDelta: 0,
-      bonusDelta: credits,
-      balanceBefore: user.credits.allowanceBalance,
-      balanceAfter: user.credits.allowanceBalance,
-      bonusBefore: user.credits.bonusBalance,
-      bonusAfter: user.credits.bonusBalance + credits,
-      // User-visible ledger row — credit count is intentionally omitted so
-      // the UI stays consistent with the "hide raw credits" policy. Dollar
-      // amount alone tells the user what they spent.
-      notes: `Top-up: $${amountUsd}`,
+    await withCreditTransaction(async (session) => {
+      await UserModel.updateOne(
+        { _id: userId },
+        { $inc: { 'credits.bonusBalance': credits } },
+        session ? { session } : undefined,
+      );
+      await insertLedgerRow(ledgerArgs, session);
     });
   } catch (err) {
-    // Concurrent racing duplicate that passed the pre-check above. The
-    // second writer's ledger insert hits E11000 here and we DON'T want to
-    // un-do the $inc — the first writer's $inc is the one we keep.
-    // Compensating action: roll back this writer's $inc to keep balance
-    // consistent. Bounded retry: a Mongo hiccup mid-rollback would leak
-    // a credit, but at this scale (~ms-wide race window) it's acceptable.
     if (isDuplicateKeyError(err)) {
-      await UserModel.updateOne({ _id: userId }, { $inc: { 'credits.bonusBalance': -credits } }).catch((rollbackErr) => {
-        monetizationLog.error(
-          `Top-up race: failed to roll back duplicate $inc for user=${userId} event=${event.id} — credit balance may be off by ${credits}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-        );
-        captureError(rollbackErr, {
-          tags: { area: 'stripe.webhook.topup.rollback' },
-          extra: { userId, eventId: event.id, credits },
-          fingerprint: ['stripe', 'topup', 'rollback'],
-        });
-      });
-      monetizationLog.info(`Top-up: duplicate event race ${event.id}, rolled back $inc`);
+      monetizationLog.info(`Top-up: duplicate event race ${event.id}, transaction rolled back`);
       return;
     }
     throw err;
   }
 
+  emitLedgerSocket(ledgerArgs);
+
   monetizationLog.info(
     `Top-up purchased: user=${userId} credits=+${credits} amount=$${amountUsd} bonus=${user.credits.bonusBalance}→${user.credits.bonusBalance + credits}`,
   );
+
+  analytics.track(userId, 'checkout_completed', {
+    intent: 'topup',
+    topup_amount_usd: amountUsd,
+    amount_usd_cents: amountUsd * 100,
+    amount_usd: amountUsd,
+  });
+  analytics.track(userId, 'topup_purchased', {
+    amount_usd: amountUsd,
+    amount_usd_cents: amountUsd * 100,
+    credits_granted: credits,
+  });
 };
 
 const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => {
@@ -363,17 +447,14 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
       return;
     }
 
-    try {
-      await UserModel.updateOne(
-        { _id: user._id },
-        {
-          $set: update,
-          $inc: { 'credits.allowanceBalance': Math.max(0, deltaAllowance) },
-        },
-      );
-      if (deltaAllowance > 0) {
-        try {
-          await writeLedger({
+    // Atomic: $set + $inc + ledger insert commit/roll back as a unit. Same
+    // motivation as the top-up branch — without the transaction, a transient
+    // ledger-write failure leaves the $inc applied; Stripe redelivers; the
+    // pre-check above misses (because no ledger row exists for the event id);
+    // the $inc fires again — double bonus.
+    const ledgerArgs: LedgerArgs | null =
+      deltaAllowance > 0
+        ? {
             userId: user._id,
             stripeEventId: event.id,
             reason: 'plan_upgrade_bonus',
@@ -384,37 +465,43 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
             bonusBefore: user.credits.bonusBalance,
             bonusAfter: user.credits.bonusBalance,
             notes: `Upgrade ${oldPlan} → ${newPlan}: +${deltaAllowance} allowance`,
-          });
-        } catch (err) {
-          // Concurrent racing duplicate. Roll back the just-applied $inc so
-          // we don't double-credit the upgrade bonus.
-          if (isDuplicateKeyError(err)) {
-            await UserModel.updateOne(
-              { _id: user._id },
-              { $inc: { 'credits.allowanceBalance': -Math.max(0, deltaAllowance) } },
-            ).catch((rollbackErr) => {
-              monetizationLog.error(
-                `Upgrade race: failed to roll back duplicate $inc for user=${user._id} event=${event.id} — allowance off by ${deltaAllowance}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-              );
-              captureError(rollbackErr, {
-                tags: { area: 'stripe.webhook.upgrade.rollback' },
-                extra: { userId: user._id.toString(), eventId: event.id, deltaAllowance },
-                fingerprint: ['stripe', 'upgrade', 'rollback'],
-              });
-            });
-            monetizationLog.info(`Plan upgrade: duplicate event race ${event.id}, rolled back $inc`);
-            return;
           }
-          throw err;
+        : null;
+
+    try {
+      await withCreditTransaction(async (session) => {
+        await UserModel.updateOne(
+          { _id: user._id },
+          {
+            $set: update,
+            $inc: { 'credits.allowanceBalance': Math.max(0, deltaAllowance) },
+          },
+          session ? { session } : undefined,
+        );
+        if (ledgerArgs) {
+          await insertLedgerRow(ledgerArgs, session);
         }
-      }
-      monetizationLog.info(`Plan upgraded: user=${user._id} ${oldPlan}→${newPlan} bonus=+${deltaAllowance} allowance`);
+      });
     } catch (err) {
-      // Bubble up — no $inc rollback needed because the outer updateOne is
-      // a single atomic update and either applied both $set and $inc or
-      // applied neither.
+      if (isDuplicateKeyError(err)) {
+        monetizationLog.info(`Plan upgrade: duplicate event race ${event.id}, transaction rolled back`);
+        return;
+      }
       throw err;
     }
+
+    if (ledgerArgs) emitLedgerSocket(ledgerArgs);
+
+    monetizationLog.info(`Plan upgraded: user=${user._id} ${oldPlan}→${newPlan} bonus=+${deltaAllowance} allowance`);
+    analytics.setUserProps(user._id.toString(), {
+      plan: newPlan,
+      billing_cycle: planInfo.cadence,
+    });
+    analytics.track(user._id.toString(), 'plan_upgraded', {
+      from_plan: oldPlan,
+      to_plan: newPlan,
+      cycle: planInfo.cadence,
+    });
     return;
   }
 
@@ -423,6 +510,35 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
     // current plan + credits intact so the user has what they paid for.
     update['subscription.pendingPlan'] = newPlan;
     monetizationLog.info(`Downgrade scheduled: user=${user._id} ${oldPlan}→${newPlan} (applies at next renewal)`);
+    analytics.track(user._id.toString(), 'plan_downgrade_scheduled', {
+      from_plan: oldPlan,
+      to_plan: newPlan,
+      ...(period.end && { effective_at: period.end.toISOString() }),
+    });
+  }
+
+  // Detect a fresh `cancel_at_period_end` transition via Stripe's
+  // `previous_attributes` envelope. Without the previous-value compare
+  // we'd fire `plan_cancelled` on every status update for an
+  // already-cancelling subscription.
+  const previousAttrs = (event.data as { previous_attributes?: Partial<Stripe.Subscription> })
+    .previous_attributes;
+  const wasCancellingBefore =
+    previousAttrs && 'cancel_at_period_end' in previousAttrs
+      ? previousAttrs.cancel_at_period_end === true
+      : subscription.cancel_at_period_end;
+  const becameCancelling = subscription.cancel_at_period_end && !wasCancellingBefore;
+  if (becameCancelling) {
+    const tenureDays = (() => {
+      const created = subscription.start_date ? new Date(subscription.start_date * 1000) : null;
+      if (!created) return undefined;
+      return Math.max(0, Math.floor((Date.now() - created.getTime()) / (24 * 60 * 60 * 1000)));
+    })();
+    analytics.track(user._id.toString(), 'plan_cancelled', {
+      plan: oldPlan,
+      ...(period.end && { effective_at: period.end.toISOString() }),
+      ...(tenureDays !== undefined && { tenure_days: tenureDays }),
+    });
   }
 
   await UserModel.updateOne({ _id: user._id }, { $set: update });
@@ -473,6 +589,10 @@ const handleSubscriptionDeleted = async (event: Stripe.Event): Promise<void> => 
       notes: 'Subscription ended — downgraded to Free',
     });
     monetizationLog.info(`Subscription canceled: user=${user._id} → Free (allowance reset to ${freeAllowance})`);
+    analytics.setUserProps(user._id.toString(), { plan: 'free', billing_cycle: null });
+    analytics.track(user._id.toString(), 'account_downgraded_to_free', {
+      cause: 'cancellation_period_ended',
+    });
   } catch (err) {
     if (!isDuplicateKeyError(err)) throw err;
     monetizationLog.info(`Duplicate subscription.deleted event ${event.id}, skipping`);
@@ -506,6 +626,18 @@ const handleInvoicePaid = async (event: Stripe.Event): Promise<void> => {
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
   const newPriceId = subscription.items.data[0]?.price?.id;
   const period = getSubscriptionPeriod(subscription);
+
+  // Idempotency: pre-check stripeEventId BEFORE the allowance reset. A Stripe
+  // redelivery of `invoice.paid` would otherwise re-reset `allowanceBalance`
+  // to `plan.monthlyAllowance`, refilling credits the user has already spent
+  // in the period. The catch below only handles E11000 — by the time the
+  // ledger throws, the `$set` has already landed. Mirrors the pre-check in
+  // `onSubscriptionCheckoutCompleted` and `handleSubscriptionUpdated`.
+  const existing = await CreditLedgerModel.findOne({ stripeEventId: event.id }).select('_id').lean();
+  if (existing) {
+    monetizationLog.info(`Duplicate invoice.paid event ${event.id}, skipping`);
+    return;
+  }
 
   try {
     await UserModel.updateOne(
@@ -542,6 +674,20 @@ const handleInvoicePaid = async (event: Stripe.Event): Promise<void> => {
     monetizationLog.info(
       `Period reset: user=${user._id} plan=${effectivePlan} allowance=${user.credits.allowanceBalance}→${plan.monthlyAllowance} (${invoice.billing_reason})`,
     );
+
+    // Mixpanel: only `subscription_cycle` is a true renewal — `subscription_update`
+    // is a proration/upgrade and is already covered by `plan_upgraded`.
+    if (invoice.billing_reason === 'subscription_cycle') {
+      const amountCents = invoice.amount_paid ?? 0;
+      const renewalCadence = mapPriceIdToPlan(newPriceId)?.cadence;
+      analytics.track(user._id.toString(), 'subscription_renewed', {
+        plan: effectivePlan,
+        ...(renewalCadence && { cycle: renewalCadence }),
+        amount_usd_cents: amountCents,
+        amount_usd: Number((amountCents / 100).toFixed(2)),
+        currency: invoice.currency ?? 'usd',
+      });
+    }
   } catch (err) {
     if (!isDuplicateKeyError(err)) throw err;
     monetizationLog.info(`Duplicate invoice.paid event ${event.id}, skipping`);
@@ -561,6 +707,19 @@ const handleInvoicePaymentFailed = async (event: Stripe.Event): Promise<void> =>
   // No credit mutation here — user keeps current balance; Stripe's dunning
   // retries the payment over the next few days. A grace-period sweep job
   // (Phase 5) downgrades to free if dunning exhausts without success.
+
+  // Resolve userId for the analytics fire — the updateOne above doesn't
+  // return it. Skip the event if the subscription no longer maps to a
+  // user (race: subscription deleted concurrently).
+  const userRow = await UserModel.findOne({ 'subscription.stripeSubscriptionId': subscriptionId })
+    .select('_id')
+    .lean();
+  if (!userRow) return;
+  analytics.track(userRow._id.toString(), 'payment_failed', {
+    reason: invoice.last_finalization_error?.message ?? 'unknown',
+    retry_attempt: invoice.attempt_count ?? 0,
+    amount_usd_cents: invoice.amount_due ?? 0,
+  });
 };
 
 // ── Refunds & disputes ──────────────────────────────────────
@@ -783,18 +942,7 @@ const toDate = (seconds: number | null | undefined): Date | null =>
 const isDuplicateKeyError = (err: unknown): boolean =>
   typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 11000;
 
-const writeLedger = async ({
-  userId,
-  stripeEventId,
-  reason,
-  allowanceDelta,
-  bonusDelta,
-  balanceBefore,
-  balanceAfter,
-  bonusBefore,
-  bonusAfter,
-  notes,
-}: {
+type LedgerArgs = {
   userId: mongoose.Types.ObjectId | string;
   stripeEventId: string;
   reason: CreditLedgerReason;
@@ -805,42 +953,64 @@ const writeLedger = async ({
   bonusBefore: number;
   bonusAfter: number;
   notes?: string;
-}): Promise<void> => {
-  try {
-    await CreditLedgerModel.create({
-      userId,
-      timestamp: new Date(),
-      delta: allowanceDelta + bonusDelta,
-      allowanceDelta,
-      bonusDelta,
-      balanceBefore,
-      balanceAfter,
-      bonusBefore,
-      bonusAfter,
-      reason,
-      stripeEventId,
-      notes,
-    });
+};
 
-    // Push live balance to the user's socket room. Skipped silently if the
-    // ledger insert hit the dedup index above — we only announce deltas on
-    // genuinely new events.
-    emitCreditsUpdated({
-      userId,
-      payload: {
-        allowance: balanceAfter,
-        bonus: bonusAfter,
-        total: balanceAfter + bonusAfter,
-        delta: allowanceDelta + bonusDelta,
-        reason,
+/**
+ * Insert the ledger row only. Caller passes a `session` to enrol the insert
+ * in an enclosing transaction (so a $inc + this insert commit/rollback as a
+ * unit). Throws on E11000 — caller catches to detect the duplicate-event
+ * race and abort their transaction cleanly.
+ */
+const insertLedgerRow = async (args: LedgerArgs, session?: ClientSession | null): Promise<void> => {
+  await CreditLedgerModel.create(
+    [
+      {
+        userId: args.userId,
+        timestamp: new Date(),
+        delta: args.allowanceDelta + args.bonusDelta,
+        allowanceDelta: args.allowanceDelta,
+        bonusDelta: args.bonusDelta,
+        balanceBefore: args.balanceBefore,
+        balanceAfter: args.balanceAfter,
+        bonusBefore: args.bonusBefore,
+        bonusAfter: args.bonusAfter,
+        reason: args.reason,
+        stripeEventId: args.stripeEventId,
+        notes: args.notes,
       },
-    });
+    ],
+    session ? { session } : undefined,
+  );
+};
+
+/**
+ * Side-effect: announce the new balance to the user's socket room. Must run
+ * AFTER the enclosing transaction commits — emitting before commit would
+ * leak a "credits granted" UI signal even if the DB write rolls back.
+ */
+const emitLedgerSocket = (args: LedgerArgs): void => {
+  emitCreditsUpdated({
+    userId: args.userId,
+    payload: {
+      allowance: args.balanceAfter,
+      bonus: args.bonusAfter,
+      total: args.balanceAfter + args.bonusAfter,
+      delta: args.allowanceDelta + args.bonusDelta,
+      reason: args.reason,
+    },
+  });
+};
+
+const writeLedger = async (args: LedgerArgs): Promise<void> => {
+  try {
+    await insertLedgerRow(args);
+    emitLedgerSocket(args);
   } catch (err) {
     if (isDuplicateKeyError(err)) return; // already processed
     captureError(err, {
       tags: { area: 'stripe.webhook.ledger' },
-      extra: { stripeEventId, reason },
-      fingerprint: ['stripe', 'ledger', String(reason)],
+      extra: { stripeEventId: args.stripeEventId, reason: args.reason },
+      fingerprint: ['stripe', 'ledger', String(args.reason)],
     });
     throw err;
   }

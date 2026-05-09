@@ -1,6 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import { z } from 'zod';
 import { gradeTypedAnswer } from '@services/recallGradingService';
+import { analytics } from '@lib/analytics';
 import { loadAuthorizedRecallCard } from './authorize';
 import { parseRecallCardIdParam } from './validation';
 
@@ -61,6 +62,16 @@ export const gradeRecallAnswerController = asyncHandler(async (req, res) => {
     canonicalAnswer: card.answer,
     userAnswer,
     kind: card.kind,
+  });
+
+  const acceptedFlag = (grade as { accepted?: boolean }).accepted;
+  const similarity = (grade as { similarity?: number }).similarity;
+  analytics.track(userId, 'recall_typed_answer_graded', {
+    card_id: recallCardId,
+    course_id: card.courseId.toString(),
+    ...(typeof acceptedFlag === 'boolean' && { accepted: acceptedFlag }),
+    ...(typeof similarity === 'number' && { similarity_score: similarity }),
+    user_answer_length_chars: userAnswer.length,
   });
 
   res.status(200).json({ data: grade });

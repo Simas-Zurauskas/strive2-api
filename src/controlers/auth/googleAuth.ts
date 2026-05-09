@@ -6,6 +6,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { generateAuthToken } from '@lib/auth';
 import { FREE_PERIOD_DAYS } from '@lib/creditPricing';
 import { resolveSignupAllowance } from '@services/abuseLogService';
+import { analytics } from '@lib/analytics';
 import { googleAuthSchema } from './validation';
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -150,5 +151,27 @@ export const googleAuthController = asyncHandler(async (req, res) => {
     throw new Error('Failed to create or update user');
   }
 
-  res.status(200).json({ data: generateAuthToken({ id: user._id.toString(), tokenVersion: user.tokenVersion }) });
+  const userId = user._id.toString();
+  // `existing` was the pre-upsert lookup — if it was null this user was
+  // freshly created in the upsert above. Fire `signup_completed` for new
+  // users and `signin_succeeded` for returning ones so the funnel split
+  // (acquisition vs reactivation) stays clean.
+  if (!existing) {
+    analytics.setUserProps(userId, {
+      $email: email,
+      ...(name ? { $name: name } : {}),
+      $created: user.createdAt?.toISOString() ?? new Date().toISOString(),
+      email_verified: true,
+      auth_method: 'google',
+      plan: 'free',
+    });
+    analytics.track(userId, 'signup_completed', {
+      auth_method: 'google',
+      user_id: userId,
+    });
+  } else {
+    analytics.track(userId, 'signin_succeeded', { auth_method: 'google' });
+  }
+
+  res.status(200).json({ data: generateAuthToken({ id: userId, tokenVersion: user.tokenVersion }) });
 });

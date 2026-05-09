@@ -19,8 +19,9 @@ import {
   refreshTokenController,
   getMarketingPreferenceController,
   updateMarketingPreferenceController,
+  recordConsentController,
 } from '@controlers/auth';
-import { protect } from '@middleware/authMiddleware';
+import { protect, optionalProtect } from '@middleware/authMiddleware';
 import { perEmailRateLimit } from '@middleware/perEmailRateLimit';
 
 const authLimiter = rateLimit({
@@ -83,5 +84,11 @@ router.post('/resend-verification-authenticated', authLimiter, protect, resendVe
 // caps per (user, action), so we only apply the standard authLimiter here.
 router.post('/security-action/request-code', authLimiter, protect, requestSecurityActionCodeController);
 router.delete('/delete-account', protect, deleteAccountController);
+// Consent log — anonymous landing visitors hit this on banner choice as
+// well as authed users on revoke/regrant. `optionalProtect` populates
+// req.userId when a Bearer token is present; the controller stores either
+// userId or anonymousId. Rate-limited under the standard auth bucket so
+// a script can't flood the table.
+router.post('/consent-log', authLimiter, optionalProtect, recordConsentController);
 
 export { router as authRoutes };

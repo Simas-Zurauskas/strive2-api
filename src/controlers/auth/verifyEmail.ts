@@ -2,6 +2,7 @@ import UserModel from '@models/UserModel';
 import { hashVerificationToken } from '@lib/auth';
 import { AppError } from '@middleware/errorMiddleware';
 import asyncHandler from 'express-async-handler';
+import { analytics } from '@lib/analytics';
 import { verifyEmailSchema } from './validation';
 
 /**
@@ -94,6 +95,16 @@ export const verifyEmailController = asyncHandler(async (req, res) => {
   user.emailVerificationToken = undefined;
   user.emailVerificationExpiry = undefined;
   await user.save();
+
+  const userId = user._id.toString();
+  const createdAtMs = user.createdAt instanceof Date ? user.createdAt.getTime() : null;
+  const timeToVerifySeconds = createdAtMs
+    ? Math.max(0, Math.round((Date.now() - createdAtMs) / 1000))
+    : undefined;
+  analytics.setUserProps(userId, { email_verified: true });
+  analytics.track(userId, 'email_verified', {
+    ...(timeToVerifySeconds !== undefined && { time_to_verify_seconds: timeToVerifySeconds }),
+  });
 
   res.status(200).json({ data: { message: 'Email verified successfully' } });
 });

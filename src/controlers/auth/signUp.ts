@@ -5,6 +5,7 @@ import { generateAuthToken, hashPassword, generateVerificationToken, VERIFICATIO
 import { FREE_PERIOD_DAYS } from '@lib/creditPricing';
 import { sendVerificationEmailAsync } from '@services/emailService';
 import { resolveSignupAllowance } from '@services/abuseLogService';
+import { analytics } from '@lib/analytics';
 import { signUpSchema } from './validation';
 
 /**
@@ -82,6 +83,19 @@ export const signUpController = asyncHandler(async (req, res) => {
   // If every retry fails the user is still signed up and can trigger
   // `/api/auth/resend-verification` manually.
   sendVerificationEmailAsync({ to: email, token: plainToken });
+
+  const userId = user._id.toString();
+  analytics.setUserProps(userId, {
+    $email: email,
+    $created: user.createdAt?.toISOString() ?? new Date().toISOString(),
+    email_verified: false,
+    auth_method: 'credentials',
+    plan: 'free',
+  });
+  analytics.track(userId, 'signup_completed', {
+    auth_method: 'credentials',
+    user_id: userId,
+  });
 
   // ⚠ A JWT is issued here BEFORE the user verifies their email. That
   // contradicts `signIn`, which refuses unverified users with

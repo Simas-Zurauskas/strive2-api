@@ -4,6 +4,7 @@ import LessonContentModel from '@models/LessonContentModel';
 import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import { RecallCardKind, normalizeConceptTag } from '@lib/recallConstants';
 import { genLog } from '@lib/loggers';
+import { withCreditTransaction } from '@lib/dbTransaction';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -97,9 +98,6 @@ export const persistLessonRecallCards = async (params: PersistRecallCardsParams)
     return [];
   }
 
-  // Atomic replace: delete old, insert new.
-  await RecallCardModel.deleteMany({ lessonId });
-
   const docs: Omit<IRecallCard, 'createdAt' | 'updatedAt'>[] = deduped.map((i) => ({
     courseId: courseObjId,
     lessonId,
@@ -113,7 +111,17 @@ export const persistLessonRecallCards = async (params: PersistRecallCardsParams)
     version: 1,
   }));
 
-  const inserted = await RecallCardModel.insertMany(docs);
+  // Atomic replace: delete old + insert new in a single transaction so the
+  // recall queue can never observe the in-between zero-cards state. Without
+  // the transaction, a reader between the deleteMany and insertMany sees
+  // an empty queue, and a crash mid-operation leaves the lesson with no
+  // cards permanently (next regen would fix). Tx falls back to non-atomic
+  // sequential ops in dev/test where mongodb-memory-server is single-node.
+  let inserted: Awaited<ReturnType<typeof RecallCardModel.insertMany>> = [];
+  await withCreditTransaction(async (session) => {
+    await RecallCardModel.deleteMany({ lessonId }, session ? { session } : undefined);
+    inserted = await RecallCardModel.insertMany(docs, session ? { session } : undefined);
+  });
   genLog.info(`lesson:recall persist-ok count=${inserted.length} lesson=${courseId}/${moduleIndex}/${lessonIndex}`);
 
   return inserted.map((d) => (d._id as Types.ObjectId).toString());

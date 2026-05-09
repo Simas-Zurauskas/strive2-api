@@ -301,6 +301,15 @@ export const chatStreamController = asyncHandler(async (req, res) => {
   } catch (err) {
     if (!clientConnected) {
       chatLog.warn(`design:turn aborted post-disconnect ms=${Date.now() - turnStartedAt}`);
+      // Still debit — the agent may have consumed tokens before the
+      // disconnect, and skipping the debit here is the abuse vector that
+      // H3 closes. Threshold forgives near-zero pre-flight failures.
+      await debitActualSpend({
+        userId,
+        jobId: new Types.ObjectId(),
+        jobType: 'design_chat',
+        minMicroCents: 500,
+      }).catch(bgError('chatStream.debit'));
       return;
     }
     chatLog.error(
@@ -311,6 +320,12 @@ export const chatStreamController = asyncHandler(async (req, res) => {
 
   if (!clientConnected) {
     chatLog.warn(`design:turn done-but-client-gone ms=${Date.now() - turnStartedAt}`);
+    await debitActualSpend({
+      userId,
+      jobId: new Types.ObjectId(),
+      jobType: 'design_chat',
+      minMicroCents: 500,
+    }).catch(bgError('chatStream.debit'));
     return;
   }
 
@@ -336,5 +351,6 @@ export const chatStreamController = asyncHandler(async (req, res) => {
     userId,
     jobId: new Types.ObjectId(),
     jobType: 'design_chat',
-  }).catch(bgError('chatStream.debitOnSuccess'));
+    minMicroCents: 500,
+  }).catch(bgError('chatStream.debit'));
 });

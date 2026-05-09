@@ -5,6 +5,7 @@ import { AppError } from '@middleware/errorMiddleware';
 import asyncHandler from 'express-async-handler';
 import { setPasswordSchema } from './validation';
 import { consumeSecurityActionCode } from '@services/securityActionService';
+import { analytics } from '@lib/analytics';
 
 /**
  * @swagger
@@ -99,6 +100,7 @@ export const setPasswordController = asyncHandler(async (req, res) => {
     action: 'set_password',
     code,
   });
+  analytics.track(req.userId!, 'security_action_otp_consumed', { action: 'set_password' });
 
   const hashedPassword = await hashPassword(newPassword);
 

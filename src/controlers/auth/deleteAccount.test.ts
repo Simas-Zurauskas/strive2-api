@@ -242,7 +242,9 @@ describe('deleteAccountController — failure paths', () => {
     expect(await UserModel.findById(user._id)).toBeNull(); // still deleted
   });
 
-  test('abuse-log record throws: deletion still proceeds + user row gone', async () => {
+  test('abuse-log record throws transiently: retry recovers, deletion proceeds', async () => {
+    // Single transient failure → second attempt succeeds. The controller's
+    // sync-retry loop swallows the first throw and the cascade still runs.
     fakeRecordDeletion.mockRejectedValueOnce(new Error('AbuseLog write failed'));
     const user = await makeUser({ email: 'ab@example.com', plainPassword: 'pw12345678' });
 
@@ -253,6 +255,24 @@ describe('deleteAccountController — failure paths', () => {
     await invokeController(deleteAccountController, req, res);
     expect(status).toHaveBeenCalledWith(200);
     expect(await UserModel.findById(user._id)).toBeNull();
+  });
+
+  test('abuse-log record permanently fails: 503 thrown, user NOT deleted', async () => {
+    // Always-rejecting mock → all retries exhaust → controller throws 503.
+    // The cascade must not run; otherwise an attacker could farm free
+    // credits by re-signing up after deletion since their abuse-log row
+    // never landed.
+    fakeRecordDeletion.mockRejectedValue(new Error('AbuseLog permanently down'));
+    const user = await makeUser({ email: 'pf@example.com', plainPassword: 'pw12345678' });
+
+    const { req, res, status } = buildReqRes({
+      userId: user._id.toString(),
+      body: { code: VALID_CODE },
+    });
+    await expect(invokeController(deleteAccountController, req, res)).rejects.toThrow(/temporarily unavailable/);
+    expect(status).toHaveBeenCalledWith(503);
+    // Critical: the user row + ledger must still exist so the user can retry.
+    expect(await UserModel.findById(user._id)).not.toBeNull();
   });
 });
 

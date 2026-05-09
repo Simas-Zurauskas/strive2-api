@@ -2,6 +2,7 @@ import asyncHandler from 'express-async-handler';
 import { z } from 'zod';
 import { SECURITY_ACTIONS } from '@models/SecurityActionTokenModel';
 import { requestSecurityActionCode } from '@services/securityActionService';
+import { analytics } from '@lib/analytics';
 
 const requestCodeSchema = z.object({
   action: z.enum(SECURITY_ACTIONS),
@@ -63,5 +64,6 @@ const requestCodeSchema = z.object({
 export const requestSecurityActionCodeController = asyncHandler(async (req, res) => {
   const { action } = requestCodeSchema.parse(req.body);
   await requestSecurityActionCode({ userId: req.userId!, action });
+  analytics.track(req.userId!, 'security_action_otp_requested', { action });
   res.status(200).json({ data: { sent: true } });
 });

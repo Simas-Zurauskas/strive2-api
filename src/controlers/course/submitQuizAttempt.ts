@@ -1,6 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import { getUserCourseLean } from '@services/courseDbService';
 import { submitQuizAttempt } from '@services/quizProgressService';
+import { analytics } from '@lib/analytics';
 import { submitQuizAttemptSchema, parseIndexParam } from './validation';
 
 /**
@@ -80,6 +81,17 @@ export const submitQuizAttemptController = asyncHandler(async (req, res) => {
       selectedOption: response?.selectedOption ?? null,
       correct: response?.correct ?? false,
     };
+  });
+
+  analytics.track(userId, 'module_quiz_completed', {
+    course_id: courseId,
+    module_index: moduleIndex,
+    score_pct: attempt.score,
+    mastery_tier: attempt.masteryTier,
+    is_retake: attempt.attemptNumber > 1,
+    attempt_number: attempt.attemptNumber,
+    question_count: quiz.questions.length,
+    interleaved_count: quiz.questions.filter((q) => q.isInterleaved).length,
   });
 
   res.status(200).json({

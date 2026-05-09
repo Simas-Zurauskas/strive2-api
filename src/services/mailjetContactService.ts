@@ -52,16 +52,15 @@ const resolvePromotionalListId = async (): Promise<number> => {
 };
 
 // Returns whether the email address is currently opted into the
-// promotional list. Default semantics:
-//   - Never seen by Mailjet, or never on the list  → opted in (true).
-//     New users default-in until they explicitly opt out — opt-out, not
-//     opt-in, is the marketing-list convention this app ships with.
+// promotional list. Default semantics (ePrivacy Art. 13 opt-IN):
+//   - Never seen by Mailjet, or never on the list  → opted OUT (false).
+//     ePrivacy requires affirmative opt-in for unsolicited marketing
+//     email; absence of a recorded opt-in counts as no consent.
 //   - On the list, IsUnsubscribed=false             → opted in (true).
 //   - On the list, IsUnsubscribed=true              → opted out (false).
 //
 // 404s from the Mailjet API are treated as "contact not found, default
-// in" — we never want a missing contact to flip the checkbox to off and
-// confuse the user.
+// out" for the same reason — no recorded consent ⇒ no consent.
 export const getPromotionalSubscribed = async (email: string): Promise<boolean> => {
   try {
     const listId = await resolvePromotionalListId();
@@ -81,7 +80,7 @@ export const getPromotionalSubscribed = async (email: string): Promise<boolean> 
     const row = res.body.Data?.find((r) => r.ListID === listId);
     if (!row) {
       integrationLog.info(`mailjet:contact:get-subscribed not-on-list email=${email}`);
-      return true; // Never on the list → default opted in.
+      return false; // Never on the list → opt-IN convention says no consent.
     }
     integrationLog.info(
       `mailjet:contact:get-subscribed ok email=${email} isUnsub=${row.IsUnsub} isActive=${row.IsActive}`,
@@ -89,10 +88,11 @@ export const getPromotionalSubscribed = async (email: string): Promise<boolean> 
     return !row.IsUnsub;
   } catch (err) {
     const status = (err as { statusCode?: number; ErrorMessage?: string })?.statusCode;
-    // 404 = contact does not exist yet in Mailjet's DB. Default to opted in.
+    // 404 = contact does not exist yet in Mailjet's DB. Default to opted out
+    // (no consent recorded).
     if (status === 404) {
       integrationLog.info(`mailjet:contact:get-subscribed contact-not-found email=${email}`);
-      return true;
+      return false;
     }
     integrationLog.warn(
       `mailjet:contact:get-subscribed fail email=${email} reason=${(err as Error).message}`,
@@ -142,6 +142,39 @@ export const setPromotionalSubscribed = async (params: {
       tags: { mailjet_contact: 'set_subscribed' },
       extra: { email: params.email, subscribed: params.subscribed },
       fingerprint: ['mailjet_contact', 'set_subscribed'],
+    });
+    throw err;
+  }
+};
+
+// Removes the contact from Mailjet's Contact DB entirely (including all
+// list memberships and the IsUnsubscribed history). Called from the
+// account-deletion cascade so right-to-erasure extends to the marketing
+// sub-processor.
+//
+// 404 = contact never existed in Mailjet's DB → treat as already erased.
+// Other failures bubble; the caller wraps in `bgError` so the deletion
+// proceeds either way (right-to-erasure must not be blocked by an
+// external-service hiccup).
+//
+// Mailjet's `DELETE /contact/{email}` is processed asynchronously in
+// batches on their side, so the row may persist for several hours after
+// the API responds. Documented as a known delay in the privacy policy.
+export const deletePromotionalContact = async (email: string): Promise<void> => {
+  try {
+    await mailjet.delete('contact', { version: 'v4' }).id(email).request();
+    integrationLog.info(`mailjet:contact:delete ok email=${email}`);
+  } catch (err) {
+    const status = (err as { statusCode?: number })?.statusCode;
+    if (status === 404) {
+      integrationLog.info(`mailjet:contact:delete contact-not-found email=${email}`);
+      return;
+    }
+    integrationLog.warn(`mailjet:contact:delete fail email=${email} reason=${(err as Error).message}`);
+    captureError(err, {
+      tags: { mailjet_contact: 'delete' },
+      extra: { email },
+      fingerprint: ['mailjet_contact', 'delete'],
     });
     throw err;
   }
