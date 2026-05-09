@@ -117,10 +117,11 @@ export const persistLessonRecallCards = async (params: PersistRecallCardsParams)
   // an empty queue, and a crash mid-operation leaves the lesson with no
   // cards permanently (next regen would fix). Tx falls back to non-atomic
   // sequential ops in dev/test where mongodb-memory-server is single-node.
-  let inserted: Awaited<ReturnType<typeof RecallCardModel.insertMany>> = [];
+  let inserted: Array<{ _id: Types.ObjectId }> = [];
   await withCreditTransaction(async (session) => {
-    await RecallCardModel.deleteMany({ lessonId }, session ? { session } : undefined);
-    inserted = await RecallCardModel.insertMany(docs, session ? { session } : undefined);
+    const opts = session ? { session } : {};
+    await RecallCardModel.deleteMany({ lessonId }, opts);
+    inserted = await RecallCardModel.insertMany(docs, opts);
   });
   genLog.info(`lesson:recall persist-ok count=${inserted.length} lesson=${courseId}/${moduleIndex}/${lessonIndex}`);
 
