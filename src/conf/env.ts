@@ -27,7 +27,12 @@ export const JUDGE0_API_URL = getEnv('JUDGE0_API_URL');
 export const OPENAI_API_KEY = getEnv('OPENAI_API_KEY');
 export const PINECONE_API_KEY = getEnv('PINECONE_API_KEY');
 export const PINECONE_INDEX_NAME = getEnv('PINECONE_INDEX_NAME');
-export const GOOGLE_TTS_CREDENTIALS_JSON = getEnv('GOOGLE_TTS_CREDENTIALS_JSON');
+// Only the private_key field of the Google service-account JSON. The rest of
+// the credentials object (client_email, project_id) is non-secret metadata
+// hardcoded in googleTtsService.ts. Splitting it this way keeps the env var
+// under EB's 4096-char CloudFormation parameter ceiling. Newlines must be
+// literal `\n` in the env value; we restore them here.
+export const GOOGLE_TTS_PRIVATE_KEY = getEnv('GOOGLE_TTS_PRIVATE_KEY').replace(/\\n/g, '\n');
 
 export const AWS_S3_BUCKET = getEnv('AWS_S3_BUCKET');
 export const AWS_S3_REGION = getEnv('AWS_S3_REGION');

@@ -1,25 +1,16 @@
 import { TextToSpeechClient } from '@google-cloud/text-to-speech';
-import { GOOGLE_TTS_CREDENTIALS_JSON } from '@conf/env';
+import { GOOGLE_TTS_PRIVATE_KEY } from '@conf/env';
 import type { NarrationVoice } from '@lib/narration/voices';
+
+// Non-secret service-account identifiers. The matching private_key lives in
+// GOOGLE_TTS_PRIVATE_KEY env var. See conf/env.ts for the rationale.
+const GOOGLE_TTS_CLIENT_EMAIL = 'strive-tts-runtime@strive-454313.iam.gserviceaccount.com';
+const GOOGLE_TTS_PROJECT_ID = 'strive-454313';
 
 /**
  * Wraps the Google Cloud Text-to-Speech client. Single-purpose: turn a
  * narration script into an MP3 buffer, chunked under Google's 5,000-byte
  * per-request limit.
- *
- * The client is lazily initialised so the API can boot in environments
- * without TTS credentials configured (development is allowed to omit
- * GOOGLE_TTS_CREDENTIALS_JSON / GOOGLE_APPLICATION_CREDENTIALS — TTS just
- * fails on first synth call there with a clear error).
- *
- * **Why we refuse to construct without explicit creds:** if you let
- * `new TextToSpeechClient()` run with no creds, google-gax silently
- * falls back to probing the GCE metadata server. The probe rejects
- * asynchronously after the main call has already errored, escaping the
- * caller's try/catch as an unhandledRejection that crashes the Node
- * process. We pre-validate creds and throw a clean Error from this
- * service so the jobRunner's catch can mark the job failed instead of
- * the entire API going down.
  *
  * Why MP3 (not WAV/Ogg): smaller payloads, browser-native playback, S3
  * cost. We don't need waveform fidelity — narration is voice-only.
@@ -32,44 +23,16 @@ const MAX_CHARS_PER_REQUEST = 4500;
 
 let cachedClient: TextToSpeechClient | null = null;
 
-const TTS_NOT_CONFIGURED_MSG =
-  'Google Cloud TTS is not configured: set GOOGLE_TTS_CREDENTIALS_JSON ' +
-  '(JSON service-account key as a single env var) or GOOGLE_APPLICATION_CREDENTIALS ' +
-  '(absolute path to the credentials file).';
-
 const getClient = (): TextToSpeechClient => {
   if (cachedClient) return cachedClient;
-
-  if (GOOGLE_TTS_CREDENTIALS_JSON) {
-    // Inline JSON path. Parse + validate before constructing the client —
-    // a malformed JSON should fail with a clear, named error rather than
-    // a downstream `client_email is not a string` deep inside gax.
-    let parsed: { client_email?: string; private_key?: string };
-    try {
-      parsed = JSON.parse(GOOGLE_TTS_CREDENTIALS_JSON) as typeof parsed;
-    } catch (e) {
-      throw new Error(`GOOGLE_TTS_CREDENTIALS_JSON is not valid JSON: ${(e as Error).message}`);
-    }
-    if (!parsed.client_email || !parsed.private_key) {
-      throw new Error('GOOGLE_TTS_CREDENTIALS_JSON is missing client_email or private_key');
-    }
-    cachedClient = new TextToSpeechClient({
-      credentials: { client_email: parsed.client_email, private_key: parsed.private_key },
-    });
-    return cachedClient;
-  }
-
-  // Fall back to GOOGLE_APPLICATION_CREDENTIALS path. We only let
-  // google-auth-library's ADC chain run when the env var is explicitly
-  // set — otherwise its metadata-server probe fires off an unhandled
-  // background rejection that takes down the Node process. Refusing to
-  // construct here converts that crash into a clean job-level error.
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    cachedClient = new TextToSpeechClient();
-    return cachedClient;
-  }
-
-  throw new Error(TTS_NOT_CONFIGURED_MSG);
+  cachedClient = new TextToSpeechClient({
+    projectId: GOOGLE_TTS_PROJECT_ID,
+    credentials: {
+      client_email: GOOGLE_TTS_CLIENT_EMAIL,
+      private_key: GOOGLE_TTS_PRIVATE_KEY,
+    },
+  });
+  return cachedClient;
 };
 
 /**

@@ -36,7 +36,7 @@ For local development, you can optionally create a `.env.local` file to override
 - `AWS_S3_REGION`: AWS S3 region
 - `AWS_ACCESS_KEY_ID`: AWS Access Key ID
 - `AWS_SECRET_ACCESS_KEY`: AWS Secret Access Key
-- `GOOGLE_TTS_CREDENTIALS_JSON`: Google TTS Credentials JSON for text to speech
+- `GOOGLE_TTS_PRIVATE_KEY`: Google TTS service-account `private_key` field (PEM, with `\n` literals — restored at runtime). The matching `client_email` and `project_id` are hardcoded in `services/googleTtsService.ts`.
 
 ### Optional Variables
 

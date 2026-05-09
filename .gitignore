@@ -7,3 +7,5 @@ var
 videos
 scripts/debugOrchestrator/output
 strive-454313-61c6760e0389.json
+*.pem
+aws.key

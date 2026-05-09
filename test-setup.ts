@@ -46,7 +46,7 @@ stub('PINECONE_INDEX_NAME', 'test-index');
 // also wraps every SDK call in try/catch so a misconfigured DSN can't
 // fail a test).
 stub('SENTRY_DSN', 'https://public@o0.ingest.sentry.io/0');
-stub('GOOGLE_TTS_CREDENTIALS_JSON', '{}');
+stub('GOOGLE_TTS_PRIVATE_KEY', 'test-key');
 // Mixpanel — required by `lib/analytics.ts` at module load. The wrapper
 // short-circuits when ENVIRONMENT === 'test' so no HTTP traffic is emitted,
 // but the env vars must still be parseable for module-level imports to
