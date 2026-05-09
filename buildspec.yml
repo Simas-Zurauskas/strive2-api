@@ -1,10 +1,21 @@
 version: 0.2
 
-# Builds the Strive API for Elastic Beanstalk deploy. Output artifact is a
-# flat-layout zip containing the compiled `build/` dir + the runtime files
-# EB needs to install deps and start the process. node_modules is excluded
-# — EB installs fresh on the arm64 Graviton instance so native bindings
-# match the host arch.
+# Builds AND deploys the Strive API to Elastic Beanstalk in a single
+# CodeBuild run. We don't use CodePipeline's EB Deploy provider — it has
+# an opaque CFN-validation step that fails with "S3 error: Access Denied"
+# under perms shapes that should otherwise work. Calling EB directly via
+# the CLI gives us deterministic behaviour.
+#
+# node_modules is excluded from the bundle — EB installs fresh on the
+# arm64 Graviton instance so native bindings match the host arch.
+
+env:
+  variables:
+    AWS_REGION: eu-central-1
+    EB_APPLICATION: Strive
+    EB_ENVIRONMENT: Strive-production
+    EB_DEPLOY_BUCKET: elasticbeanstalk-eu-central-1-172914246201
+    EB_BUNDLE_PREFIX: strive-api/deploys
 
 phases:
   install:
@@ -14,22 +25,78 @@ phases:
       - corepack enable
       - corepack prepare yarn@1.22.22 --activate
       - yarn --version
+
   pre_build:
     commands:
       - yarn install --frozen-lockfile
+
   build:
     commands:
       - yarn build
 
+  post_build:
+    commands:
+      # Bundle: include only what EB needs at runtime. node_modules excluded.
+      - VERSION_LABEL="${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}-$(date -u +%Y%m%d%H%M%S)"
+      - BUNDLE="strive-api-${VERSION_LABEL}.zip"
+      - |
+        zip -r "$BUNDLE" \
+          build \
+          package.json \
+          yarn.lock \
+          Procfile \
+          $([ -d fonts ] && echo fonts) \
+          $([ -d .platform ] && echo .platform) \
+          $([ -d .ebextensions ] && echo .ebextensions)
+      - ls -lh "$BUNDLE"
+      # Upload bundle to EB's own bucket so EB can reach it without any
+      # cross-bucket policy gymnastics.
+      - aws s3 cp "$BUNDLE" "s3://${EB_DEPLOY_BUCKET}/${EB_BUNDLE_PREFIX}/${BUNDLE}"
+      # Create application version
+      - |
+        aws elasticbeanstalk create-application-version \
+          --application-name "$EB_APPLICATION" \
+          --version-label "$VERSION_LABEL" \
+          --description "auto-deploy ${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}" \
+          --source-bundle "S3Bucket=${EB_DEPLOY_BUCKET},S3Key=${EB_BUNDLE_PREFIX}/${BUNDLE}" \
+          --process
+      # Trigger deploy
+      - |
+        aws elasticbeanstalk update-environment \
+          --application-name "$EB_APPLICATION" \
+          --environment-name "$EB_ENVIRONMENT" \
+          --version-label "$VERSION_LABEL"
+      # Wait for env to settle (Immutable strategy: parallel instance + cutover)
+      - |
+        for i in $(seq 1 60); do
+          line=$(aws elasticbeanstalk describe-environments \
+            --application-name "$EB_APPLICATION" \
+            --environment-names "$EB_ENVIRONMENT" \
+            --query 'Environments[0].[Status,Health]' --output text)
+          echo "$(date -u +%H:%M:%S) $line"
+          status=$(echo "$line" | awk '{print $1}')
+          health=$(echo "$line" | awk '{print $2}')
+          if [ "$status" = "Ready" ]; then
+            if [ "$health" = "Green" ] || [ "$health" = "Yellow" ]; then
+              echo "✓ deploy complete (Ready / $health)"
+              exit 0
+            fi
+            echo "✗ env Ready but unhealthy ($health). Recent events:"
+            aws elasticbeanstalk describe-events \
+              --application-name "$EB_APPLICATION" \
+              --environment-name "$EB_ENVIRONMENT" \
+              --max-items 15 \
+              --query 'Events[].[EventDate,Severity,Message]' --output text
+            exit 1
+          fi
+          sleep 20
+        done
+        echo "✗ timed out after 20 min waiting for env"
+        exit 1
+
 artifacts:
   files:
-    - build/**/*
-    - fonts/**/*
-    - package.json
-    - yarn.lock
-    - Procfile
-    - .platform/**/*
-    - .ebextensions/**/*
+    - '**/*'
   discard-paths: no
   name: strive-api
 
