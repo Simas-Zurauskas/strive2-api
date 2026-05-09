@@ -1,25 +1,38 @@
 version: 0.2
 
+# Builds the Strive API for Elastic Beanstalk deploy. Output artifact is a
+# flat-layout zip containing the compiled `build/` dir + the runtime files
+# EB needs to install deps and start the process. node_modules is excluded
+# — EB installs fresh on the arm64 Graviton instance so native bindings
+# match the host arch.
+
 phases:
   install:
     runtime-versions:
       nodejs: 22
+    commands:
+      - corepack enable
+      - corepack prepare yarn@1.22.22 --activate
+      - yarn --version
   pre_build:
     commands:
-      - yarn install
+      - yarn install --frozen-lockfile
   build:
     commands:
       - yarn build
+
 artifacts:
   files:
     - build/**/*
     - fonts/**/*
     - package.json
+    - yarn.lock
+    - Procfile
     - .platform/**/*
-# artifacts:
-#   files:
-#     - '**/*'
-#     - '!node_modules/**/*'
-#     - build/**/*
-#     - package.json
-#     - .platform/**/*
+    - .ebextensions/**/*
+  discard-paths: no
+  name: strive-api
+
+cache:
+  paths:
+    - node_modules/**/*
