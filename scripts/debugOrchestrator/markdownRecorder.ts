@@ -19,6 +19,7 @@ import type {
   GoalTypeOverrideRecord,
   GoalType,
 } from './types';
+import type { ClarifyCueAssertion, StructureConformanceAssertion } from './goalTypeAssertions';
 import type { GetInsightQueueResult, InsightStats } from '@services/insightQueueService';
 
 export class MarkdownRecorder {
@@ -164,18 +165,52 @@ ${questionsAfter}
 `);
   }
 
-  addStep3_Answers({ result, answers, questions, aiReasoning }: { result: StepResult; answers: Record<string, unknown>; questions: ClarifyQuestion[]; aiReasoning: string }): void {
+  addStep3_Answers({
+    result,
+    answers,
+    questions,
+    aiReasoning,
+    cueAssertion,
+  }: {
+    result: StepResult;
+    answers: Record<string, unknown>;
+    questions: ClarifyQuestion[];
+    aiReasoning: string;
+    cueAssertion: ClarifyCueAssertion;
+  }): void {
     let answersTable = '| Question | Answer |\n|----------|--------|';
     for (const q of questions) {
       const answer = answers[q.id];
       const display = Array.isArray(answer) ? answer.join(', ') : String(answer);
-      answersTable += `\n| ${q.question} | ${display} |`;
+      answersTable += `\n| ${escapeCell(q.question)} | ${escapeCell(display)} |`;
+    }
+
+    // Cue-presence assertion table — surfaces whether the per-bucket
+    // expected cue (exam name, project deliverable, CEFR level, etc.)
+    // appeared in at least one free-text answer. False negatives possible;
+    // the value is in cross-run aggregate drift, not per-row pass/fail.
+    let cueBlock = '';
+    if (cueAssertion.verdict === 'n-a') {
+      cueBlock = `### Clarify Cue Assertion
+- **Goal type:** \`${cueAssertion.goalType}\` — no specific cue expected (n-a).`;
+    } else {
+      const verdictLabel = cueAssertion.verdict === 'pass' ? 'PASS' : 'FAIL';
+      let checksTable = '| Cue | Passed | Evidence |\n|-----|--------|----------|';
+      for (const c of cueAssertion.checks) {
+        checksTable += `\n| ${c.label} | ${c.passed ? 'YES' : 'NO'} | ${escapeCell(c.evidence)} |`;
+      }
+      cueBlock = `### Clarify Cue Assertion (${verdictLabel})
+_Heuristic regex check — false negatives possible. Tracks whether the persona's free-text answers carry the cue tokens the api should have elicited via the goalType-tilted clarify questions._
+
+${checksTable}`;
     }
 
     this.sections.push(`---
 
 ## Step 3: Answer Questions (${fmtDuration(result.durationMs)})
 **AI Reasoning:** ${aiReasoning}
+
+${cueBlock}
 
 ${answersTable}
 `);
@@ -214,7 +249,17 @@ ${fmtPreview({ label: 'Deep Dive', p: previews.deep_dive, isRec: previews.recomm
 `);
   }
 
-  addStep6_Structure({ result, structure, pollDuration }: { result: StepResult; structure: CourseStructure; pollDuration: number }): void {
+  addStep6_Structure({
+    result,
+    structure,
+    pollDuration,
+    conformance,
+  }: {
+    result: StepResult;
+    structure: CourseStructure;
+    pollDuration: number;
+    conformance: StructureConformanceAssertion;
+  }): void {
     let modulesList = '';
     let totalLessons = 0;
     for (let i = 0; i < structure.modules.length; i++) {
@@ -224,6 +269,27 @@ ${fmtPreview({ label: 'Deep Dive', p: previews.deep_dive, isRec: previews.recomm
         modulesList += `\n   - ${lesson.name}: ${lesson.description}`;
         totalLessons++;
       }
+    }
+
+    // Per-bucket conformance assertion — naming-shape heuristics on the
+    // generated modules + lessons, mirroring `GOAL_TYPE_STRUCTURE_GUIDANCE`
+    // in api/src/services/courseService.ts:856-867. False negatives possible
+    // (a `monetize` capstone could ship a real artifact under a non-action-
+    // verb name); the value is in cohort aggregate drift across runs.
+    let conformanceBlock = '';
+    if (conformance.verdict === 'n-a') {
+      conformanceBlock = `### Structure Conformance
+- **Goal type:** \`${conformance.goalType}\` — no special structural constraint (n-a).`;
+    } else {
+      const verdictLabel = conformance.verdict === 'pass' ? 'PASS' : 'FAIL';
+      let checksTable = '| Check | Passed | Evidence |\n|-------|--------|----------|';
+      for (const c of conformance.checks) {
+        checksTable += `\n| ${c.name} | ${c.passed ? 'YES' : 'NO'} | ${escapeCell(c.evidence)} |`;
+      }
+      conformanceBlock = `### Structure Conformance (${verdictLabel}) — \`${conformance.goalType}\`
+_Naming-shape heuristic — mirrors GOAL_TYPE_STRUCTURE_GUIDANCE in courseService.ts. False negatives possible._
+
+${checksTable}`;
     }
 
     this.sections.push(`---
@@ -238,6 +304,8 @@ ${fmtPreview({ label: 'Deep Dive', p: previews.deep_dive, isRec: previews.recomm
 - **Topic Analysis:** ${structure.reasoning.topicAnalysis}
 - **Scope Decisions:** ${structure.reasoning.scopeDecisions}
 - **Progression Strategy:** ${structure.reasoning.progressionStrategy}
+
+${conformanceBlock}
 
 ### Modules & Lessons
 ${modulesList}

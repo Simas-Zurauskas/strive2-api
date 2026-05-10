@@ -26,6 +26,15 @@ export interface ICourse {
   // UX. User overrides set confidence to `high`.
   goalType: GoalType | null;
   goalTypeConfidence: GoalTypeConfidence | null;
+  // Set when the user confirms the Purpose step in the wizard. Cleared
+  // (alongside answers/depth/structure) when a goalType change cascades
+  // a clarify regen. Null while the user is mid-Purpose-step; non-null
+  // means the user has moved past Purpose at least once. Used by the
+  // resume logic in `determineStepFromCourse` to distinguish "purpose
+  // unconfirmed" from "purpose confirmed, on questions step" — relying
+  // on `goalTypeConfidence` is unsafe because the AI classifier itself
+  // can output `high`.
+  goalTypeConfirmedAt: Date | null;
   clarifyData: {
     courseName?: string;
     questions: { id: string; question: string; type: string; options: string[] | null }[];
@@ -121,6 +130,10 @@ const schema = new Schema<ICourse>(
     goalTypeConfidence: {
       type: String,
       enum: [...GOAL_TYPE_CONFIDENCES],
+      default: null,
+    },
+    goalTypeConfirmedAt: {
+      type: Date,
       default: null,
     },
     clarifyData: {

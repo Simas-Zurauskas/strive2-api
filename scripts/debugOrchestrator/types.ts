@@ -103,6 +103,15 @@ export interface OrchestratorConfig {
    */
   enableMentor: boolean;
   maxLessons: number;
+  /**
+   * Optional cohort bias. When set, the persona generator is constrained
+   * to emit personas matching this distribution (`{ pass: 3, build: 2 }`
+   * → 3 pass-bucket personas + 2 build-bucket personas). Sum must equal
+   * `personaCount`. Used to stress-test a single bucket's curriculum
+   * shape without re-rolling cohorts hoping for coverage. `null` =
+   * unbiased (the default — generator uses its own ≥5 coverage rule).
+   */
+  goalTypeDistribution: Partial<Record<GoalType, number>> | null;
 }
 
 export interface StepResult {
@@ -123,6 +132,41 @@ export interface PersonaRun {
   totalDurationMs: number;
   status: 'completed' | 'failed';
   error?: string;
+  /**
+   * Per-bucket curriculum-quality assertions, populated as the run
+   * progresses. The orchestrator's cohort aggregator reads these
+   * directly so per-bucket × per-metric drift is visible across runs.
+   * Either field is `undefined` if the run failed before that step
+   * completed.
+   *
+   * Note: importing the actual types from `./goalTypeAssertions` here
+   * would create a circular boundary (assertions → types). They're
+   * shaped under `PersonaAssertions` below as a structural mirror so
+   * `types.ts` stays the foundational module.
+   */
+  assertions?: PersonaAssertions;
+  /**
+   * Per-step latency capture so the cohort aggregator can compute
+   * p50/avg generation time per goalType bucket — surfaces a
+   * regression that only slows one bucket's pipeline.
+   */
+  metrics?: PersonaMetrics;
+}
+
+export interface PersonaAssertions {
+  cue?: { goalType: GoalType; verdict: 'pass' | 'fail' | 'n-a' };
+  structure?: { goalType: GoalType; verdict: 'pass' | 'fail' | 'n-a' };
+}
+
+export interface PersonaMetrics {
+  /** Step 6 poll duration — structure generation latency. */
+  structureGenMs?: number;
+  /** Sum of per-lesson generation duration (ms) across the run. */
+  lessonGenMsTotal?: number;
+  lessonsGenerated?: number;
+  quizzesAttempted?: number;
+  /** Average quiz score [0..1] across attempted module quizzes. */
+  quizScoreAvg?: number;
 }
 
 // ── Re-exported from real models ─────────────────────────

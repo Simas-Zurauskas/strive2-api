@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs';
 import path from 'path';
-import { BUILD_TIME, ENVIRONMENT, RELEASE_SHA } from './env';
+import { ENVIRONMENT } from './env';
 
 // Read name + version from the actual package.json so the value can never
 // drift from the published artifact. The lookup is one-shot at module load
@@ -30,11 +30,6 @@ try {
 export interface VersionInfo {
   service: string;
   version: string;
-  /** Short SHA (first 7 chars) for human-friendly display. Full SHA below. */
-  commit: string;
-  commitFull: string;
-  /** ISO timestamp of when this artifact was built, if CI set BUILD_TIME. */
-  buildTime: string;
   /** Server-side rendered "now" — handy for clock-skew debugging. */
   serverTime: string;
   environment: string;
@@ -45,13 +40,9 @@ export interface VersionInfo {
 }
 
 export const getVersionInfo = (): VersionInfo => {
-  const fullSha = RELEASE_SHA ?? 'unknown';
   return {
     service: pkg.name ?? 'strive.api',
     version: pkg.version ?? '0.0.0',
-    commit: fullSha === 'unknown' ? 'unknown' : fullSha.slice(0, 7),
-    commitFull: fullSha,
-    buildTime: BUILD_TIME ?? 'unknown',
     serverTime: new Date().toISOString(),
     environment: ENVIRONMENT,
     nodeVersion: process.versions.node,

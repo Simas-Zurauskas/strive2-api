@@ -41,14 +41,24 @@ export const updateCourseSchema = z.object({
   depth: z.enum(COURSE_DEPTHS).optional(),
   status: z.enum(COURSE_STATUSES).optional(),
   /**
-   * User-selected goalType from the ClarifyStep chip. Setting this field
-   * marks the value as user-confirmed (`goalTypeConfidence = 'high'`),
-   * which causes the next clarify job to skip the auto-classifier and
-   * use this value verbatim. The cascade — clearing clarifyData and
-   * triggering a clarify regen — is orchestrated by the client in
-   * `useWizardHandlers`, mirroring the goal-text overwrite path.
+   * User-selected goalType from the Purpose step. Setting this field marks
+   * the value as user-confirmed (`goalTypeConfidence = 'high'`), which
+   * causes the next clarify job to skip the auto-classifier and use this
+   * value verbatim. The cascade — clearing clarifyData and triggering a
+   * clarify regen — is orchestrated by the client in `useWizardHandlers`,
+   * mirroring the goal-text overwrite path.
    */
   goalType: z.enum(GOAL_TYPES).optional(),
+  /**
+   * Stamp written by the Purpose step on Next. Accepts the literal string
+   * `'now'` (server stamps `new Date()`) or `null` (clears the stamp,
+   * forcing the resume logic to land back on Purpose). Used by
+   * `determineStepFromCourse` on the client to distinguish "purpose
+   * unconfirmed" from "purpose confirmed, on questions step" — a signal
+   * `goalTypeConfidence` cannot provide because the AI classifier itself
+   * can output `'high'`.
+   */
+  goalTypeConfirmedAt: z.union([z.literal('now'), z.null()]).optional(),
   /**
    * Client-side acknowledgement that the learner saw the "your answers
    * suggest a lighter-effort course" warning and still wants the deeper
@@ -91,7 +101,7 @@ export const generateLessonSchema = z.object({
   moduleIndex: z.number().int().min(0, 'moduleIndex must be a non-negative integer'),
   lessonIndex: z.number().int().min(0, 'lessonIndex must be a non-negative integer'),
   includeImage: z.boolean().optional().default(true),
-  includeLinks: z.boolean().optional().default(true),
+  includeLinks: z.boolean().optional().default(false),
 });
 
 export const upsertProgressSchema = z.object({

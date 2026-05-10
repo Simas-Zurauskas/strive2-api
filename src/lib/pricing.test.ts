@@ -166,8 +166,8 @@ test('priceFlatUnit returns the sku rate for a single unit', () => {
 });
 
 test('priceFlatUnit scales linearly with units', () => {
-  const single = priceFlatUnit({ sku: 'tavily_search_advanced' });
-  const triple = priceFlatUnit({ sku: 'tavily_search_advanced', units: 3 });
+  const single = priceFlatUnit({ sku: 'tavily_search_basic' });
+  const triple = priceFlatUnit({ sku: 'tavily_search_basic', units: 3 });
   assert.equal(triple, single * 3);
 });
 
@@ -184,8 +184,8 @@ test('BFL Flux dev priced at $0.025/image = 25,000 μ¢', () => {
   assert.equal(priceFlatUnit({ sku: 'bfl_flux_dev' }), 25_000);
 });
 
-test('Tavily advanced search priced at $0.016/query = 16,000 μ¢', () => {
-  assert.equal(priceFlatUnit({ sku: 'tavily_search_advanced' }), 16_000);
+test('Tavily basic search priced at $0.008/query = 8,000 μ¢', () => {
+  assert.equal(priceFlatUnit({ sku: 'tavily_search_basic' }), 8_000);
 });
 
 test('Judge0 RapidAPI priced at $0.002/exec = 2,000 μ¢', () => {

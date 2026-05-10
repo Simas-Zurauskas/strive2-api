@@ -90,56 +90,146 @@ export async function runAll({
   const errored = results.filter((r) => r.status === 'rejected').length;
   console.log(`\nResults: ${String(succeeded).green} completed, ${String(failed).yellow} failed, ${String(errored).red} errored`);
 
-  // Goal-type coverage diagnostic — operator-facing summary so a glance
-  // at the run tail shows whether the classifier matches the persona
-  // generator's ground truth across the cohort. Independent of the
-  // per-persona report. Override-enabled personas where the chip toggle
-  // ran show up under their target goalType (the post-override value
-  // sticks on course.goalType).
+  // Goal-type cohort matrix — per-bucket × per-metric. Surfaces drift
+  // that's invisible in a flat aggregate: a regression that breaks only
+  // `pass` exam-mock shaping or only `build` project-spine ordering
+  // would otherwise pass cleanly because the other 4 buckets compensate.
+  // Read directly from PersonaRun.assertions + .metrics (populated by
+  // courseFlow as steps complete) — no notes-string parsing.
   if (runs.length > 0) {
-    const predicted = new Map<GoalType, number>();
-    const matches = new Map<GoalType, number>();
-    let totalMatches = 0;
-    let totalScored = 0;
-    let overrideAttempted = 0;
-    for (const run of runs) {
-      const p = run.persona.predictedGoalType;
-      predicted.set(p, (predicted.get(p) ?? 0) + 1);
-      // Walk the recorded steps to find the post-Step-2 (or Step-2b) classified
-      // value. The orchestrator prints the matchedness inline already; we
-      // re-derive here from `notes` so this aggregate doesn't depend on a
-      // private field on PersonaRun.
-      const step2 = run.steps.find((s) => s.name === 'Clarify Questions');
-      const step2bMatch = run.steps.find((s) => s.name?.startsWith('Goal-Type Override'));
-      if (step2bMatch) overrideAttempted += 1;
-      if (step2?.notes) {
-        // Notes shape: "...; classifier: <type>/<conf> (predicted: <type>, match|MISMATCH)"
-        const classifiedMatch = step2.notes.match(/classifier:\s*(\w+)\//);
-        const matchToken = step2.notes.includes('MISMATCH') ? false : step2.notes.includes('match');
-        if (classifiedMatch) {
-          totalScored += 1;
-          if (matchToken) {
-            matches.set(p, (matches.get(p) ?? 0) + 1);
-            totalMatches += 1;
-          }
-        }
-      }
-    }
-
-    console.log(`\n${'Goal-type cohort coverage:'.cyan}`);
-    for (const t of GOAL_TYPES) {
-      const n = predicted.get(t) ?? 0;
-      const m = matches.get(t) ?? 0;
-      const pct = n > 0 ? `${((m / n) * 100).toFixed(0)}%` : '—';
-      const line = `  ${t.padEnd(9)} predicted=${n}  classified-matches=${m}/${n}  (${pct})`;
-      console.log(n === 0 ? line.gray : line);
-    }
-    if (totalScored > 0) {
-      const pct = ((totalMatches / totalScored) * 100).toFixed(0);
-      console.log(`  ${'overall'.padEnd(9)} accuracy=${totalMatches}/${totalScored}  (${pct}%)`.dim);
-    }
-    console.log(`  override-attempted: ${overrideAttempted} persona(s)`.dim);
+    printCohortMatrix(runs);
   }
 
   return runs;
+}
+
+interface BucketStats {
+  predicted: number;
+  classifierMatches: number;
+  classifierScored: number;
+  cuePass: number;
+  cueScored: number;
+  structurePass: number;
+  structureScored: number;
+  totalDurationMs: number[];
+  structureGenMs: number[];
+  lessonsGenerated: number[];
+  quizScoreAvg: number[];
+  overrideAttempted: number;
+}
+
+function emptyStats(): BucketStats {
+  return {
+    predicted: 0,
+    classifierMatches: 0,
+    classifierScored: 0,
+    cuePass: 0,
+    cueScored: 0,
+    structurePass: 0,
+    structureScored: 0,
+    totalDurationMs: [],
+    structureGenMs: [],
+    lessonsGenerated: [],
+    quizScoreAvg: [],
+    overrideAttempted: 0,
+  };
+}
+
+function printCohortMatrix(runs: PersonaRun[]): void {
+  const byBucket = new Map<GoalType, BucketStats>();
+  for (const t of GOAL_TYPES) byBucket.set(t, emptyStats());
+
+  let totalOverride = 0;
+  for (const run of runs) {
+    const p = run.persona.predictedGoalType;
+    const b = byBucket.get(p)!;
+    b.predicted += 1;
+
+    // Classifier match — keep the existing notes-parse so this stays
+    // backward-compatible if courseFlow's typed-fields roll forward.
+    const step2 = run.steps.find((s) => s.name === 'Clarify Questions');
+    const step2b = run.steps.find((s) => s.name?.startsWith('Goal-Type Override'));
+    if (step2b) {
+      b.overrideAttempted += 1;
+      totalOverride += 1;
+    }
+    if (step2?.notes) {
+      const matchToken = step2.notes.includes('MISMATCH') ? false : step2.notes.includes('match');
+      const hasClassifierTag = /classifier:\s*\w+\//.test(step2.notes);
+      if (hasClassifierTag) {
+        b.classifierScored += 1;
+        if (matchToken) b.classifierMatches += 1;
+      }
+    }
+
+    // Cue + structure assertions — read from PersonaRun.assertions.
+    if (run.assertions?.cue && run.assertions.cue.verdict !== 'n-a') {
+      b.cueScored += 1;
+      if (run.assertions.cue.verdict === 'pass') b.cuePass += 1;
+    }
+    if (run.assertions?.structure && run.assertions.structure.verdict !== 'n-a') {
+      b.structureScored += 1;
+      if (run.assertions.structure.verdict === 'pass') b.structurePass += 1;
+    }
+
+    // Latency / volume metrics (only for completed runs — failed runs
+    // lack representative timing).
+    if (run.status === 'completed') {
+      b.totalDurationMs.push(run.totalDurationMs);
+    }
+    if (run.metrics?.structureGenMs !== undefined) b.structureGenMs.push(run.metrics.structureGenMs);
+    if (run.metrics?.lessonsGenerated !== undefined) b.lessonsGenerated.push(run.metrics.lessonsGenerated);
+    if (run.metrics?.quizScoreAvg !== undefined) b.quizScoreAvg.push(run.metrics.quizScoreAvg);
+  }
+
+  console.log(`\n${'Goal-type cohort matrix:'.cyan}`);
+  console.log(
+    '  bucket    n  classifier  cue       structure  median total  median struct-gen  avg lessons  avg quiz'
+      .gray,
+  );
+  console.log('  '.padEnd(2) + '─'.repeat(96).gray);
+
+  for (const t of GOAL_TYPES) {
+    const b = byBucket.get(t)!;
+    if (b.predicted === 0) {
+      const line = `  ${t.padEnd(9)} 0  —           —         —          —             —                  —            —`;
+      console.log(line.gray);
+      continue;
+    }
+    const classifierCell = formatRatio(b.classifierMatches, b.classifierScored);
+    const cueCell = b.cueScored > 0 ? formatRatio(b.cuePass, b.cueScored) : 'n-a       ';
+    const structureCell = b.structureScored > 0 ? formatRatio(b.structurePass, b.structureScored) : 'n-a       ';
+    const medianTotal = b.totalDurationMs.length > 0 ? `${(median(b.totalDurationMs) / 1000).toFixed(1)}s` : '—';
+    const medianStruct = b.structureGenMs.length > 0 ? `${(median(b.structureGenMs) / 1000).toFixed(1)}s` : '—';
+    const avgLessons = b.lessonsGenerated.length > 0 ? avg(b.lessonsGenerated).toFixed(1) : '—';
+    const avgQuiz = b.quizScoreAvg.length > 0 ? avg(b.quizScoreAvg).toFixed(1) : '—';
+    console.log(
+      `  ${t.padEnd(9)} ${String(b.predicted).padEnd(2)} ${classifierCell.padEnd(11)} ${cueCell.padEnd(9)} ${structureCell.padEnd(10)} ${medianTotal.padEnd(13)} ${medianStruct.padEnd(18)} ${avgLessons.padEnd(12)} ${avgQuiz}`,
+    );
+  }
+
+  console.log('  '.padEnd(2) + '─'.repeat(96).gray);
+  console.log(`  override-attempted: ${totalOverride} persona(s)`.dim);
+  console.log(
+    `  Legend: classifier = predicted vs api match. cue = clarify-answer cue presence. structure = per-bucket structural conformance. n-a appears where master rows return no assertion (no special tilt).`
+      .dim,
+  );
+}
+
+function formatRatio(num: number, denom: number): string {
+  if (denom === 0) return 'n-a';
+  const pct = ((num / denom) * 100).toFixed(0);
+  return `${num}/${denom} (${pct}%)`;
+}
+
+function median(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function avg(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }

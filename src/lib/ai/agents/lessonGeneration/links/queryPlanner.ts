@@ -25,9 +25,9 @@ const DOMAIN_HINTS: Record<CourseDomain, string> = {
 
 const NULL_DOMAIN_HINT = 'Pick sources appropriate to the subject as inferred from the lesson description.';
 
-const PLANNER_SYSTEM_PROMPT = `You curate the *bonus reading* shelf for a lesson. After learning the lesson, what 2–5 threads would a curious learner enjoy pulling on next?
+const PLANNER_SYSTEM_PROMPT = `You curate the *bonus reading* shelf for a lesson. After learning the lesson, what 2 threads would a curious learner most enjoy pulling on next?
 
-Pick the count yourself — 2 if the lesson is narrow and only a couple of strong threads exist, 5 if it opens onto a rich landscape. Pick the flavor yourself: each topic can be:
+Produce exactly 2 topics. Pick the flavor yourself: each topic can be:
 - **adjacent** — around the lesson topic, related but not what the lesson literally covered
 - **expanded read** — going deeper on a specific aspect the lesson touched but didn't fully unpack
 - **surprising thread** — something a learner wouldn't expect to find here but would find delightful or memorable
@@ -56,9 +56,9 @@ interface QueryPlannerInput {
 /**
  * Minimal fallback plan the orchestrator can fall back to if the LLM call fails.
  *
- * Uses the lesson name as a stable seed and emits 3 keyword-skeleton topics
- * covering complementary angles — pragmatic, contextual, and exploratory.
- * Not as good as a real plan, but it keeps the pipeline from stalling here.
+ * Uses the lesson name as a stable seed and emits 2 keyword-skeleton topics
+ * covering complementary angles — pragmatic and contextual. Not as good as a
+ * real plan, but it keeps the pipeline from stalling here.
  */
 const fallbackPlan = (lessonName: string): TopicPlan => {
   const name = lessonName.trim() || 'this topic';
@@ -74,17 +74,12 @@ const fallbackPlan = (lessonName: string): TopicPlan => {
         angle: 'Where the idea came from and why it works the way it does.',
         query: `${name} history rationale background`,
       },
-      {
-        topic: `${name} compared to alternatives`,
-        angle: 'How it stacks up against neighbouring approaches in the field.',
-        query: `${name} alternatives comparison trade-offs`,
-      },
     ],
   };
 };
 
 /**
- * Generate a 2–5 bonus-reading topic plan for the lesson.
+ * Generate a 2-topic bonus-reading plan for the lesson.
  *
  * Uses Haiku 4.5 at temp 0.5 (room for varied, engaging picks without
  * drifting off-subject). If the call fails for any reason, returns a
@@ -108,7 +103,7 @@ export const planQueries = async ({
       [
         new SystemMessage(PLANNER_SYSTEM_PROMPT),
         new HumanMessage(
-          `## Lesson\n**Title:** ${safeName}\n\n**Description:** ${safeDescription}\n\n## Lesson summary\n${safeSummary || '(not yet generated)'}\n\n## Course domain\n${domain ?? 'unclassified'} — ${domainHint}\n\nProduce the 2–5 bonus-reading topic plan.`,
+          `## Lesson\n**Title:** ${safeName}\n\n**Description:** ${safeDescription}\n\n## Lesson summary\n${safeSummary || '(not yet generated)'}\n\n## Course domain\n${domain ?? 'unclassified'} — ${domainHint}\n\nProduce exactly 2 bonus-reading topics.`,
         ),
       ],
       { metadata: { llmLabel: 'lesson:links.plan' } },

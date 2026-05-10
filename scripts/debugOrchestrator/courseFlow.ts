@@ -35,6 +35,13 @@ import type { GetInsightQueueResult, QueueInsightItem, InsightStats } from '@ser
 import type { InsightMode, InsightRating } from '@lib/insightConstants';
 import { createPrng } from './prng';
 import { applyQuizNoise, computeSimulatedThinkTimeMs } from './quizNoise';
+import {
+  GOAL_TYPE_ANSWER_TILT,
+  assertClarifyCuePresence,
+  assertStructureForGoalType,
+  type ClarifyCueAssertion,
+  type StructureConformanceAssertion,
+} from './goalTypeAssertions';
 
 // Dedicated Sonnet instance at temp 0.7 for persona-simulation reasoning.
 // Not the shared `utilityModel` (Haiku, temp 0) because the orchestrator
@@ -125,12 +132,23 @@ async function answerQuestionsAsPersona({
   persona: Persona;
   questions: ClarifyQuestion[];
 }): Promise<{ answers: Record<string, unknown>; reasoning: string }> {
+  // Goal-type tilt: the persona's answers must reflect their bucket's
+  // defining cue (named exam + date for `pass`, named project for `build`,
+  // CEFR level for `fluency`, niche/audience for `monetize`). Without
+  // this, downstream `assertClarifyCuePresence` becomes a tautology of
+  // whatever the LLM happened to type. See goalTypeAssertions.ts for
+  // the source-of-truth contracts.
+  const goalTypeTilt = GOAL_TYPE_ANSWER_TILT[persona.predictedGoalType];
+
   const systemPrompt = `${personaContext(persona)}
 
 YOUR SPECIFIC SURVEY BEHAVIOR:
 ${persona.wizardBehavior.surveyStyle}
 
-You're filling out a course creation survey. Follow your behavioral description above EXACTLY — it tells you specifically how you handle surveys (how carefully you read, how many options you select, how you write text answers).
+YOUR GOAL-TYPE FRAMING (predictedGoalType = ${persona.predictedGoalType}):
+${goalTypeTilt}
+
+You're filling out a course creation survey. Follow your behavioral description above EXACTLY — it tells you specifically how you handle surveys (how carefully you read, how many options you select, how you write text answers). The goal-type framing is a CONTENT constraint on what you say in free-text answers; the survey behavior is a STYLE constraint on how you say it. Both apply.
 
 Key realism rules:
 - SURVEY FATIGUE: You give the first 1-2 questions the most attention. By question 4-5, you're going faster and caring less. Your answers should visibly decline in thoughtfulness as the question number increases.
@@ -1032,6 +1050,12 @@ export async function runPersonaFlow({
   // the failure branch knows *where* things died even when `steps[]` only
   // contains completed steps.
   let currentStep: { step: number; name: string } | null = null;
+  // Run-level holders for goal-type assertions and quality metrics. The
+  // orchestrator's cohort aggregator reads these directly from the
+  // returned PersonaRun; populated as steps complete so a partial run
+  // still surfaces whatever was scored before the failure.
+  const runAssertions: PersonaRun['assertions'] = {};
+  const runMetrics: PersonaRun['metrics'] = {};
 
   const beginStep = ({ step, name }: { step: number; name: string }) => {
     currentStep = { step, name };
@@ -1206,10 +1230,39 @@ export async function runPersonaFlow({
     const s3 = beginStep({ step: 3, name: 'Answer Questions' });
     const { answers, reasoning: answerReasoning } = await answerQuestionsAsPersona({ persona, questions });
     await client.updateCourse({ courseId, updates: { answers } });
-    const r3 = s3.finish(answerReasoning);
+
+    // Cue-presence assertion — does the persona's free-text answer set
+    // contain the per-bucket cue token (exam name + date for `pass`,
+    // project deliverable for `build`, etc.)? Heuristic / regex-based,
+    // false negatives possible; the value is in the *aggregate* drift
+    // signal across runs, not any single verdict. master returns 'n-a'.
+    // The post-override goalType (course.goalType) is what the actual
+    // question set was tilted toward, so we score against persona.predictedGoalType
+    // when no override fired, otherwise against the override target.
+    const effectiveGoalType = persona.goalTypeOverrideTarget ?? persona.predictedGoalType;
+    const freeTextQuestionIds = questions.filter((q) => q.type === 'text').map((q) => q.id);
+    const cueAssertion: ClarifyCueAssertion = assertClarifyCuePresence({
+      answers,
+      freeTextQuestionIds,
+      goalType: effectiveGoalType,
+    });
+    const verdictTag =
+      cueAssertion.verdict === 'pass'
+        ? 'cue:pass'.green
+        : cueAssertion.verdict === 'fail'
+          ? 'cue:FAIL'.yellow
+          : 'cue:n-a'.gray;
+    const r3 = s3.finish(`${answerReasoning} [${cueAssertion.verdict}]`);
     steps.push(r3);
-    recorder.addStep3_Answers({ result: r3, answers, questions, aiReasoning: answerReasoning });
-    logDone('Step 3 done → answers submitted');
+    recorder.addStep3_Answers({
+      result: r3,
+      answers,
+      questions,
+      aiReasoning: answerReasoning,
+      cueAssertion,
+    });
+    runAssertions.cue = { goalType: cueAssertion.goalType, verdict: cueAssertion.verdict };
+    logDone(`Step 3 done → answers submitted (${verdictTag})`);
 
     // ── Step 4: Depth Previews ──────────────────────────
     log('Step 4: Generating depth previews...');
@@ -1291,10 +1344,42 @@ export async function runPersonaFlow({
     course = await client.getCourse(courseId);
     const structure = course.structure!;
     const totalLessons = structure.modules.reduce((sum, m) => sum + m.lessons.length, 0);
-    const r6 = s6.finish(`${structure.modules.length} modules, ${totalLessons} lessons`);
+
+    // Per-bucket structural conformance — naming-shape heuristics on the
+    // generated modules + lessons, mirroring GOAL_TYPE_STRUCTURE_GUIDANCE
+    // (api/src/services/courseService.ts:856-867). Verifies the api
+    // structure prompt's per-goalType instructions actually made it
+    // through to module/lesson naming. master returns 'n-a'.
+    const structureAssertionGoalType = persona.goalTypeOverrideTarget ?? persona.predictedGoalType;
+    const structureAssertion: StructureConformanceAssertion = assertStructureForGoalType({
+      structure,
+      goalType: structureAssertionGoalType,
+    });
+    const structureVerdictTag =
+      structureAssertion.verdict === 'pass'
+        ? 'structure:pass'.green
+        : structureAssertion.verdict === 'fail'
+          ? 'structure:FAIL'.yellow
+          : 'structure:n-a'.gray;
+
+    const r6 = s6.finish(
+      `${structure.modules.length} modules, ${totalLessons} lessons [${structureAssertion.verdict}]`,
+    );
     steps.push(r6);
-    recorder.addStep6_Structure({ result: r6, structure, pollDuration: pollDuration6 });
-    logDone(`Step 6 done → ${structure.modules.length} modules, ${totalLessons} lessons`);
+    recorder.addStep6_Structure({
+      result: r6,
+      structure,
+      pollDuration: pollDuration6,
+      conformance: structureAssertion,
+    });
+    runAssertions.structure = {
+      goalType: structureAssertion.goalType,
+      verdict: structureAssertion.verdict,
+    };
+    runMetrics.structureGenMs = pollDuration6;
+    logDone(
+      `Step 6 done → ${structure.modules.length} modules, ${totalLessons} lessons (${structureVerdictTag})`,
+    );
 
     // ── Step 7: Review Structure (AI as Persona) ────────
     log('Step 7: Reviewing structure...');
@@ -1491,6 +1576,8 @@ export async function runPersonaFlow({
       }
 
       recorder.addStep9_LessonGeneration(lessonContents);
+      runMetrics.lessonsGenerated = lessonsGenerated;
+      runMetrics.lessonGenMsTotal = lessonContents.reduce((s, l) => s + l.generationMs, 0);
       logDone(`Lesson generation complete: ${lessonsGenerated}/${config.maxLessons} lessons`);
     }
 
@@ -1596,6 +1683,11 @@ export async function runPersonaFlow({
         }
 
         recorder.addStep12_QuizAttempts({ attempts: quizRecords });
+        if (quizRecords.length > 0) {
+          runMetrics.quizzesAttempted = quizRecords.length;
+          runMetrics.quizScoreAvg =
+            quizRecords.reduce((s, q) => s + q.score, 0) / quizRecords.length;
+        }
       } else {
         logDetail('Step 11-12: No module has all its lessons generated, skipping quiz phase');
       }
@@ -1747,6 +1839,8 @@ export async function runPersonaFlow({
       steps,
       totalDurationMs,
       status: 'completed',
+      assertions: runAssertions,
+      metrics: runMetrics,
     };
   } catch (error) {
     const totalDurationMs = Date.now() - flowStart;
@@ -1793,6 +1887,8 @@ export async function runPersonaFlow({
       totalDurationMs,
       status: 'failed',
       error: shortMsg,
+      assertions: runAssertions,
+      metrics: runMetrics,
     };
   }
 }

@@ -37,7 +37,7 @@ import { generateLessonSchema, assertPreviousLessonGenerated } from './validatio
  *                 default: true
  *               includeLinks:
  *                 type: boolean
- *                 default: true
+ *                 default: false
  *     responses:
  *       202:
  *         content:

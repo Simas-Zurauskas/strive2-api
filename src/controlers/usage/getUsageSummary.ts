@@ -1,6 +1,7 @@
 import asyncHandler from 'express-async-handler';
 import mongoose from 'mongoose';
 import UsageEventModel from '@models/UsageEventModel';
+import CreditLedgerModel from '@models/CreditLedgerModel';
 import { USAGE_SERVICES, UsageService } from '@lib/usageConstants';
 
 /**
@@ -57,56 +58,88 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
   // to `costMicroCents` so historical totals don't dip when read post-deploy.
   const chargedExpr = { $ifNull: ['$chargedMicroCents', '$costMicroCents'] };
 
-  const agg = await UsageEventModel.aggregate<{
-    totals: {
-      todayCost: number;
-      todayCharged: number;
-      monthCost: number;
-      monthCharged: number;
-      allTimeCost: number;
-      allTimeCharged: number;
-    }[];
-    byService: { _id: UsageService; cost: number; charged: number }[];
-  }>([
-    { $match: { userId: userObjId } },
-    {
-      $facet: {
-        totals: [
-          {
-            $group: {
-              _id: null,
-              todayCost: {
-                $sum: { $cond: [{ $gte: ['$timestamp', todayStart] }, '$costMicroCents', 0] },
+  // Two parallel aggregations:
+  //   1. UsageEvent → vendor cost (`costMicroCents`) and per-row charged cost
+  //      (`chargedMicroCents`, vendor × markup). Drives the $ totals.
+  //   2. CreditLedger → true credits debited (sum of -delta over
+  //      `debit_action` rows). This is what the user actually paid out of
+  //      balance and differs from `microCentsToCredits(chargedMicroCents)`
+  //      because real debits ceil per-job and clamp at remaining balance.
+  const [costAgg, creditAgg] = await Promise.all([
+    UsageEventModel.aggregate<{
+      totals: {
+        todayCost: number;
+        todayCharged: number;
+        monthCost: number;
+        monthCharged: number;
+        allTimeCost: number;
+        allTimeCharged: number;
+      }[];
+      byService: { _id: UsageService; cost: number; charged: number }[];
+    }>([
+      { $match: { userId: userObjId } },
+      {
+        $facet: {
+          totals: [
+            {
+              $group: {
+                _id: null,
+                todayCost: {
+                  $sum: { $cond: [{ $gte: ['$timestamp', todayStart] }, '$costMicroCents', 0] },
+                },
+                todayCharged: {
+                  $sum: { $cond: [{ $gte: ['$timestamp', todayStart] }, chargedExpr, 0] },
+                },
+                monthCost: {
+                  $sum: { $cond: [{ $gte: ['$timestamp', monthStart] }, '$costMicroCents', 0] },
+                },
+                monthCharged: {
+                  $sum: { $cond: [{ $gte: ['$timestamp', monthStart] }, chargedExpr, 0] },
+                },
+                allTimeCost: { $sum: '$costMicroCents' },
+                allTimeCharged: { $sum: chargedExpr },
               },
-              todayCharged: {
-                $sum: { $cond: [{ $gte: ['$timestamp', todayStart] }, chargedExpr, 0] },
-              },
-              monthCost: {
-                $sum: { $cond: [{ $gte: ['$timestamp', monthStart] }, '$costMicroCents', 0] },
-              },
-              monthCharged: {
-                $sum: { $cond: [{ $gte: ['$timestamp', monthStart] }, chargedExpr, 0] },
-              },
-              allTimeCost: { $sum: '$costMicroCents' },
-              allTimeCharged: { $sum: chargedExpr },
             },
-          },
-        ],
-        byService: [
-          {
-            $group: {
-              _id: '$service',
-              cost: { $sum: '$costMicroCents' },
-              charged: { $sum: chargedExpr },
+          ],
+          byService: [
+            {
+              $group: {
+                _id: '$service',
+                cost: { $sum: '$costMicroCents' },
+                charged: { $sum: chargedExpr },
+              },
             },
-          },
-        ],
+          ],
+        },
       },
-    },
+    ]),
+    CreditLedgerModel.aggregate<{
+      todayCredits: number;
+      monthCredits: number;
+      allTimeCredits: number;
+    }>([
+      { $match: { userId: userObjId, reason: 'debit_action' } },
+      {
+        $group: {
+          _id: null,
+          todayCredits: {
+            $sum: {
+              $cond: [{ $gte: ['$timestamp', todayStart] }, { $multiply: ['$delta', -1] }, 0],
+            },
+          },
+          monthCredits: {
+            $sum: {
+              $cond: [{ $gte: ['$timestamp', monthStart] }, { $multiply: ['$delta', -1] }, 0],
+            },
+          },
+          allTimeCredits: { $sum: { $multiply: ['$delta', -1] } },
+        },
+      },
+    ]),
   ]);
 
   const row =
-    agg[0]?.totals?.[0] ?? {
+    costAgg[0]?.totals?.[0] ?? {
       todayCost: 0,
       todayCharged: 0,
       monthCost: 0,
@@ -114,8 +147,13 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
       allTimeCost: 0,
       allTimeCharged: 0,
     };
+  const credits = creditAgg[0] ?? {
+    todayCredits: 0,
+    monthCredits: 0,
+    allTimeCredits: 0,
+  };
   const byServiceMap = new Map<string, { cost: number; charged: number }>(
-    (agg[0]?.byService ?? []).map((r) => [r._id, { cost: r.cost, charged: r.charged }]),
+    (costAgg[0]?.byService ?? []).map((r) => [r._id, { cost: r.cost, charged: r.charged }]),
   );
 
   // Emit every enum value so the client can render a full chart with zero
@@ -131,9 +169,21 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     data: {
-      today: { costMicroCents: row.todayCost, chargedMicroCents: row.todayCharged },
-      thisMonth: { costMicroCents: row.monthCost, chargedMicroCents: row.monthCharged },
-      allTime: { costMicroCents: row.allTimeCost, chargedMicroCents: row.allTimeCharged },
+      today: {
+        costMicroCents: row.todayCost,
+        chargedMicroCents: row.todayCharged,
+        creditsDebited: credits.todayCredits,
+      },
+      thisMonth: {
+        costMicroCents: row.monthCost,
+        chargedMicroCents: row.monthCharged,
+        creditsDebited: credits.monthCredits,
+      },
+      allTime: {
+        costMicroCents: row.allTimeCost,
+        chargedMicroCents: row.allTimeCharged,
+        creditsDebited: credits.allTimeCredits,
+      },
       byService,
     },
   });
