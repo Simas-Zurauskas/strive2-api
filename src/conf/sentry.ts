@@ -4,12 +4,14 @@
 // else. If Sentry init runs late, `Sentry.captureException` still works but
 // auto-traces, breadcrumbs, and Express error context are missing.
 //
-// SENTRY_DSN is required at boot (see env.ts:55). Without it the process
-// refuses to start — every `captureException` call would otherwise be a
-// silent no-op, which is the failure mode we want to make impossible.
+// SENTRY_DSN is required at boot in non-development environments (see
+// env.ts). Without it the process refuses to start — every
+// `captureException` call would otherwise be a silent no-op, which is the
+// failure mode we want to make impossible. In development Sentry is
+// skipped entirely so local runs don't ship events to the prod project.
 
 import * as Sentry from '@sentry/node';
-import { ENVIRONMENT, RELEASE_SHA, SENTRY_DSN } from './env';
+import { ENVIRONMENT, SENTRY_DSN } from './env';
 import { lifecycleLog } from '@lib/loggers';
 
 const SENSITIVE_KEYS = new Set([
@@ -53,56 +55,44 @@ const scrubObject = (input: unknown, depth = 0): unknown => {
   return out;
 };
 
-// Loud warning when a production deployment is missing the release SHA.
-// Sentry events without `release` can't be tied to a specific deploy, so
-// "which deploy broke this?" becomes a manual log-spelunking exercise.
-// Don't refuse to boot — a missing SHA is a CI-hygiene bug, not a stop-
-// the-world condition — but the warning is intentionally noisy so the
-// next ops review notices.
-if (ENVIRONMENT === 'production' && !RELEASE_SHA) {
-  lifecycleLog.error(
-    'sentry:warn RELEASE_SHA unset in production — events will not be tied to a release. ' +
-      'CI must export RELEASE_SHA=$(git rev-parse HEAD) at deploy time.',
-  );
-}
-
-Sentry.init({
-  dsn: SENTRY_DSN,
-  environment: ENVIRONMENT,
-  release: RELEASE_SHA,
-  // Tracing samples are expensive (one full transaction per sampled event).
-  // Default to off everywhere; opt-in via env so production can be cranked
-  // up to 0.05 etc. once event quota budget is approved without a code
-  // change. Tests stay at 0 always (no point sampling unit-test runs).
-  tracesSampleRate: parseSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE, ENVIRONMENT),
-  // Don't auto-capture request data (bodies, headers, cookies). We attach
-  // explicit, scrubbed `extra` fields at the callsites we care about.
-  sendDefaultPii: false,
-  beforeSend(event) {
-    if (event.request) {
-      // Strip cookies + auth headers in case the express integration grabbed them.
-      delete event.request.cookies;
-      if (event.request.headers) {
-        const filtered: Record<string, string> = {};
-        for (const [k, v] of Object.entries(event.request.headers)) {
-          if (k.toLowerCase() === 'authorization') continue;
-          if (k.toLowerCase() === 'cookie') continue;
-          if (typeof v === 'string') filtered[k] = v;
+if (ENVIRONMENT === 'development') {
+  lifecycleLog.info('sentry:disabled environment=development');
+} else {
+  Sentry.init({
+    dsn: SENTRY_DSN,
+    environment: ENVIRONMENT,
+    // Tracing samples are expensive (one full transaction per sampled event).
+    // Default to off everywhere; opt-in via env so production can be cranked
+    // up to 0.05 etc. once event quota budget is approved without a code
+    // change. Tests stay at 0 always (no point sampling unit-test runs).
+    tracesSampleRate: parseSampleRate(process.env.SENTRY_TRACES_SAMPLE_RATE, ENVIRONMENT),
+    // Don't auto-capture request data (bodies, headers, cookies). We attach
+    // explicit, scrubbed `extra` fields at the callsites we care about.
+    sendDefaultPii: false,
+    beforeSend(event) {
+      if (event.request) {
+        // Strip cookies + auth headers in case the express integration grabbed them.
+        delete event.request.cookies;
+        if (event.request.headers) {
+          const filtered: Record<string, string> = {};
+          for (const [k, v] of Object.entries(event.request.headers)) {
+            if (k.toLowerCase() === 'authorization') continue;
+            if (k.toLowerCase() === 'cookie') continue;
+            if (typeof v === 'string') filtered[k] = v;
+          }
+          event.request.headers = filtered;
         }
-        event.request.headers = filtered;
+        // Body: scrub known-sensitive keys; leave structure for debugging.
+        if (event.request.data) {
+          event.request.data = scrubObject(event.request.data);
+        }
       }
-      // Body: scrub known-sensitive keys; leave structure for debugging.
-      if (event.request.data) {
-        event.request.data = scrubObject(event.request.data);
+      if (event.extra) {
+        event.extra = scrubObject(event.extra) as typeof event.extra;
       }
-    }
-    if (event.extra) {
-      event.extra = scrubObject(event.extra) as typeof event.extra;
-    }
-    return event;
-  },
-});
+      return event;
+    },
+  });
 
-lifecycleLog.info(
-  `sentry:ready environment=${ENVIRONMENT} release=${RELEASE_SHA ?? '(unset)'}`,
-);
+  lifecycleLog.info(`sentry:ready environment=${ENVIRONMENT}`);
+}

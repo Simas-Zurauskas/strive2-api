@@ -1175,6 +1175,7 @@ export const schemas: SchemaMap = {
       domain: nullableRef('#/components/schemas/CourseDomain'),
       goalType: nullableRef('#/components/schemas/GoalType'),
       goalTypeConfidence: nullableRef('#/components/schemas/GoalTypeConfidence'),
+      goalTypeConfirmedAt: { type: 'string', format: 'date-time', nullable: true },
       clarifyData: { $ref: '#/components/schemas/ClarifyResponse' },
       answers: { type: 'object' },
       depth: { $ref: '#/components/schemas/CourseDepth' },
@@ -1414,10 +1415,16 @@ export const schemas: SchemaMap = {
 
   UsageCostBucket: {
     type: 'object',
-    required: ['costMicroCents', 'chargedMicroCents'],
+    required: ['costMicroCents', 'chargedMicroCents', 'creditsDebited'],
     properties: {
       costMicroCents: { type: 'integer' },
       chargedMicroCents: { type: 'integer' },
+      // Net credits actually debited from the user's balance in the period
+      // (sum of -delta over CreditLedger rows with reason='debit_action').
+      // Differs from `microCentsToCredits(chargedMicroCents)` because real
+      // debits ceil per-job, not per-row, and clamp at the user's remaining
+      // balance.
+      creditsDebited: { type: 'integer' },
     },
   },
 

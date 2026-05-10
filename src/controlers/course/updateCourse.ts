@@ -75,9 +75,20 @@ const formatAnswersForSoftness = (
  *               goalType:
  *                 $ref: '#/components/schemas/GoalType'
  *                 description: >
- *                   User-selected goalType from the ClarifyStep chip.
+ *                   User-selected goalType from the Purpose step.
  *                   Marks the choice as user-confirmed and causes the
  *                   next clarify job to skip the auto-classifier.
+ *               goalTypeConfirmedAt:
+ *                 type: string
+ *                 enum: ['now']
+ *                 nullable: true
+ *                 description: >
+ *                   Stamp written by the Purpose step on Next. Pass the
+ *                   string literal `'now'` to set the timestamp server-side,
+ *                   or `null` to clear it (forces resume back to Purpose).
+ *                   Used by the client's resume logic to distinguish
+ *                   "purpose unconfirmed" from "purpose confirmed, on
+ *                   questions step".
  *               depthOverrideAcknowledged:
  *                 type: boolean
  *                 description: >
@@ -435,12 +446,17 @@ export const updateCourseController = asyncHandler(async (req, res) => {
 
   // goalType cascade rules:
   //  - If the goal text changes, the previously-classified goalType no
-  //    longer reflects the goal. Clear both fields so the next clarify
-  //    job re-classifies (the skip-classifier branch in jobRunner reads
-  //    `goalTypeConfidence === 'high'`).
-  //  - If the user picked a goalType via the ClarifyStep chip, set
+  //    longer reflects the goal. Clear `goalType`, `goalTypeConfidence`,
+  //    AND `goalTypeConfirmedAt` so the next clarify job re-classifies
+  //    (the skip-classifier branch in jobRunner reads
+  //    `goalTypeConfidence === 'high'`) and the resume logic lands back
+  //    on the Purpose step.
+  //  - If the user picked a goalType via the Purpose step, set
   //    `goalTypeConfidence = 'high'` so the next clarify job uses the
-  //    chosen value verbatim instead of re-classifying.
+  //    chosen value verbatim instead of re-classifying, AND clear
+  //    `goalTypeConfirmedAt` — the client's PurposeStep stamps it back
+  //    via a separate PATCH once the regen settles, so resume during
+  //    the regen window correctly lands back on Purpose.
   // The actual clarify regen is triggered by the client (POST /clarify)
   // immediately after this PATCH, mirroring the goal-text overwrite flow.
   const goalChanged =
@@ -449,11 +465,21 @@ export const updateCourseController = asyncHandler(async (req, res) => {
     typeof persistedUpdates.goalType === 'string' && persistedUpdates.goalType !== resolved.goalType;
 
   const cascadeUpdates: Record<string, unknown> = { ...persistedUpdates };
+
+  // Translate the `'now'` sentinel from the client to a real Date.
+  // Validator already restricts the field to `'now' | null | undefined`,
+  // so anything else here is a validator bug.
+  if (persistedUpdates.goalTypeConfirmedAt === 'now') {
+    cascadeUpdates.goalTypeConfirmedAt = new Date();
+  }
+
   if (goalChanged) {
     cascadeUpdates.goalType = null;
     cascadeUpdates.goalTypeConfidence = null;
+    cascadeUpdates.goalTypeConfirmedAt = null;
   } else if (goalTypeChanged) {
     cascadeUpdates.goalTypeConfidence = 'high';
+    cascadeUpdates.goalTypeConfirmedAt = null;
   }
 
   const course = await updateCourse({ userId, courseId, updates: cascadeUpdates });

@@ -46,8 +46,7 @@ export const topicPlanSchema = z.object({
           query: z.string().min(3).describe('3–12 word natural-language search query (no operators) — target ≤ 200 chars, overshoots accepted'),
         }),
       )
-      .min(2)
-      .max(5),
+      .length(2),
   ),
 });
 

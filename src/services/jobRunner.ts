@@ -361,7 +361,7 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       const moduleIndex = (metadata?.moduleIndex as number) ?? 0;
       const lessonIndex = (metadata?.lessonIndex as number) ?? 0;
       const includeImage = (metadata?.includeImage as boolean) ?? true;
-      const includeLinks = (metadata?.includeLinks as boolean) ?? true;
+      const includeLinks = (metadata?.includeLinks as boolean) ?? false;
       const mod = course.structure?.modules?.[moduleIndex];
       const lesson = mod?.lessons?.[lessonIndex];
       if (!mod || !lesson) throw new Error(`Lesson not found: module ${moduleIndex}, lesson ${lessonIndex}`);

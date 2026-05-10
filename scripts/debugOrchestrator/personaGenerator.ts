@@ -171,8 +171,30 @@ function getModel(): ChatAnthropic {
   return _model;
 }
 
-export async function generatePersonas(count: number = 5): Promise<Persona[]> {
+export async function generatePersonas(
+  count: number = 5,
+  distribution: Partial<Record<GoalType, number>> | null = null,
+): Promise<Persona[]> {
   console.log(`${'[PersonaGen]'.magenta} Generating ${count} personas via Sonnet...`);
+
+  // Cohort-bias constraint — when an operator pins the distribution via
+  // --goal-type or --goal-type-distribution, hard-constrain the generator
+  // to that shape so a stress-test of a single bucket actually exercises
+  // that bucket. This OVERRIDES the default "≥5 → cover all buckets"
+  // soft-coverage rule documented in the system prompt.
+  let humanMessage = `Generate exactly ${count} personas.`;
+  if (distribution) {
+    const lines = (Object.entries(distribution) as [GoalType, number][])
+      .filter(([, n]) => n > 0)
+      .map(([t, n]) => `- ${t}: ${n}`)
+      .join('\n');
+    humanMessage += `\n\nDISTRIBUTION CONSTRAINT (overrides the default cohort-coverage rule):\nThe ${count} personas you emit MUST split across goalType buckets EXACTLY as follows. Bucket counts are non-negotiable — if you cannot find a realistic goal that fits a bucket, lean harder on the bucket\'s defining cue (a named exam for "pass", a named project for "build", etc.) rather than re-balancing the counts.\n${lines}`;
+    console.log(
+      `${'[PersonaGen]'.magenta} Cohort bias active: ${(Object.entries(distribution) as [GoalType, number][])
+        .map(([t, n]) => `${t}=${n}`)
+        .join(', ')}`,
+    );
+  }
 
   // withStructuredOutput enforces the schema via Anthropic tool-use, so a
   // shape miss throws and `withRetry` re-invokes (3 retries, exponential
@@ -184,7 +206,7 @@ export async function generatePersonas(count: number = 5): Promise<Persona[]> {
       .invoke(
         [
           new SystemMessage(PERSONA_SYSTEM_PROMPT),
-          new HumanMessage(`Generate exactly ${count} personas.`),
+          new HumanMessage(humanMessage),
         ],
         { metadata: { llmLabel: 'orchestrator:persona-gen' } },
       ),
@@ -236,13 +258,34 @@ export async function generatePersonas(count: number = 5): Promise<Persona[]> {
   // ≥5 personas can see at a glance whether the cohort actually spans the
   // goalType axis. Soft warning only; not a hard failure (the LLM's
   // distribution can still be informative even when imperfect).
-  if (count >= 5) {
+  // Suppressed when an explicit distribution is pinned: missing buckets
+  // are intentional and warning about them would be noise.
+  if (count >= 5 && !distribution) {
     const observed = new Set(parsed.personas.map((p) => p.predictedGoalType as GoalType));
     const missing = GOAL_TYPES.filter((t) => !observed.has(t));
     if (missing.length > 0) {
       console.warn(
         `[PersonaGen] Cohort coverage gap — missing goalType(s): ${missing.join(', ')}. Re-run if balanced coverage matters for this evaluation.`.yellow,
       );
+    }
+  }
+
+  // Distribution-pin diagnostic — warn when the LLM strayed from the
+  // pinned counts. The constraint is described as non-negotiable in the
+  // user message but the LLM can still slip; surface a yellow warning
+  // so the operator notices before reading the per-persona output.
+  if (distribution) {
+    const observedCounts = new Map<GoalType, number>();
+    for (const p of parsed.personas) {
+      observedCounts.set(p.predictedGoalType, (observedCounts.get(p.predictedGoalType) ?? 0) + 1);
+    }
+    for (const [bucket, expected] of Object.entries(distribution) as [GoalType, number][]) {
+      const actual = observedCounts.get(bucket) ?? 0;
+      if (actual !== expected) {
+        console.warn(
+          `[PersonaGen] Distribution miss — ${bucket}: expected ${expected}, got ${actual}.`.yellow,
+        );
+      }
     }
   }
 

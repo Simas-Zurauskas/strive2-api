@@ -329,8 +329,8 @@ export const bumpQuizSonnetEscalation = () => {
 // ── Tavily cross-lesson search dedup ──
 // Course-scoped cache in `links/searchCache.ts` short-circuits Tavily calls
 // when a sibling lesson already searched the same normalized query within
-// the TTL window. Each hit saves one `tavily_search_advanced` unit at
-// $0.016. Divide by total Tavily call count (recorded via recordUsage) to
+// the TTL window. Each hit saves one `tavily_search_basic` unit at
+// $0.008. Divide by total Tavily call count (recorded via recordUsage) to
 // get the hit ratio.
 export let tavilySearchDedupHits = 0;
 

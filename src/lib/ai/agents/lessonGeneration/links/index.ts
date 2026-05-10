@@ -42,8 +42,8 @@ export const toEmptyStateBlock = (): ILessonBlock => ({
  * Run the full curated-links pipeline end-to-end.
  *
  * Stages (each degrades gracefully when the next has nothing to work with):
- *   1. plan 2–5 engaging bonus-reading topics (LLM picks count and flavor)
- *   2. parallel Tavily advanced search, sized to ~20 total candidates
+ *   1. plan 2 engaging bonus-reading topics (LLM picks the flavor of each)
+ *   2. parallel Tavily basic search, sized to ~20 total candidates
  *   3. dedupe (URL canonicalize + title-fingerprint near-dup) + hostname cap + meta-page blocklist
  *   4. parallel Jina Reader content fetch
  *   5. LLM judge against full content

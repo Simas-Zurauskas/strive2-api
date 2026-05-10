@@ -67,7 +67,7 @@ const UNIVERSAL_FEATURES = {
 // `PLANS.free.monthlyAllowance` so the pricing page never displays "~5×" —
 // the client's `CREDITS_PER_ALLOWANCE` constant (currently 110) MUST match
 // `PLANS.free.monthlyAllowance` here.
-const ALLOWANCE_UNIT = 130;
+const ALLOWANCE_UNIT = 150;
 
 export const PLANS: Record<PlanKey, PlanDefinition> = {
   free: {

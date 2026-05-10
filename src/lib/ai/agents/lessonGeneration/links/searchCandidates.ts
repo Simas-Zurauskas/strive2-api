@@ -10,12 +10,9 @@ import { TopicPlan, SearchCandidate } from './schemas';
 import { getCachedSearch, setCachedSearch } from './searchCache';
 
 // Aim for ~20 raw candidates across the topic plan, divided evenly per topic
-// and capped per topic so a single Tavily query never floods the pool.
-//
-//  2 topics → 10 each (20)
-//  3 topics → 7 each  (21)
-//  4 topics → 5 each  (20)
-//  5 topics → 4 each  (20)
+// and capped per topic so a single Tavily query never floods the pool. The
+// planner produces exactly 2 topics today, so the typical layout is 10+10;
+// the divider stays generic in case the planner cap is loosened later.
 const TARGET_TOTAL_CANDIDATES = 20;
 const MAX_PER_TOPIC = 10;
 
@@ -100,9 +97,10 @@ const toCandidate = (
  * Run the planned topic queries in parallel and flatten into raw candidates.
  *
  * Per-topic result count is computed from `TARGET_TOTAL_CANDIDATES = 20` and
- * the topic count, capped by `MAX_PER_TOPIC = 10`. `searchDepth: 'advanced'`
- * trades a little cost for longer ranked snippets and better recall — the
- * dedup/judge stages downstream weed out junk.
+ * the topic count, capped by `MAX_PER_TOPIC = 10`. `searchDepth: 'basic'`
+ * costs half what `'advanced'` does (1 Tavily credit vs 2 = $0.008 vs $0.016
+ * per query); the downstream rerank LLM judge re-scores every snippet anyway,
+ * so the longer advanced-snippet preview rarely changes the final ranking.
  *
  * Each query is wrapped with a single retry to absorb transient 5xx / timeouts.
  * A failed query contributes zero candidates but never fails the pipeline —
@@ -115,7 +113,7 @@ export const searchCandidates = async ({
   const maxResults = perTopicMax(topics.length);
   const tavily = new TavilySearch({
     tavilyApiKey: TAVILY_API_KEY,
-    searchDepth: 'advanced',
+    searchDepth: 'basic',
     maxResults,
   });
 
@@ -141,8 +139,8 @@ export const searchCandidates = async ({
         );
         recordUsage({
           service: 'tavily',
-          action: 'search:advanced',
-          costMicroCents: priceFlatUnit({ sku: 'tavily_search_advanced' }),
+          action: 'search:basic',
+          costMicroCents: priceFlatUnit({ sku: 'tavily_search_basic' }),
           metadata: { query, topic, maxResults },
         });
         const results = extractResults(raw);

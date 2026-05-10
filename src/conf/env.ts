@@ -42,7 +42,10 @@ export const AWS_SECRET_ACCESS_KEY = getEnv('AWS_SECRET_ACCESS_KEY');
 export const PORT = process.env.PORT || 4000;
 export const API_URL = process.env.API_URL || `http://localhost:${PORT}`;
 
-export const SENTRY_DSN = getEnv('SENTRY_DSN');
+// Required in production so misconfiguration fails loud at boot. Optional in
+// development where Sentry init is intentionally skipped (see conf/sentry.ts).
+export const SENTRY_DSN =
+  ENVIRONMENT === 'development' ? process.env.SENTRY_DSN : getEnv('SENTRY_DSN');
 
 // Optional shared secret guarding the unauthenticated `/metrics` endpoint.
 // When set, scrapers must send `X-Metrics-Token: <value>` on every request
@@ -52,19 +55,6 @@ export const SENTRY_DSN = getEnv('SENTRY_DSN');
 // top of the network ACL that already restricts `/metrics` to private
 // scrapers.
 export const METRICS_TOKEN = process.env.METRICS_TOKEN;
-
-// Build identification — set by CI at deploy time.
-//   - RELEASE_SHA: full git commit SHA of the running build. Used by Sentry
-//     for release tagging + by the /version endpoint. Set in CI from the
-//     platform's commit env var (GITHUB_SHA, CODEBUILD_RESOLVED_SOURCE_VERSION,
-//     VERCEL_GIT_COMMIT_SHA, etc.) or via `git rev-parse HEAD` in a build script.
-//   - BUILD_TIME: ISO timestamp of when the artifact was built. Lets ops see
-//     "this server is running a 3-day-old build" at a glance via /version.
-//
-// Both are optional: undefined → endpoint reports "unknown" rather than
-// crashing. Setting them is a CI hygiene win, not a launch blocker.
-export const RELEASE_SHA = process.env.RELEASE_SHA;
-export const BUILD_TIME = process.env.BUILD_TIME;
 
 export const STRIPE_SECRET_KEY = getEnv('STRIPE_SECRET_KEY');
 export const STRIPE_WEBHOOK_SECRET = getEnv('STRIPE_WEBHOOK_SECRET');

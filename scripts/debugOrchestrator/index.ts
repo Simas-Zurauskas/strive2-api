@@ -9,6 +9,8 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 import mongoose from 'mongoose';
 import { MONGO_URI } from '@conf/env';
+import { GOAL_TYPES } from '@lib/constants';
+import type { GoalType } from '@lib/constants';
 import { generatePersonas } from './personaGenerator';
 import { runAll } from './orchestrator';
 import type { OrchestratorConfig } from './types';
@@ -70,28 +72,100 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     console.error('  --lessons <n>         Lessons to generate per persona (0 = skip)');
     console.error('');
     console.error('Optional:');
-    console.error('  --api-url <url>       API base URL (default: http://localhost:4000)');
-    console.error('  --chat                Include structure review chat step');
-    console.error('  --quizzes             Generate + submit module quizzes after lessons');
-    console.error('  --insights            Review every insight the queue returns (off by default)');
-    console.error('  --mentor              Probe course-design + lesson mentor chats (1 turn each)');
+    console.error('  --api-url <url>                API base URL (default: http://localhost:4000)');
+    console.error('  --chat                         Include structure review chat step');
+    console.error('  --quizzes                      Generate + submit module quizzes after lessons');
+    console.error('  --insights                     Review every insight the queue returns (off by default)');
+    console.error('  --mentor                       Probe course-design + lesson mentor chats (1 turn each)');
+    console.error('  --goal-type <bucket>           Force every persona into a single bucket');
+    console.error('                                 (master | monetize | pass | build | fluency).');
+    console.error('  --goal-type-distribution <s>   Per-bucket counts, comma-separated.');
+    console.error('                                 Example: "pass=3,build=2". Sum must equal --personas.');
     console.error('');
     console.error('Each persona runs against its own auto-provisioned db user (debug-*@strive-debug.test),');
     console.error('verified in Mongo at provision time and deleted via /api/auth/delete-account on teardown.');
     process.exit(1);
   }
 
+  const personaCount = parseInt(personas, 10);
+  const goalTypeDistribution = parseGoalTypeBias({
+    single: flags['goal-type'],
+    distribution: flags['goal-type-distribution'],
+    personaCount,
+  });
+
   return {
     apiUrl: flags['api-url'] ?? 'http://localhost:4000',
     concurrency: parseInt(concurrency, 10),
-    personaCount: parseInt(personas, 10),
+    personaCount,
     maxLessons: parseInt(lessons, 10),
     outputDir: path.resolve(__dirname, 'output'),
     enableChatReview: boolFlags.has('chat'),
     enableQuiz: boolFlags.has('quizzes'),
     enableInsights: boolFlags.has('insights'),
     enableMentor: boolFlags.has('mentor'),
+    goalTypeDistribution,
   };
+}
+
+// Parses --goal-type and --goal-type-distribution into a single
+// distribution map. Validates bucket names and total count.
+// Returns null when neither flag is set (unbiased generation).
+function parseGoalTypeBias({
+  single,
+  distribution,
+  personaCount,
+}: {
+  single: string | undefined;
+  distribution: string | undefined;
+  personaCount: number;
+}): Partial<Record<GoalType, number>> | null {
+  if (!single && !distribution) return null;
+
+  if (single && distribution) {
+    console.error('--goal-type and --goal-type-distribution are mutually exclusive.');
+    process.exit(1);
+  }
+
+  const isValidBucket = (s: string): s is GoalType => (GOAL_TYPES as readonly string[]).includes(s);
+
+  if (single) {
+    if (!isValidBucket(single)) {
+      console.error(`Invalid --goal-type "${single}". Expected one of: ${GOAL_TYPES.join(', ')}`);
+      process.exit(1);
+    }
+    return { [single]: personaCount } as Partial<Record<GoalType, number>>;
+  }
+
+  // distribution: "pass=3,build=2"
+  const map: Partial<Record<GoalType, number>> = {};
+  let total = 0;
+  for (const pair of distribution!.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const eq = pair.indexOf('=');
+    if (eq < 0) {
+      console.error(`Invalid --goal-type-distribution entry "${pair}" (expected key=value).`);
+      process.exit(1);
+    }
+    const key = pair.slice(0, eq).trim();
+    const val = parseInt(pair.slice(eq + 1).trim(), 10);
+    if (!isValidBucket(key)) {
+      console.error(`Invalid bucket "${key}" in --goal-type-distribution. Expected one of: ${GOAL_TYPES.join(', ')}`);
+      process.exit(1);
+    }
+    if (!Number.isFinite(val) || val < 0) {
+      console.error(`Invalid count for "${key}" in --goal-type-distribution: "${pair.slice(eq + 1)}"`);
+      process.exit(1);
+    }
+    map[key] = (map[key] ?? 0) + val;
+    total += val;
+  }
+  if (total !== personaCount) {
+    console.error(
+      `--goal-type-distribution sum (${total}) must equal --personas (${personaCount}).`,
+    );
+    process.exit(1);
+  }
+  return map;
 }
 
 // ── Main ─────────────────────────────────────────────────
@@ -112,7 +186,7 @@ async function main() {
 
   try {
     // Generate personas
-    const personas = await generatePersonas(personaCount);
+    const personas = await generatePersonas(personaCount, config.goalTypeDistribution);
 
     // Run all persona flows
     const runs = await runAll({ personas, config });

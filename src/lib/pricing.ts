@@ -108,7 +108,7 @@ export const LLM_PRICING: Record<string, LlmPrice> = {
 // image + links, which in reality costs ~$0.45 of real API spend, not ~$1.40.
 export const SERVICE_PRICING = {
   bfl_flux_dev: { perUnitMicroCents: 25_000 },           // $0.025/image — the only BFL hero-image model we call
-  tavily_search_advanced: { perUnitMicroCents: 16_000 }, // 2 credits × $0.008 PAYG = $0.016/query
+  tavily_search_basic: { perUnitMicroCents: 8_000 },     // 1 credit × $0.008 PAYG = $0.008/query (basic depth)
   judge0_rapidapi: { perUnitMicroCents: 2_000 },         // $0.002/submission (RapidAPI Basic overage)
   // Pinecone Standard plan (us-east region — lowest of $4-$4.50/M WU and $16-$18/M RU
   // posted ranges). The $50/month plan minimum is a fixed overhead the platform
