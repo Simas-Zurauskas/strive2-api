@@ -111,65 +111,43 @@ describe('recordAccountDeletion', () => {
 
   test('aggregates lifetime credits from CreditLedgerModel: sums positive deltas + abs(negative deltas)', async () => {
     const user = await makeUser({ email: 'spent@example.com' });
-    // Seed a real ledger: +110 grant, -20 debit, +50 topup, -30 debit
-    await CreditLedgerModel.create([
-      {
+    // Seed a real ledger: +110 grant, -20 debit, +50 topup, -30 debit.
+    // Granted/consumed totals are derived from this list below — change
+    // the seed and the assertions follow automatically.
+    const ledgerSeed = [
+      { delta: 110, allowanceDelta: 110, bonusDelta: 0, reason: 'signup_grant' as const },
+      { delta: -20, allowanceDelta: -20, bonusDelta: 0, reason: 'debit_action' as const },
+      { delta: 50, allowanceDelta: 0, bonusDelta: 50, reason: 'topup_purchase' as const },
+      { delta: -30, allowanceDelta: -30, bonusDelta: 0, reason: 'debit_action' as const },
+    ];
+    await CreditLedgerModel.create(
+      ledgerSeed.map((row) => ({
         userId: user._id,
         timestamp: new Date(),
-        delta: 110,
-        allowanceDelta: 110,
-        bonusDelta: 0,
+        delta: row.delta,
+        allowanceDelta: row.allowanceDelta,
+        bonusDelta: row.bonusDelta,
         balanceBefore: 0,
-        balanceAfter: 110,
+        balanceAfter: 0,
         bonusBefore: 0,
         bonusAfter: 0,
-        reason: 'signup_grant',
-      },
-      {
-        userId: user._id,
-        timestamp: new Date(),
-        delta: -20,
-        allowanceDelta: -20,
-        bonusDelta: 0,
-        balanceBefore: 110,
-        balanceAfter: 110,
-        bonusBefore: 0,
-        bonusAfter: 0,
-        reason: 'debit_action',
-      },
-      {
-        userId: user._id,
-        timestamp: new Date(),
-        delta: 50,
-        allowanceDelta: 0,
-        bonusDelta: 50,
-        balanceBefore: 110,
-        balanceAfter: 110,
-        bonusBefore: 0,
-        bonusAfter: 50,
-        reason: 'topup_purchase',
-      },
-      {
-        userId: user._id,
-        timestamp: new Date(),
-        delta: -30,
-        allowanceDelta: -30,
-        bonusDelta: 0,
-        balanceBefore: 110,
-        balanceAfter: 80,
-        bonusBefore: 50,
-        bonusAfter: 50,
-        reason: 'debit_action',
-      },
-    ]);
+        reason: row.reason,
+      })),
+    );
 
     await recordAccountDeletion({ email: 'spent@example.com', userId: user._id });
 
     const row = await AbuseLogModel.findOne({
       emailHash: hashCanonicalEmail('spent@example.com'),
     }).lean();
-    expect(row?.lifetimeCreditsGranted).toBe(180); // 110 + 50
-    expect(row?.lifetimeCreditsConsumed).toBe(50); // 20 + 30 (abs)
+    const expectedGranted = ledgerSeed
+      .filter((r) => r.delta > 0)
+      .reduce((sum, r) => sum + r.delta, 0);
+    const expectedConsumed = ledgerSeed
+      .filter((r) => r.delta < 0)
+      .reduce((sum, r) => sum + Math.abs(r.delta), 0);
+    expect(row?.lifetimeCreditsGranted).toBe(expectedGranted);
+    expect(row?.lifetimeCreditsConsumed).toBe(expectedConsumed);
   });
 
   test('idempotent re-call: signupCount and lifetime totals accumulate on second deletion', async () => {

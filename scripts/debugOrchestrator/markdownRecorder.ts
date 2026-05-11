@@ -12,15 +12,118 @@ import type {
   LessonContentStats,
   ModuleQuizForLearner,
   ModuleQuizAttemptRecord,
-  InsightReviewResult,
+  RecallReviewResult,
   CourseMentorRecord,
   LessonMentorRecord,
   GoalTypeClassificationSnapshot,
   GoalTypeOverrideRecord,
   GoalType,
+  CostEvent,
+  CostSummary,
 } from './types';
+import type { ApiClient } from './apiClient';
 import type { ClarifyCueAssertion, StructureConformanceAssertion } from './goalTypeAssertions';
-import type { GetInsightQueueResult, InsightStats } from '@services/insightQueueService';
+import type { GetRecallQueueResult, RecallStats } from '@services/recallQueueService';
+
+/**
+ * Per-persona credit-spend tracker. Snapshots `/api/billing/summary` at
+ * step boundaries; the delta between consecutive snapshots is attributed
+ * to the step that just completed.
+ *
+ * Reliability contract: snapshot failures (e.g. transient API hiccup) are
+ * non-fatal — they emit a stderr warning and skip the event so a flaky
+ * billing endpoint never aborts a persona flow. The tracker keeps the
+ * last-known balance as `previousBalance` so the next successful snapshot
+ * still computes a sensible delta against the most recent good reading.
+ */
+export class CostTracker {
+  private startBalance: number | null = null;
+  private previousBalance: number | null = null;
+  private events: CostEvent[] = [];
+  /**
+   * Promise-chain queue for snapshots. Callers can `enqueueSnapshot()` from
+   * synchronous contexts (e.g. inside `beginStep().finish()`); the chain
+   * serializes the underlying HTTP requests so `previousBalance` is always
+   * the post-balance of the previous-completed snapshot when the next one
+   * runs. Without this, two fire-and-forget snapshots could read the same
+   * stale `previousBalance` and produce a duplicate-zero-delta event.
+   */
+  private snapshotQueue: Promise<void> = Promise.resolve();
+
+  constructor(private readonly client: Pick<ApiClient, 'getBillingSummary'>) {}
+
+  /** Capture the persona's starting balance. Idempotent — only records once. */
+  async initialize(): Promise<void> {
+    if (this.startBalance !== null) return;
+    try {
+      const { total } = await this.client.getBillingSummary();
+      this.startBalance = total;
+      this.previousBalance = total;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      // Soft-fail: cost tracking is analytics, not the persona's job
+      // contract. Mark startBalance so subsequent snapshots still try.
+      console.warn(`[CostTracker] initialize failed (${reason}) — cost summary will be empty`);
+      this.startBalance = 0;
+      this.previousBalance = 0;
+    }
+  }
+
+  /**
+   * Enqueue a snapshot to fire after all previously-enqueued snapshots
+   * resolve. Returns immediately — call `drain()` before reading
+   * `summary()` to ensure the queue has emptied.
+   */
+  enqueueSnapshot(label: string): void {
+    this.snapshotQueue = this.snapshotQueue.then(() => this.takeSnapshot(label));
+  }
+
+  /** Synchronous-style snapshot. Awaits the queue first to keep ordering. */
+  async snapshot(label: string): Promise<void> {
+    this.enqueueSnapshot(label);
+    return this.snapshotQueue;
+  }
+
+  /** Wait for any enqueued snapshots to complete. Safe to call multiple times. */
+  async drain(): Promise<void> {
+    await this.snapshotQueue;
+  }
+
+  /** Build the final summary. Safe to call even if initialize() never fired. */
+  summary(): CostSummary {
+    const startBalance = this.startBalance ?? 0;
+    const endBalance = this.previousBalance ?? startBalance;
+    return {
+      startBalance,
+      endBalance,
+      totalSpent: startBalance - endBalance,
+      events: this.events,
+    };
+  }
+
+  private async takeSnapshot(label: string): Promise<void> {
+    if (this.previousBalance === null) {
+      // initialize() wasn't called or failed silently — try to recover.
+      await this.initialize();
+    }
+    try {
+      const { total } = await this.client.getBillingSummary();
+      const balanceBefore = this.previousBalance ?? total;
+      const event: CostEvent = {
+        label,
+        balanceBefore,
+        balanceAfter: total,
+        deltaCredits: balanceBefore - total,
+        ts: new Date(),
+      };
+      this.events.push(event);
+      this.previousBalance = total;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`[CostTracker] snapshot('${label}') failed (${reason}) — skipping this event`);
+    }
+  }
+}
 
 export class MarkdownRecorder {
   private sections: string[] = [];
@@ -61,7 +164,7 @@ Generated: ${new Date().toISOString()}
 - **Depth choice:** ${p.wizardBehavior.depthChoice}
 - **Structure review:** ${p.wizardBehavior.structureReview}
 - **Quiz attempt style:** ${p.wizardBehavior.quizAttemptStyle}
-- **Insight review style:** ${p.wizardBehavior.insightReviewStyle}
+- **Recall review style:** ${p.wizardBehavior.recallReviewStyle}
 `);
   }
 
@@ -377,7 +480,7 @@ ${modulesList}
       md += `- **Generation time:** ${fmtDuration(generationMs)}\n`;
       md += `- **Blocks:** ${blocks.length} (${typeCountStr})\n`;
       if (stats) {
-        md += `- **Insights extracted:** ${stats.insightCount}\n`;
+        md += `- **Recall cards extracted:** ${stats.recallCardCount}\n`;
         md += `- **Curated links:** ${stats.linkCount}\n`;
       }
       md += `- **Summary:** ${content.summary ? truncate({ str: content.summary, maxLen: 200 }) : '_none_'}\n\n`;
@@ -483,15 +586,15 @@ ${modulesList}
     this.sections.push(md);
   }
 
-  addStep13_InsightQueue({ queue }: { queue: GetInsightQueueResult }): void {
-    let md = `---\n\n## Step 13: Fetch Insight Queue\n\n`;
+  addStep13_RecallQueue({ queue }: { queue: GetRecallQueueResult }): void {
+    let md = `---\n\n## Step 13: Fetch Recall Queue\n\n`;
     md += `- **Due total:** ${queue.counts.dueTotal}\n`;
     md += `- **Fresh available:** ${queue.counts.freshAvailable}\n`;
     md += `- **Learned:** ${queue.counts.learned}\n`;
     md += `- **Returned:** ${queue.due.length} due, ${queue.fresh.length} fresh\n\n`;
 
     // Render every queue item the server returned — the orchestrator is a
-    // debug tool and a silent 10-item cap made `--insights > 10` runs look
+    // debug tool and a silent 10-item cap made `--recall > 10` runs look
     // like half the queue was missing.
     const preview = [...queue.due, ...queue.fresh];
     if (preview.length > 0) {
@@ -506,19 +609,19 @@ ${modulesList}
     this.sections.push(md);
   }
 
-  addStep14_InsightReviews({
+  addStep14_RecallReviews({
     reviews,
     statsAfter,
   }: {
-    reviews: InsightReviewResult[];
-    statsAfter: InsightStats | null;
+    reviews: RecallReviewResult[];
+    statsAfter: RecallStats | null;
   }): void {
     if (reviews.length === 0) return;
 
     const rated = reviews.filter((r) => r.action === 'rated').length;
     const skipped = reviews.filter((r) => r.action === 'skipped').length;
 
-    let md = `---\n\n## Step 14: Review Insights (${rated} rated, ${skipped} skipped)\n\n`;
+    let md = `---\n\n## Step 14: Review Recall cards (${rated} rated, ${skipped} skipped)\n\n`;
 
     for (let i = 0; i < reviews.length; i++) {
       const r = reviews[i];
@@ -537,8 +640,8 @@ ${modulesList}
     }
 
     if (statsAfter) {
-      md += `<details>\n<summary>Insight stats after this run</summary>\n\n`;
-      md += `- **Total insights:** ${statsAfter.totalInsights}\n`;
+      md += `<details>\n<summary>Recall stats after this run</summary>\n\n`;
+      md += `- **Total recall cards:** ${statsAfter.totalCards}\n`;
       md += `- **Total reviewed:** ${statsAfter.totalReviewed}\n`;
       md += `- **Total mastered:** ${statsAfter.totalMastered}\n`;
       md += `- **Due today:** ${statsAfter.dueToday}\n`;
@@ -561,7 +664,8 @@ ${modulesList}
     failedStep,
     lessonsGenerated,
     quizzesAttempted,
-    insightsReviewed,
+    recallReviewed,
+    costSummary,
   }: {
     totalDurationMs: number;
     course: CourseData | null;
@@ -570,7 +674,8 @@ ${modulesList}
     failedStep?: { step: number; name: string };
     lessonsGenerated?: number;
     quizzesAttempted?: number;
-    insightsReviewed?: number;
+    recallReviewed?: number;
+    costSummary?: CostSummary;
   }): void {
     const totalLessons = course?.structure?.modules.reduce((sum, m) => sum + m.lessons.length, 0) ?? 0;
 
@@ -602,11 +707,49 @@ ${modulesList}
 | Depth Selected | ${course?.depth ?? 'N/A'} |
 | Modules | ${course?.structure?.modules.length ?? 'N/A'} |
 | Total Lessons | ${totalLessons || 'N/A'} |
-${failedStep ? `| Failed Step | ${failedStep.step} — ${failedStep.name} |\n` : ''}${lessonsGenerated !== undefined ? `| Lessons Generated | ${lessonsGenerated} |\n` : ''}${quizzesAttempted !== undefined ? `| Quizzes Attempted | ${quizzesAttempted} |\n` : ''}${insightsReviewed !== undefined ? `| Insights Reviewed | ${insightsReviewed} |\n` : ''}${error ? `| Error | ${escapeCell(truncate({ str: error, maxLen: 500 }))} |` : ''}
+${failedStep ? `| Failed Step | ${failedStep.step} — ${failedStep.name} |\n` : ''}${lessonsGenerated !== undefined ? `| Lessons Generated | ${lessonsGenerated} |\n` : ''}${quizzesAttempted !== undefined ? `| Quizzes Attempted | ${quizzesAttempted} |\n` : ''}${recallReviewed !== undefined ? `| Recall cards Reviewed | ${recallReviewed} |\n` : ''}${costSummary ? `| Credits Spent (this persona) | ${fmtCredits(costSummary.totalSpent)} |\n` : ''}${error ? `| Error | ${escapeCell(truncate({ str: error, maxLen: 500 }))} |` : ''}
 `;
 
     // Insert after the header (index 0)
     this.sections.splice(1, 0, summary);
+  }
+
+  /**
+   * Append the cost-breakdown section. Analytics-only (NOT scored by the
+   * assessment rubric) — surfaced so cost-per-step is visible in the same
+   * markdown that already carries every other run signal. Skipped silently
+   * when the tracker has no events (e.g. /api/billing/summary unreachable).
+   */
+  addCostBreakdown(costSummary: CostSummary): void {
+    if (costSummary.events.length === 0) {
+      this.sections.push(`---
+
+## Cost Breakdown
+
+_No cost events recorded — billing snapshot endpoint may have been unreachable during this run._
+`);
+      return;
+    }
+
+    const rows = costSummary.events
+      .map((e, i) => {
+        const deltaCell = e.deltaCredits > 0 ? `−${fmtCredits(e.deltaCredits)}` : e.deltaCredits < 0 ? `+${fmtCredits(-e.deltaCredits)}` : '0';
+        return `| ${i + 1} | ${escapeCell(e.label)} | ${fmtCredits(e.balanceBefore)} | ${fmtCredits(e.balanceAfter)} | ${deltaCell} |`;
+      })
+      .join('\n');
+
+    this.sections.push(`---
+
+## Cost Breakdown
+
+Snapshots taken at every step boundary against \`/api/billing/summary\`. \`Δ credits\` is the spend attributable to that step (positive = debit, "+" = refund). Credits are in account units (1 credit ≈ $0.005 vendor cost; users pay 1.9–4.0× markup). This section is for analytics — the assessment rubric ignores it.
+
+**Persona total: ${fmtCredits(costSummary.totalSpent)} credits** (start ${fmtCredits(costSummary.startBalance)} → end ${fmtCredits(costSummary.endBalance)})
+
+| # | Step | Balance Before | Balance After | Δ credits |
+|---|------|---------------:|--------------:|----------:|
+${rows}
+`);
   }
 
   addFailure({ failedStep, error }: { failedStep: { step: number; name: string } | null; error: string }): void {
@@ -640,6 +783,15 @@ ${error}
     await writeFile(filepath, this.sections.join('\n'), 'utf-8');
     return filepath;
   }
+}
+
+/**
+ * Format a credit value for display in the markdown report. Two decimal
+ * places — the production credit unit is fractional (1 credit = ~$0.005)
+ * and per-step debits are commonly in the 0.1–10 range.
+ */
+function fmtCredits(value: number): string {
+  return value.toFixed(2);
 }
 
 function fmtDuration(ms: number): string {

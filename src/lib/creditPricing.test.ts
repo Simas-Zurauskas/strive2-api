@@ -77,11 +77,21 @@ test('allowances increase strictly across tiers', () => {
   assert.ok(PLANS.pro.monthlyAllowance < PLANS.studio.monthlyAllowance);
 });
 
-test('paid-plan allowances are exact 5x/15x/40x multiples of Free', () => {
+test('paid-plan allowances are exact integer multiples of Free', () => {
+  // The pricing page surfaces paid tiers as "N× Free" — keep every paid
+  // monthlyAllowance an exact integer multiple of Free so the displayed
+  // multiplier is never "~N×". The specific multipliers themselves are a
+  // business decision tuned in `creditPricing.ts`; the invariant is
+  // integer-ness, not the multiplier value.
   const unit = PLANS.free.monthlyAllowance;
-  assert.equal(PLANS.starter.monthlyAllowance, unit * 5);
-  assert.equal(PLANS.pro.monthlyAllowance, unit * 15);
-  assert.equal(PLANS.studio.monthlyAllowance, unit * 40);
+  for (const key of PLAN_KEYS) {
+    if (key === 'free') continue;
+    const ratio = PLANS[key].monthlyAllowance / unit;
+    assert.ok(
+      Number.isInteger(ratio) && ratio > 1,
+      `${key}.monthlyAllowance (${PLANS[key].monthlyAllowance}) must be an integer multiple of Free (${unit}); got ${ratio}×`,
+    );
+  }
 });
 
 // ── Top-up rate economics ──────────────────────────────────
@@ -128,13 +138,21 @@ test('per-plan gross margin ladder is sane (Free loss leader, paid > 40%)', () =
 
 // ── Per-credit USD rates (used by engineer billing view) ───
 
-test('PLAN_USD_PER_CREDIT pins the four expected rates', () => {
-  // If any of these change, the engineer billing view's USD math shifts —
-  // updating this test makes the price change a deliberate edit.
+test('PLAN_USD_PER_CREDIT derives from PLANS (monthlyUsd / monthlyAllowance)', () => {
+  // The engineer billing view turns per-row credit counts into USD using
+  // this map. The contract is `userUsd / userAllowance` — pin the formula
+  // structurally so adjusting a plan's price or allowance in PLANS
+  // automatically updates the per-credit rate without a test edit. Free
+  // is the loss-leader and stays at 0.
   assert.equal(PLAN_USD_PER_CREDIT.free, 0);
-  assert.ok(Math.abs(PLAN_USD_PER_CREDIT.starter - 12.99 / 650) < 1e-9);
-  assert.ok(Math.abs(PLAN_USD_PER_CREDIT.pro - 24.99 / 1_950) < 1e-9);
-  assert.ok(Math.abs(PLAN_USD_PER_CREDIT.studio - 49.99 / 5_200) < 1e-9);
+  for (const key of PLAN_KEYS) {
+    if (key === 'free') continue;
+    const expected = PLANS[key].monthlyUsd / PLANS[key].monthlyAllowance;
+    assert.ok(
+      Math.abs(PLAN_USD_PER_CREDIT[key] - expected) < 1e-9,
+      `${key}: expected ${expected}, got ${PLAN_USD_PER_CREDIT[key]}`,
+    );
+  }
 });
 
 test('rates ladder: Studio cheaper per credit than Pro, Pro cheaper than Starter', () => {

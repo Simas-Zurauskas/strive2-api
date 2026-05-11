@@ -17,8 +17,6 @@ import { PLANS } from '@lib/creditPricing';
  * `overrides` to set whatever the test cares about.
  */
 
-type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
-
 let userCounter = 0;
 
 export const makeUser = async (
@@ -62,10 +60,10 @@ export const makeUser = async (
 let courseCounter = 0;
 
 export const makeCourse = async (
-  overrides: DeepPartial<ICourse> & { userId: mongoose.Types.ObjectId | string },
+  overrides: Partial<ICourse> & { userId: mongoose.Types.ObjectId | string },
 ): Promise<CourseDocument> => {
   courseCounter += 1;
-  return CourseModel.create({
+  const payload = {
     userId: overrides.userId,
     name: overrides.name ?? `Test Course ${courseCounter}`,
     slug: overrides.slug ?? `test-course-${courseCounter}-${Date.now()}`,
@@ -77,7 +75,8 @@ export const makeCourse = async (
     depth: overrides.depth ?? null,
     activeJobId: overrides.activeJobId ?? null,
     activeLesson: overrides.activeLesson ?? null,
-  });
+  } as unknown as Parameters<typeof CourseModel.create>[0];
+  return CourseModel.create(payload);
 };
 
 export const makeJob = async (

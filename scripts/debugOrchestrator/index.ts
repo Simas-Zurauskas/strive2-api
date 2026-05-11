@@ -23,10 +23,10 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
   const boolFlags = new Set<string>();
 
   // Declared bool flags — the parser must never consume the following token as
-  // a value for these, otherwise `--insights --chat` would parse `--chat` as
-  // the value of `--insights`. Listed explicitly so typos in value flags
+  // a value for these, otherwise `--recall --chat` would parse `--chat` as
+  // the value of `--recall`. Listed explicitly so typos in value flags
   // surface as missing-required errors instead of silent bool coercions.
-  const knownBoolFlags = new Set(['chat', 'quizzes', 'insights', 'mentor']);
+  const knownBoolFlags = new Set(['chat', 'quizzes', 'recall', 'mentor']);
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -75,7 +75,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     console.error('  --api-url <url>                API base URL (default: http://localhost:4000)');
     console.error('  --chat                         Include structure review chat step');
     console.error('  --quizzes                      Generate + submit module quizzes after lessons');
-    console.error('  --insights                     Review every insight the queue returns (off by default)');
+    console.error('  --recall                       Review every recall card the queue returns (off by default)');
     console.error('  --mentor                       Probe course-design + lesson mentor chats (1 turn each)');
     console.error('  --goal-type <bucket>           Force every persona into a single bucket');
     console.error('                                 (master | monetize | pass | build | fluency).');
@@ -102,7 +102,7 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     outputDir: path.resolve(__dirname, 'output'),
     enableChatReview: boolFlags.has('chat'),
     enableQuiz: boolFlags.has('quizzes'),
-    enableInsights: boolFlags.has('insights'),
+    enableRecall: boolFlags.has('recall'),
     enableMentor: boolFlags.has('mentor'),
     goalTypeDistribution,
   };

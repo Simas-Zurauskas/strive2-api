@@ -179,7 +179,7 @@ test('mixed batch: accumulator equals sum of charged values, ledger preserves ve
   await new Promise((r) => setImmediate(r));
   // Anthropic 1× + Tavily 2× + BFL 2× = 1_000 + 4_000 + 10_000 = 15_000.
   assert.equal(accumulator, 15_000);
-  const vendorTotal = createdDocs.reduce(
+  const vendorTotal = createdDocs.reduce<number>(
     (sum, d) => sum + ((d as Record<string, number>).costMicroCents ?? 0),
     0,
   );

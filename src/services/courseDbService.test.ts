@@ -115,7 +115,7 @@ describe('getUserCourseLean — same boundary, .lean() variant', () => {
     expect(found._id.toString()).toBe(course._id.toString());
     // lean() returns a plain object, not a hydrated document; .save would
     // not exist on it.
-    expect((found as Record<string, unknown>).save).toBeUndefined();
+    expect((found as unknown as Record<string, unknown>).save).toBeUndefined();
   });
 
   test('regression: slug shaped like an ObjectId for foreign user → not found', async () => {

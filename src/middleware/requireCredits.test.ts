@@ -45,7 +45,7 @@ const runMiddleware = async (params: {
     const wrappedNext = ((err?: unknown) => {
       if (err) reject(err);
       else {
-        (params.next as ReturnType<typeof vi.fn>)();
+        (params.next as () => void)();
         resolve();
       }
     }) as NextFunction;

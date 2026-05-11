@@ -3,7 +3,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import type { ApiClient } from './apiClient';
 import { LESSON_POLL_TIMEOUT_MS, WITH_RETRY_POLL_TIMEOUT_MS } from './apiClient';
-import { MarkdownRecorder } from './markdownRecorder';
+import { MarkdownRecorder, CostTracker } from './markdownRecorder';
 import { withRetry } from '@lib/retry';
 import { MODEL_IDS } from '@lib/langchain';
 import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
@@ -24,15 +24,15 @@ import type {
   ModuleQuizQuestionForLearner,
   ModuleQuizAttemptRecord,
   QuizNoiseTrace,
-  InsightReviewResult,
+  RecallReviewResult,
   CourseMentorRecord,
   LessonMentorRecord,
   MentorTurn,
   GoalTypeClassificationSnapshot,
   GoalTypeOverrideRecord,
 } from './types';
-import type { GetInsightQueueResult, QueueInsightItem, InsightStats } from '@services/insightQueueService';
-import type { InsightMode, InsightRating } from '@lib/insightConstants';
+import type { GetRecallQueueResult, QueueRecallCardItem, RecallStats } from '@services/recallQueueService';
+import type { RecallMode, RecallRating } from '@lib/recallConstants';
 import { createPrng } from './prng';
 import { applyQuizNoise, computeSimulatedThinkTimeMs } from './quizNoise';
 import {
@@ -307,12 +307,12 @@ const quizAnswerOutputSchema = z.object({
   reasoning: z.string(),
 });
 
-const insightTapRevealOutputSchema = z.object({
+const recallTapRevealOutputSchema = z.object({
   rating: z.number(),
   reasoning: z.string(),
 });
 
-const insightTypedRecallOutputSchema = z.object({
+const recallTypedRecallOutputSchema = z.object({
   userAnswer: z.string(),
   reasoning: z.string(),
 });
@@ -415,21 +415,21 @@ Return JSON:
   };
 }
 
-async function reviewInsightTapReveal({
+async function reviewRecallTapReveal({
   persona,
-  insight,
+  recall,
   runId,
   personaSlug,
 }: {
   persona: Persona;
-  insight: QueueInsightItem;
+  recall: QueueRecallCardItem;
   runId: string;
   personaSlug: string;
-}): Promise<{ rating: InsightRating; reasoning: string }> {
+}): Promise<{ rating: RecallRating; reasoning: string }> {
   const systemPrompt = `${personaContext(persona)}
 
-YOUR SPECIFIC INSIGHT-REVIEW BEHAVIOR:
-${persona.wizardBehavior.insightReviewStyle}
+YOUR SPECIFIC RECALL-REVIEW BEHAVIOR:
+${persona.wizardBehavior.recallReviewStyle}
 
 You're reviewing a retrieval-practice card in TAP-REVEAL mode: you see the prompt, then the answer, then rate how well you remembered it.
 
@@ -449,47 +449,47 @@ Return JSON:
 - "rating": 1 | 2 | 3 | 4
 - "reasoning": 1 short sentence (e.g. "Recognized the concept but would've fumbled the exact wording — Hard")`;
 
-  const userPrompt = `PROMPT (${insight.kind}):\n${insight.prompt}\n\nCANONICAL ANSWER:\n${insight.answer}`;
+  const userPrompt = `PROMPT (${recall.kind}):\n${recall.prompt}\n\nCANONICAL ANSWER:\n${recall.answer}`;
 
   const { result } = await withRetry(() =>
     aiJsonCall({
       systemPrompt,
       userPrompt,
-      schema: insightTapRevealOutputSchema,
-      label: 'orchestrator:insight-tap-reveal',
+      schema: recallTapRevealOutputSchema,
+      label: 'orchestrator:recall-tap-reveal',
     }),
   );
 
   let rating = clampRating(result.rating);
-  // Apply tap-reveal rating bias driven by the persona's insight style
+  // Apply tap-reveal rating bias driven by the persona's recall style
   // flags. The prompt already instructs the LLM to skew, but the LLM
   // tends to anchor around the middle (2-3) regardless of instruction;
   // the seeded bias nudges the distribution without overriding obvious
-  // cases. Keyed on insightId so reruns produce identical ratings.
-  const prng = createPrng(`${runId}:${personaSlug}:${insight.insightId}:tap-reveal-bias`);
-  if (persona.insightStyleFlags.generous && rating < 4 && prng.nextBool(0.4)) {
-    rating = (rating + 1) as InsightRating;
-  } else if (persona.insightStyleFlags.harsh && rating > 1 && prng.nextBool(0.4)) {
-    rating = (rating - 1) as InsightRating;
+  // cases. Keyed on recallCardId so reruns produce identical ratings.
+  const prng = createPrng(`${runId}:${personaSlug}:${recall.recallCardId}:tap-reveal-bias`);
+  if (persona.recallStyleFlags.generous && rating < 4 && prng.nextBool(0.4)) {
+    rating = (rating + 1) as RecallRating;
+  } else if (persona.recallStyleFlags.harsh && rating > 1 && prng.nextBool(0.4)) {
+    rating = (rating - 1) as RecallRating;
   }
   return { rating, reasoning: result.reasoning };
 }
 
-async function reviewInsightTypedRecall({
+async function reviewRecallTypedRecall({
   persona,
-  insight,
+  recall,
   runId,
   personaSlug,
 }: {
   persona: Persona;
-  insight: QueueInsightItem;
+  recall: QueueRecallCardItem;
   runId: string;
   personaSlug: string;
 }): Promise<{ userAnswer: string; reasoning: string }> {
   const systemPrompt = `${personaContext(persona)}
 
-YOUR SPECIFIC INSIGHT-REVIEW BEHAVIOR:
-${persona.wizardBehavior.insightReviewStyle}
+YOUR SPECIFIC RECALL-REVIEW BEHAVIOR:
+${persona.wizardBehavior.recallReviewStyle}
 
 You're reviewing a retrieval-practice card in TYPED-RECALL mode: you see only the prompt and type your best answer. You do NOT see the canonical answer. The server will grade your answer.
 
@@ -504,25 +504,25 @@ Return JSON:
 - "userAnswer": your typed answer as a string (1–200 chars; empty string is rare but allowed)
 - "reasoning": 1 short sentence (e.g. "Pretty sure this is about decorators, typed a rough guess")`;
 
-  const userPrompt = `PROMPT (${insight.kind}):\n${insight.prompt}`;
+  const userPrompt = `PROMPT (${recall.kind}):\n${recall.prompt}`;
 
   const { result } = await withRetry(() =>
     aiJsonCall({
       systemPrompt,
       userPrompt,
-      schema: insightTypedRecallOutputSchema,
-      label: 'orchestrator:insight-typed-recall',
+      schema: recallTypedRecallOutputSchema,
+      label: 'orchestrator:recall-typed-recall',
     }),
   );
 
-  // If the persona's insight style flags indicate they struggle to articulate,
+  // If the persona's recall style flags indicate they struggle to articulate,
   // degrade the LLM's polished canonical-quality answer into something closer
   // to partial human recall. This restores realism for the grading rubric:
   // without it, Haiku (temp 0, sees canonical answer) grades every typed
   // recall as ≥0.85 "correct", destroying the distribution. The degrader is
-  // seeded per (runId, personaSlug, insightId) so reruns are byte-identical.
-  if (persona.insightStyleFlags.struggles && result.userAnswer) {
-    const prng = createPrng(`${runId}:${personaSlug}:${insight.insightId}:typed-degrade`);
+  // seeded per (runId, personaSlug, recallCardId) so reruns are byte-identical.
+  if (persona.recallStyleFlags.struggles && result.userAnswer) {
+    const prng = createPrng(`${runId}:${personaSlug}:${recall.recallCardId}:typed-degrade`);
     result.userAnswer = degradeTypedRecallAnswer({ answer: result.userAnswer, prng });
   }
 
@@ -579,38 +579,38 @@ const degradeTypedRecallAnswer = ({ answer, prng }: { answer: string; prng: impo
   return kept.join(' ');
 };
 
-function clampRating(raw: number): InsightRating {
+function clampRating(raw: number): RecallRating {
   const r = Math.round(raw);
   if (r <= 1) return 1;
   if (r >= 4) return 4;
-  return r as InsightRating;
+  return r as RecallRating;
 }
 
-function mapGradeToRating(score: number): InsightRating {
+function mapGradeToRating(score: number): RecallRating {
   if (score >= 0.9) return 4;
   if (score >= 0.7) return 3;
   if (score >= 0.4) return 2;
   return 1;
 }
 
-function pickModeFromPersona({ persona, currentMode }: { persona: Persona; currentMode: InsightMode }): InsightMode {
-  const style = persona.wizardBehavior.insightReviewStyle.toLowerCase();
+function pickModeFromPersona({ persona, currentMode }: { persona: Persona; currentMode: RecallMode }): RecallMode {
+  const style = persona.wizardBehavior.recallReviewStyle.toLowerCase();
   if (style.includes('typed-recall') || style.includes('type')) return 'typed-recall';
   if (style.includes('tap-reveal') || style.includes('tap') || style.includes('quick')) return 'tap-reveal';
   return currentMode;
 }
 
-function shouldSkipInsight({
+function shouldSkipRecall({
   persona,
   item,
   alreadySkipped,
 }: {
   persona: Persona;
-  item: QueueInsightItem;
+  item: QueueRecallCardItem;
   alreadySkipped: boolean;
 }): boolean {
   if (alreadySkipped) return false;
-  const style = persona.wizardBehavior.insightReviewStyle.toLowerCase();
+  const style = persona.wizardBehavior.recallReviewStyle.toLowerCase();
   if (!style.includes('skip')) return false;
   return item.isNew && item.box === 0;
 }
@@ -1057,6 +1057,20 @@ export async function runPersonaFlow({
   const runAssertions: PersonaRun['assertions'] = {};
   const runMetrics: PersonaRun['metrics'] = {};
 
+  // Per-persona credit-spend tracker. Snapshots `/api/billing/summary`
+  // before Step 1 (start balance) and after every step boundary —
+  // including each per-lesson loop, per-quiz, per-recall iteration. Soft-
+  // fails on snapshot errors so a flaky billing endpoint doesn't break a
+  // persona run. Surfaced in the markdown's `## Cost Breakdown` section
+  // and aggregated by orchestrator.ts into the cohort total.
+  //
+  // Snapshots are enqueued (not awaited) inside beginStep().finish() so
+  // they don't add latency to the synchronous step path; the queue is
+  // drained right before recorder.addCostBreakdown() in both the
+  // success and failure tails.
+  const costTracker = new CostTracker(client);
+  await costTracker.initialize();
+
   const beginStep = ({ step, name }: { step: number; name: string }) => {
     currentStep = { step, name };
     const inner = timedStep({ step, name });
@@ -1064,6 +1078,10 @@ export async function runPersonaFlow({
       finish(notes?: string): StepResult {
         const r = inner.finish(notes);
         currentStep = null;
+        // Enqueue a billing snapshot keyed to this step. Fire-and-forget;
+        // the tracker serializes on its internal promise chain so two
+        // back-to-back finish() calls produce two well-ordered events.
+        costTracker.enqueueSnapshot(`Step ${step}: ${name}`);
         return r;
       },
     };
@@ -1509,8 +1527,8 @@ export async function runPersonaFlow({
           await client.pollJob({ jobId, timeoutMs: LESSON_POLL_TIMEOUT_MS });
           const content = await client.getLessonContent({ courseId, moduleIndex: mi, lessonIndex: li });
 
-          // Pull insight/link counts from the debug-only stats endpoint so the
-          // report can surface generation-quality signals (how many insights
+          // Pull recall/link counts from the debug-only stats endpoint so the
+          // report can surface generation-quality signals (how many recall cards
           // were extracted, how many links survived curation) that the
           // lesson-content response itself doesn't expose. Non-fatal if it
           // fails (e.g. endpoint not mounted in a non-development env).
@@ -1695,41 +1713,41 @@ export async function runPersonaFlow({
       logDetail('Step 11-12: Quizzes enabled but no lessons were generated, skipping');
     }
 
-    // ── Step 13: Fetch Insight Queue ────────────────────
-    // ── Step 14: Review Insights ───────────────────────
-    const insightReviews: InsightReviewResult[] = [];
-    let statsAfter: InsightStats | null = null;
-    if (config.enableInsights) {
-      log('Step 13: Fetching insight queue...');
-      const s13 = beginStep({ step: 13, name: 'Fetch Insight Queue' });
-      const queue: GetInsightQueueResult = await client.getInsightQueue();
+    // ── Step 13: Fetch Recall Queue ────────────────────
+    // ── Step 14: Review Recall cards ───────────────────────
+    const recallReviews: RecallReviewResult[] = [];
+    let statsAfter: RecallStats | null = null;
+    if (config.enableRecall) {
+      log('Step 13: Fetching recall queue...');
+      const s13 = beginStep({ step: 13, name: 'Fetch Recall Queue' });
+      const queue: GetRecallQueueResult = await client.getRecallQueue();
       steps.push(
         s13.finish(
           `due ${queue.counts.dueTotal}, fresh ${queue.counts.freshAvailable}, learned ${queue.counts.learned}`,
         ),
       );
-      recorder.addStep13_InsightQueue({ queue });
+      recorder.addStep13_RecallQueue({ queue });
       logDone(
         `Step 13: queue → due ${queue.counts.dueTotal}, fresh ${queue.counts.freshAvailable}, learned ${queue.counts.learned}`,
       );
 
       // Due-first, then fresh. Review everything the server returned — the
-      // queue is already bounded server-side (`INSIGHT_QUEUE_DUE_LIMIT` +
-      // `INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT`), so no extra client-side cap.
-      const candidates: QueueInsightItem[] = [...queue.due, ...queue.fresh];
+      // queue is already bounded server-side (`RECALL_QUEUE_DUE_LIMIT` +
+      // `RECALL_QUEUE_FRESH_LIMIT_DEFAULT`), so no extra client-side cap.
+      const candidates: QueueRecallCardItem[] = [...queue.due, ...queue.fresh];
 
       if (candidates.length > 0) {
-        log(`Step 14: Reviewing ${candidates.length} insight(s)...`);
+        log(`Step 14: Reviewing ${candidates.length} recall(s)...`);
         let skippedSoFar = false;
 
         for (const item of candidates) {
-          const s14 = beginStep({ step: 14, name: `Review Insight ${item.insightId.slice(-6)}` });
+          const s14 = beginStep({ step: 14, name: `Review Recall ${item.recallCardId.slice(-6)}` });
 
-          if (shouldSkipInsight({ persona, item, alreadySkipped: skippedSoFar })) {
-            await client.skipInsight({ insightId: item.insightId });
+          if (shouldSkipRecall({ persona, item, alreadySkipped: skippedSoFar })) {
+            await client.skipRecall({ recallCardId: item.recallCardId });
             skippedSoFar = true;
-            insightReviews.push({
-              insightId: item.insightId,
+            recallReviews.push({
+              recallCardId: item.recallCardId,
               courseName: item.courseName,
               lessonName: item.lessonName,
               kind: item.kind,
@@ -1748,14 +1766,14 @@ export async function runPersonaFlow({
 
           const targetMode = pickModeFromPersona({ persona, currentMode: item.mode });
           if (targetMode !== item.mode) {
-            await client.setInsightMode({ insightId: item.insightId, mode: targetMode });
+            await client.setRecallMode({ recallCardId: item.recallCardId, mode: targetMode });
           }
 
           if (targetMode === 'tap-reveal') {
-            const { rating, reasoning } = await reviewInsightTapReveal({ persona, insight: item, runId, personaSlug });
-            const rated = await client.rateInsight({ insightId: item.insightId, rating });
-            insightReviews.push({
-              insightId: item.insightId,
+            const { rating, reasoning } = await reviewRecallTapReveal({ persona, recall: item, runId, personaSlug });
+            const rated = await client.rateRecall({ recallCardId: item.recallCardId, rating });
+            recallReviews.push({
+              recallCardId: item.recallCardId,
               courseName: item.courseName,
               lessonName: item.lessonName,
               kind: item.kind,
@@ -1771,21 +1789,21 @@ export async function runPersonaFlow({
             steps.push(s14.finish(`tap-reveal → ${rating}`));
             logDetail(`  [tap] ${item.kind} → ${rating} (box ${rated.box})`);
           } else {
-            const { userAnswer, reasoning } = await reviewInsightTypedRecall({
+            const { userAnswer, reasoning } = await reviewRecallTypedRecall({
               persona,
-              insight: item,
+              recall: item,
               runId,
               personaSlug,
             });
-            const grade = await client.gradeInsight({ insightId: item.insightId, userAnswer });
+            const grade = await client.gradeRecall({ recallCardId: item.recallCardId, userAnswer });
             const rating = mapGradeToRating(grade.score);
-            const rated = await client.rateInsight({
-              insightId: item.insightId,
+            const rated = await client.rateRecall({
+              recallCardId: item.recallCardId,
               rating,
               typedMatch: grade.score,
             });
-            insightReviews.push({
-              insightId: item.insightId,
+            recallReviews.push({
+              recallCardId: item.recallCardId,
               courseName: item.courseName,
               lessonName: item.lessonName,
               kind: item.kind,
@@ -1806,14 +1824,14 @@ export async function runPersonaFlow({
         }
 
         try {
-          statsAfter = await client.getInsightStats();
+          statsAfter = await client.getRecallStats();
         } catch {
           // stats are informational — don't fail the run if the endpoint hiccups
         }
 
-        recorder.addStep14_InsightReviews({ reviews: insightReviews, statsAfter });
+        recorder.addStep14_RecallReviews({ reviews: recallReviews, statsAfter });
         logDone(
-          `Step 14: reviewed ${insightReviews.filter((r) => r.action === 'rated').length}, skipped ${insightReviews.filter((r) => r.action === 'skipped').length}`,
+          `Step 14: reviewed ${recallReviews.filter((r) => r.action === 'rated').length}, skipped ${recallReviews.filter((r) => r.action === 'skipped').length}`,
         );
       } else {
         logDetail('Step 14: Queue empty, nothing to review');
@@ -1822,14 +1840,21 @@ export async function runPersonaFlow({
 
     // ── Write report ────────────────────────────────────
     const totalDurationMs = Date.now() - flowStart;
+    // Drain the snapshot queue so the cost summary reflects every step
+    // that completed (the last beginStep().finish() call enqueues but
+    // doesn't await — without drain() we'd lose the final 1–2 events).
+    await costTracker.drain();
+    const costSummary = costTracker.summary();
     recorder.addSummary({
       totalDurationMs,
       course,
       status: 'completed',
       lessonsGenerated: lessonsGenerated > 0 ? lessonsGenerated : undefined,
       quizzesAttempted: quizRecords.length > 0 ? quizRecords.length : undefined,
-      insightsReviewed: insightReviews.length > 0 ? insightReviews.length : undefined,
+      recallReviewed: recallReviews.length > 0 ? recallReviews.length : undefined,
+      costSummary,
     });
+    recorder.addCostBreakdown(costSummary);
     const filepath = await recorder.writeToFile(config.outputDir);
     logDetail(`Report written → ${filepath}`);
 
@@ -1841,6 +1866,7 @@ export async function runPersonaFlow({
       status: 'completed',
       assertions: runAssertions,
       metrics: runMetrics,
+      costSummary,
     };
   } catch (error) {
     const totalDurationMs = Date.now() - flowStart;
@@ -1863,13 +1889,20 @@ export async function runPersonaFlow({
       // Always record the failure body + summary so the report is useful even
       // when we blew up before a course existed (e.g. step-1 insert collision).
       recorder.addFailure({ failedStep, error: errorMsg });
+      // Drain whatever cost snapshots queued up before the failure so the
+      // partial-run report still carries the real cost trail (every step
+      // that completed before the failing one will have an event).
+      await costTracker.drain();
+      const partialCostSummary = costTracker.summary();
       recorder.addSummary({
         totalDurationMs,
         course,
         status: 'failed',
         error: shortMsg,
         failedStep: failedStep ?? undefined,
+        costSummary: partialCostSummary,
       });
+      recorder.addCostBreakdown(partialCostSummary);
       const filepath = await recorder.writeToFile(config.outputDir);
       logDetail(`Failure report written → ${filepath}`);
     } catch (writeErr) {
@@ -1889,6 +1922,10 @@ export async function runPersonaFlow({
       error: shortMsg,
       assertions: runAssertions,
       metrics: runMetrics,
+      // Drain again here in case the failure happened so fast the catch-side
+      // drain hasn't run (e.g. recorder.writeToFile threw). The internal
+      // promise chain is idempotent — extra drain() calls are no-ops.
+      costSummary: costTracker.summary(),
     };
   }
 }

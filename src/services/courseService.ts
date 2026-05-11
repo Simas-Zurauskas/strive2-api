@@ -95,6 +95,14 @@ Apply a primary-activity test for multi-intent goals (when a goal could plausibl
 - "Become fluent in conversational Japanese for travel" → fluency.
 - "Gasu" / "fre fire" / unparseable fragments → master with confidence: low.
 
+Workplace deliverables also count as build (commonly mis-classified as master because the topic name is prominent — DON'T fall for it):
+- "Learn Kubernetes for a production migration at work, already know Docker basics" → build (the migration is the deliverable).
+- "Learn Spring Boot to refactor our payments service" → build (the refactor is the deliverable).
+- "Learn Terraform to set up our staging infrastructure pipeline" → build (the pipeline is the deliverable).
+- "Learn Rust to port our API server" → build (the port is the deliverable).
+- "Learn Snowflake for our data-warehouse migration this quarter" → build (the migration is the deliverable).
+The signal is a named workplace artifact ("our X", "the X migration / rollout / refactor / port") that the learning is in service of. If the goal mentions ONLY the topic with no workplace deliverable ("master Kubernetes", "deeply understand Terraform"), classify as master.
+
 Also extract a short, learner-facing NOUN PHRASE for chip display (4-10 words, concrete, quotes the learner's own phrasing when present):
 - "become a YouTuber making cooking videos" → "your cooking YouTube channel"
 - "pass the CPA audit exam in October" → "the CPA audit exam"
@@ -203,14 +211,14 @@ Question types — pick the best type for each question:
 
 Each question must have a unique id (q1, q2, q3, etc).
 
-Goal-type tilt — the learner's goal has been pre-classified into one of master | monetize | pass | build | fluency, and the goalType is included in the user message. Adjust your questions so they elicit information specific to that intent shape:
+Goal-type tilt — the learner's goal has been pre-classified into one of master | monetize | pass | build | fluency, and the goalType is included in the user message. The user message ALSO repeats the tilt directive specific to this goal — that directive is non-negotiable. Adjust your questions so they elicit information specific to that intent shape:
 - master — keep the questions general (background, prior tools, focus areas, learning format). This is the default behavior.
-- monetize — at least one question must elicit the learner's PRODUCT, NICHE, AUDIENCE, or CHANNELS. Other questions can ask about current revenue, marketing budget, or stage. Wrong: "What topics interest you most?" Right: "What's your product or niche, and who are you trying to reach?"
-- pass — at least one question must elicit the EXAM NAME and (if not already in the goal) the DATE or DEADLINE. Other questions can ask about weak topics, past papers available, target score. Wrong: "How experienced are you?" Right: "Which exam, and what's your test date?"
-- build — at least one question must elicit the PROJECT SCOPE or specific deliverable detail. Other questions can ask about tech-stack constraints, MVP deadline, or target users. Wrong: "What concepts interest you?" Right: "What's the simplest version of your project that you'd ship first?"
-- fluency — at least one question must elicit the TARGET CEFR LEVEL or fluency target (conversational, business, academic, etc.) and the learner's CURRENT level. Other questions can ask about practice time, immersion context, or specific scenarios.
+- monetize — at LEAST ONE question MUST elicit the learner's PRODUCT, NICHE, AUDIENCE, or CHANNELS. Other questions can ask about current revenue, marketing budget, or stage. ❌ Wrong: "What topics interest you most?" ✅ Right: "What's your product or niche, and who are you trying to reach?"
+- pass — at LEAST ONE question MUST elicit the EXAM NAME and (if not already in the goal) the DATE or DEADLINE. Other questions can ask about weak topics, past papers available, target score. ❌ Wrong: "How experienced are you?" ✅ Right: "Which exam, and what's your test date?"
+- build — at LEAST ONE question MUST elicit the PROJECT SCOPE or specific deliverable detail (the named project / migration / refactor / port the learner is shipping). Other questions can ask about tech-stack constraints, MVP deadline, or target users. ❌ Wrong: "What concepts interest you?" ✅ Right: "What's the simplest version of your project that you'd ship first?" or "What's the minimum migration milestone for week 2?"
+- fluency — at LEAST ONE question MUST elicit BOTH the TARGET CEFR LEVEL or fluency target (conversational A2, business B2, academic C1, etc.) AND the learner's CURRENT level. Other questions can ask about practice time, immersion context, or specific scenarios. ❌ Wrong: "How much time can you dedicate per week?" alone. ✅ Right: "What's your current level (A1 / A2 / B1 / B2 / C1) and the level you're targeting?"
 
-The hard contract — at least one text question — still applies for every goalType.`;
+Self-check before emitting: open your generated questions and locate the tilt-required content for THIS goalType. If it's missing, rewrite. The hard contract — at least one text question — still applies for every goalType.`;
 
 // Tool schema for the clarify generation. Mirrors `clarifyOutputSchema` so
 // the tool_use payload passes Zod validation after parsing. Hand-written
@@ -251,15 +259,38 @@ const CLARIFY_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
+// Per-goalType tilt directive duplicated into the user message. The
+// system-prompt tilt section is comprehensive but lives ~200 lines deep —
+// in production we observed Haiku quietly dropping the fluency/build/pass
+// MUST-elicit rules. Repeating the rule for THIS goal in the user message
+// (the last thing the model reads before generating) raises adherence
+// without inflating the cached system prompt for other goalTypes. Wording
+// stays imperative: "MUST" + a concrete-form example.
+const CLARIFY_USER_MESSAGE_TILT_DIRECTIVE: Record<GoalType, string> = {
+  master:
+    'No special tilt — keep the questions general (background, prior tools, focus areas, learning format).',
+  monetize:
+    'TILT REQUIRED for goalType=monetize: at LEAST ONE question MUST elicit the learner\'s PRODUCT, NICHE, AUDIENCE, or CHANNELS by name. Example shape: "What\'s your product or niche, and who are you trying to reach?"',
+  pass:
+    'TILT REQUIRED for goalType=pass: at LEAST ONE question MUST elicit the EXAM NAME (if not already stated) and the TEST DATE / DEADLINE. Example shape: "Which exam, and what\'s your test date?"',
+  build:
+    'TILT REQUIRED for goalType=build: at LEAST ONE question MUST elicit the SPECIFIC DELIVERABLE — the project / migration / refactor / port the learner is shipping — and its scope or first milestone. Example shape: "What\'s the deliverable (the project / migration / system) and the first milestone you\'d ship?"',
+  fluency:
+    'TILT REQUIRED for goalType=fluency: at LEAST ONE question MUST elicit BOTH the learner\'s CURRENT CEFR level AND their TARGET CEFR level (or named fluency target like "business" / "conversational" / "academic"). Example shape: "What\'s your current level (A1 / A2 / B1 / B2 / C1) and the level you\'re targeting?"',
+};
+
 export const clarifyCourse = async (params: { goal: string; goalType?: GoalType }): Promise<ClarifyOutput> => {
   const goal = sanitizePromptInput(params.goal);
   const goalType = params.goalType ?? 'master';
 
-  // The user message carries goal + goalType so the system prompt's tilt
-  // section can act on it. Pre-feature courses that don't pass `goalType`
-  // default to `master`, which the prompt explicitly maps to current
-  // behavior — no regression on the working path.
-  const userMessage = `Learning goal: ${goal}\n\nGoal type: ${goalType}`;
+  // The user message carries goal + goalType + the per-goalType tilt
+  // directive. The directive is duplicated from the system prompt's tilt
+  // section (which lives further from the model's attention) — repeating it
+  // here raises adherence on goalTypes other than master (observed Haiku
+  // dropping fluency/build/pass MUST-elicit rules). Pre-feature courses
+  // that don't pass `goalType` default to `master`, whose directive is the
+  // explicit "no tilt" line — no regression on the working path.
+  const userMessage = `Learning goal: ${goal}\n\nGoal type: ${goalType}\n\n${CLARIFY_USER_MESSAGE_TILT_DIRECTIVE[goalType]}`;
 
   // Raw Anthropic SDK (not LangChain `.withStructuredOutput`) so we keep the
   // explicit tool_use contract and targeted cache breakpoint.

@@ -265,7 +265,9 @@ describe('getOrCreateProfile', () => {
     const user = await makeUser();
     const a = await getOrCreateProfile(user._id.toString());
     const b = await getOrCreateProfile(user._id.toString());
-    expect(String(a._id)).toBe(String(b._id));
+    expect(String((a as unknown as { _id: unknown })._id)).toBe(
+      String((b as unknown as { _id: unknown })._id),
+    );
     expect(await UserGamificationModel.countDocuments({ userId: user._id })).toBe(1);
   });
 });

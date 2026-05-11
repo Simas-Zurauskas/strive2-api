@@ -16,6 +16,7 @@ import mongoose from 'mongoose';
 import { setupTestDb } from '../../test-helpers/db';
 import { makeUser, makeCourse } from '../../test-helpers/factories';
 import UserModuleQuizProgressModel from '@models/UserModuleQuizProgressModel';
+import UserLessonProgressModel from '@models/UserLessonProgressModel';
 
 import {
   getCourseQuizProgress,
@@ -284,16 +285,14 @@ describe('getUnattemptedQuizzes', () => {
     const user = await makeUser();
     const course = await seedCourse({ userId: user._id, modules: 1 });
     // Complete the one lesson
-    await import('@models/UserLessonProgressModel').then(async (m) => {
-      await m.default.create({
-        userId: user._id,
-        courseId: course._id,
-        moduleIndex: 0,
-        lessonIndex: 0,
-        status: 'completed',
-        lastAccessedAt: new Date(),
-        completedAt: new Date(),
-      });
+    await UserLessonProgressModel.create({
+      userId: user._id,
+      courseId: course._id,
+      moduleIndex: 0,
+      lessonIndex: 0,
+      status: 'completed',
+      lastAccessedAt: new Date(),
+      completedAt: new Date(),
     });
 
     const result = await getUnattemptedQuizzes({ userId: user._id.toString() });
@@ -305,8 +304,7 @@ describe('getUnattemptedQuizzes', () => {
     const user = await makeUser();
     const course = await seedCourse({ userId: user._id, modules: 1 });
     // Complete lesson + attempt quiz
-    const m = await import('@models/UserLessonProgressModel');
-    await m.default.create({
+    await UserLessonProgressModel.create({
       userId: user._id,
       courseId: course._id,
       moduleIndex: 0,
@@ -344,8 +342,7 @@ describe('getUnattemptedQuizzes', () => {
         ],
       },
     });
-    const m = await import('@models/UserLessonProgressModel');
-    await m.default.create({
+    await UserLessonProgressModel.create({
       userId: user._id,
       courseId: course._id,
       moduleIndex: 0,
@@ -363,8 +360,7 @@ describe('getUnattemptedQuizzes', () => {
   test('archived course is excluded', async () => {
     const user = await makeUser();
     const course = await seedCourse({ userId: user._id, modules: 1, status: 'archived' });
-    const m = await import('@models/UserLessonProgressModel');
-    await m.default.create({
+    await UserLessonProgressModel.create({
       userId: user._id,
       courseId: course._id,
       moduleIndex: 0,

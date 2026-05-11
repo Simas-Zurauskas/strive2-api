@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, test, expect, vi } from 'vitest';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request, RequestHandler, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { setupTestDb } from '../../test-helpers/db';
 import { makeUser, UserModel } from '../../test-helpers/factories';
@@ -41,7 +41,7 @@ const buildReqRes = (params: { authHeader?: string; userId?: string } = {}) => {
 };
 
 const runMiddleware = (
-  handler: ReturnType<typeof protect>,
+  handler: RequestHandler,
   req: Request,
   res: Response,
   next: NextFunction,
@@ -50,7 +50,7 @@ const runMiddleware = (
     const wrappedNext = ((err?: unknown) => {
       if (err) reject(err);
       else {
-        (next as ReturnType<typeof vi.fn>)();
+        (next as () => void)();
         resolve();
       }
     }) as NextFunction;

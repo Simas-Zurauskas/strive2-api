@@ -1,5 +1,6 @@
 import { BaseMessage, BaseMessageLike } from '@langchain/core/messages';
 import { Annotation, messagesStateReducer } from '@langchain/langgraph';
+import { GoalType } from '@lib/constants';
 
 /**
  * Session attachment shape carried through agent state. Only the fields
@@ -30,6 +31,9 @@ export const StateAnnotation = Annotation.Root({
   courseGoal: Annotation<string>(),
   lessonContent: Annotation<string>(),
   courseDepth: Annotation<string>(),
+  // `null` for legacy pre-classifier courses; the prompt builder defaults
+  // it to `master` (the classifier's own safe default).
+  goalType: Annotation<GoalType | null>(),
   learnerContext: Annotation<string>(),
 
   // All session-scoped attachments, loaded from the chat doc and

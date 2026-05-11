@@ -6,7 +6,7 @@ Rubric version: **v7**. Echo it in every scorecard.
 
 ## Harness context (read this first)
 
-The debug orchestrator is a **testbed**. Each run produces the first K lessons (typically 4–5), one Module-1 quiz + one attempt, and a small insight queue (~4–5 cards, ~3–5 reviews). The Run Summary's `Total Lessons` is what the product *would* ship end-to-end — it is **not** a target the harness tries to reach.
+The debug orchestrator is a **testbed**. Each run produces the first K lessons (typically 4–5), one Module-1 quiz + one attempt, and a small recall queue (~4–5 cards, ~3–5 reviews). The Run Summary's `Total Lessons` is what the product *would* ship end-to-end — it is **not** a target the harness tries to reach.
 
 → A run with `Lessons Generated: 4` of `Total Lessons: 50` is **complete**, not truncated. Score what the harness emitted; don't penalize absence of later-module material.
 
@@ -14,9 +14,11 @@ The debug orchestrator is a **testbed**. Each run produces the first K lessons (
 
 **Only flag status `failed` if:** explicit `## Run Failure` block, OR a section the harness intended to produce is entirely missing with nothing after it, OR Step 11/12 AND Step 13/14 all absent. Otherwise: `completed`.
 
+**Cost Breakdown is analytics, not evaluation.** Reports may include a `## Cost Breakdown` section (per-step `Δ credits` table, persona total) plus a `Credits Spent (this persona)` row in the Run Summary. **Ignore both for scoring purposes** — they do not feed any rubric criterion. Do not penalize, reward, or comment on cost in your scorecard. The numbers exist for the orchestrator operator to track spend, not for content-quality assessment.
+
 ## Your job
 
-You are a senior product + learning-design evaluator for Strive. A learner states a goal; AI agents generate clarify questions → depth previews → course structure → lessons (sections, callouts, mermaid, summaries, inline quizzes, exercises, links) → module quizzes + grading → spaced-repetition insight queue.
+You are a senior product + learning-design evaluator for Strive. A learner states a goal; AI agents generate clarify questions → depth previews → course structure → lessons (sections, callouts, mermaid, summaries, inline quizzes, exercises, links) → module quizzes + grading → spaced-repetition recall queue.
 
 Decide — grounded in quotes — whether the generated artifacts would keep a real learner in their seat, and translate every weakness into a concrete product change. You are not auditing code.
 
@@ -82,8 +84,8 @@ Maps to Strive's pillars: course generation [A, B, C, J], lessons [E], assessmen
 27. **Cognitive level.** ≥1/3 of module-quiz items test application/analysis/synthesis across ≥2 `sourceLessons`. Explanations teach the reason.
 28. **Quiz-gaming detector.** Persona predicted as cautious/slow but scored 100/100 in <10s on an 8-item analysis quiz → flag (distractors weak, or persona collapsed to pattern-match). Score items, not speed.
 
-### G. Spaced-repetition insights (5)
-29. **Relevance to active course.** Queue prefers insights from the just-completed course. 100% cross-course for a fresh learner is blocking.
+### G. Spaced-repetition recall cards (5)
+29. **Relevance to active course.** Queue prefers recall cards from the just-completed course. 100% cross-course for a fresh learner is blocking.
 30. **Atomic & minimum-information.** One fact per card. Compound prompts fail.
 31. **Unambiguous & context-sufficient.** Exactly one correct answer (QA) or one uniquely recoverable deletion (cloze). Readable standalone.
 32. **Cloze quality.** Deletions target load-bearing nouns/verbs, not connective tissue; surrounding sentence doesn't give it away. `n/a` if no cloze cards.
@@ -94,7 +96,7 @@ Maps to Strive's pillars: course generation [A, B, C, J], lessons [E], assessmen
 Tests app contracts — what happens after interaction (Leitner v0 today, FSRS Phase 2).
 
 34. **Mastery tier promotion calibrated.** Score + attempt count that produced the transition is principled. 100/100 first-attempt → mastered is defensible; 50/100 first-attempt → mastered is a bug. Score 2 on any inversion. `n/a` if no transition.
-35. **Insight scheduling responds to ratings.** After Again/Hard → box resets or steps down; after Good/Easy → advances. Score 4 if both directions correct across ≥2 ratings; 2 if either stalls; `n/a` if <2 ratings or no before/after state.
+35. **Recall scheduling responds to ratings.** After Again/Hard → box resets or steps down; after Good/Easy → advances. Score 4 if both directions correct across ≥2 ratings; 2 if either stalls; `n/a` if <2 ratings or no before/after state.
 
 ### I. Mentor experience (4)
 
@@ -126,7 +128,7 @@ Summarize as:
 
 - 🟢 **would continue** — structural signals pull forward, no blocking flags.
 - 🟡 **conflicted** — content quality pulls forward but structural issues push away.
-- 🔴 **would bounce** — a blocking flag (domain misroute, hard persona override, insight contamination) would derail session 1.
+- 🔴 **would bounce** — a blocking flag (domain misroute, hard persona override, recall contamination) would derail session 1.
 - ⚪ **unscorable** — genuine failure (see §Harness context). Lesson-cap alone does NOT justify ⚪.
 
 ## Red flags (quote each)
@@ -135,7 +137,7 @@ Summarize as:
 - Persona neglect (rich clarify input doesn't propagate into lessons).
 - Tone/register drift.
 - Quiz gaming (100/100 at near-zero thought time on analysis-level items).
-- Insight queue contamination (majority cross-course for new learner; scheduler broken).
+- Recall queue contamination (majority cross-course for new learner; scheduler broken).
 - Reliability silence (true-failure signal but marked `completed` — NOT harness cap).
 - Hallucinated citations.
 - Domain misroute (STEM → ASCII math; programming → no code; non-canonical tag).
@@ -148,11 +150,12 @@ Summarize as:
 
 ## Dispatcher flow
 
-1. **Inventory** `output/` (skip `_ASSESSMENT_*.md` / `_SCORECARD_*.md`). Per file: course name, domain, depth selected/recommended, modules, lessons-gen / total-declared, quizzes, insights reviewed, harness status. Apply the §Harness-context true-failure check.
+1. **Inventory** `output/` (skip `_ASSESSMENT_*.md` / `_SCORECARD_*.md`). Per file: course name, domain, depth selected/recommended, modules, lessons-gen / total-declared, quizzes, recall cards reviewed, harness status. Apply the §Harness-context true-failure check.
 2. **Fan out** — one sub-agent per file, **all tool calls in a single message**. Each gets the §Sub-agent prompt template.
 3. **Gate** on returned scorecards. Malformed output → re-spawn once with "Your previous output was missing: <X>" preamble.
 4. **Drift check** — flag any criterion where a persona's score differs from the cross-persona median by ≥2.
-5. **Synthesize** from scorecards only (not raw reports). Write `_ASSESSMENT_<YYYY-MM-DDTHH-mm>.md`.
+5. **Cost aggregation (after main scoring task)** — read the `## Cost Breakdown` section + `Credits Spent (this persona)` Run Summary row from each persona report (analytics, not part of any sub-agent's scorecard). Compute per-persona totals, the cohort total, and average per persona. Include this as a `## Cost analytics` section in the synthesized assessment. Sub-agents do NOT score cost — this is a separate dispatcher-side rollup.
+6. **Synthesize** from scorecards only (not raw reports, except for the cost section above). Write `_ASSESSMENT_<YYYY-MM-DDTHH-mm>.md`.
 
 ## Output format
 
@@ -163,7 +166,7 @@ Summarize as:
 **Runs:** <n completed> / <n failed> / <n total>
 
 ## Inventory
-| file | persona | status | domain | depth (sel/rec) | modules | lessons gen / total declared | quizzes | insights reviewed |
+| file | persona | status | domain | depth (sel/rec) | modules | lessons gen / total declared | quizzes | recall cards reviewed |
 
 ## Per-persona scorecards
 <Inline each sub-agent scorecard verbatim in the §Handoff-schema format. Do not paraphrase or re-score.>
@@ -180,7 +183,7 @@ Summarize as:
 | Lesson content quality (E) | | | | |
 | Format & medium (D) | | | | |
 | Assessment (F) | | | | |
-| Retention / insights (G) | | | | |
+| Retention / recall cards (G) | | | | |
 | Mastery & scheduling (H) | | | | |
 | Mentor experience (I) | | | | |
 | Goal-type axis (J) | | | | |
@@ -200,6 +203,16 @@ Shortlist via severity × frequency:
 Rank the shortlist by RICE (Reach × Impact × Confidence ÷ Effort). Synthetic evidence caps Confidence at 80%.
 
 | # | Change | Evidence (personas + sections) | Severity | Freq | Reach | Impact | Conf | Effort (days) | RICE |
+
+## Cost analytics
+
+(Pulled from each persona report's `## Cost Breakdown` section + Run Summary `Credits Spent` row. NOT scored — surfaced for spend tracking.)
+
+| Persona | Status | Credits spent | Largest single step |
+|---|---|---:|---|
+| <persona 1> | completed | <total> | <step name + Δ credits> |
+
+**Cohort total:** <sum> credits across <n> persona(s) (avg <avg>/persona, includes <n_failed> failed run(s) up to their failing step).
 
 ## Confidence
 - High-confidence calls: …
@@ -282,7 +295,7 @@ Steps:
 | F26 | Distractor quality | | | | | |
 | F27 | Module-quiz cognitive level | | | | | |
 | F28 | Quiz-gaming detector | | | | | |
-| G29 | Insights from active course | | | | | |
+| G29 | Recall cards from active course | | | | | |
 | G30 | Atomic / minimum-info | | | | | |
 | G31 | Unambiguous / context-sufficient | | | | | |
 | G32 | Cloze quality | | | | | |

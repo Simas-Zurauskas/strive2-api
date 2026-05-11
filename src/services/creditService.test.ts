@@ -47,6 +47,7 @@ import {
 } from '@services/creditService';
 import { recordUsage } from '@services/usageService';
 import UsageEventModel from '@models/UsageEventModel';
+import * as errorReporter from '@lib/errorReporter';
 
 setupTestDb();
 
@@ -404,7 +405,6 @@ describe('debitActualSpend retry exhaustion', () => {
     // Force every CAS attempt to lose by stubbing UserModel.updateOne to
     // return modifiedCount: 0 for the debit call. Use spyOn so the spy is
     // restored after the test.
-    const errorReporter = await import('@lib/errorReporter');
     const originalUpdateOne = UserModel.updateOne.bind(UserModel);
     const spy = vi.spyOn(UserModel, 'updateOne').mockImplementation(((
       filter: Record<string, unknown>,

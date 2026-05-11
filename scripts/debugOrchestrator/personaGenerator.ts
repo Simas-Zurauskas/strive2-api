@@ -9,7 +9,7 @@ import { GOAL_TYPES } from '@lib/constants';
 import type { GoalType } from '@lib/constants';
 import type { Persona } from './types';
 
-const PERSONA_SYSTEM_PROMPT = `You are generating realistic test personas for an AI-powered course creation platform. These personas will walk through the wizard (clarifying questions → depth choice → structure → optional chat refinement → accept), then through the learning experience (lessons → module quizzes → spaced-repetition insight reviews).
+const PERSONA_SYSTEM_PROMPT = `You are generating realistic test personas for an AI-powered course creation platform. These personas will walk through the wizard (clarifying questions → depth choice → structure → optional chat refinement → accept), then through the learning experience (lessons → module quizzes → spaced-repetition recall reviews).
 
 Your job is to create personas that behave like real humans interacting with this wizard. Not idealized students. Not AI-generated caricatures. Real people with real habits.
 
@@ -69,7 +69,7 @@ Return a JSON object with a "personas" array. Each persona has:
 - **personality**: How they interact with forms and tools. Specific behavioral tendencies (reads carefully vs skims, trusts recommendations vs does own thing, gives detailed text answers vs one-word answers). NOT adjective lists.
 - **priorities**: What they actually care about, stated honestly. It's OK to include contradictions ("wants depth but also wants it fast").
 - **quizStyleFlags**: A top-level object with four booleans (not inside wizardBehavior). See the per-field descriptions below.
-- **insightStyleFlags**: A top-level object with four booleans (not inside wizardBehavior). See the per-field descriptions below.
+- **recallStyleFlags**: A top-level object with four booleans (not inside wizardBehavior). See the per-field descriptions below.
 - **wizardBehavior**: An object with five fields predicting their SPECIFIC behavior across the wizard AND the post-lesson learning experience:
   - **surveyStyle**: How they'll answer the clarifying questions. E.g., "Reads all options carefully, picks conservatively on multi-select (1-2 choices). Text answers are 1-2 thoughtful sentences. Gets slightly more hasty on questions 4+."
   - **depthChoice**: What they'll pick and WHY. E.g., "Picks recommended without reading the other options. Just trusts the system." or "Picks deep_dive despite being a beginner because 'I want the real thing, not a watered-down version.'"
@@ -80,8 +80,8 @@ Return a JSON object with a "personas" array. Each persona has:
     - \`secondGuesses\`: overthinks; changes correct answers at the last moment. True for "Anxious Learner" personas; explicitly false when quizAttemptStyle says "doesn't second-guess".
     - \`eliminates\`: eliminates obviously-wrong distractors before picking. True for "Motivated Professional" and "Skeptic" personas.
     - \`guessesWhenUnsure\`: random pick on low-confidence items. True for "Overambitious Beginner" (fakes confidence) and some "Minimum-Effort" personas.
-  - **insightReviewStyle**: How they'll review retrieval-practice cards (Q&A / cloze) afterwards. Cards show in two modes — 'tap-reveal' (see prompt, reveal answer, self-rate Again/Hard/Good/Easy) and 'typed-recall' (type the answer, get graded 0..1, then rate). Mention: which mode they prefer, whether they type carefully or guess briefly, whether they self-rate honestly/generously/harshly, whether they skip hard cards. E.g., "Prefers typed-recall; types partial but honest attempts; rates generously when close. Never skips." / "Sticks with tap-reveal; self-rates Easy even when hazy; skips the first card that feels hard." / "Types carefully in typed-recall mode; rates honestly; occasionally skips when tired."
-  - **insightStyleFlags**: Structured flags derived from insightReviewStyle. Four booleans — \`struggles\` and \`articulate\` are mutually exclusive (set exactly one); \`generous\` and \`harsh\` are mutually exclusive (set at most one).
+  - **recallReviewStyle**: How they'll review retrieval-practice cards (Q&A / cloze) afterwards. Cards show in two modes — 'tap-reveal' (see prompt, reveal answer, self-rate Again/Hard/Good/Easy) and 'typed-recall' (type the answer, get graded 0..1, then rate). Mention: which mode they prefer, whether they type carefully or guess briefly, whether they self-rate honestly/generously/harshly, whether they skip hard cards. E.g., "Prefers typed-recall; types partial but honest attempts; rates generously when close. Never skips." / "Sticks with tap-reveal; self-rates Easy even when hazy; skips the first card that feels hard." / "Types carefully in typed-recall mode; rates honestly; occasionally skips when tired."
+  - **recallStyleFlags**: Structured flags derived from recallReviewStyle. Four booleans — \`struggles\` and \`articulate\` are mutually exclusive (set exactly one); \`generous\` and \`harsh\` are mutually exclusive (set at most one).
     - \`struggles\`: types short, imperfect answers with gaps — a "partial" grader score is common.
     - \`articulate\`: types near-canonical quality; typically the baseline.
     - \`generous\`: self-rates tap-reveal high (Good/Easy) even when hazy.
@@ -133,7 +133,7 @@ const personaOutputSchema = z.object({
         depthChoice: z.string(),
         structureReview: z.string(),
         quizAttemptStyle: z.string(),
-        insightReviewStyle: z.string(),
+        recallReviewStyle: z.string(),
       }),
       quizStyleFlags: z.object({
         rushes: z.boolean(),
@@ -141,7 +141,7 @@ const personaOutputSchema = z.object({
         eliminates: z.boolean(),
         guessesWhenUnsure: z.boolean(),
       }),
-      insightStyleFlags: z.object({
+      recallStyleFlags: z.object({
         struggles: z.boolean(),
         articulate: z.boolean(),
         generous: z.boolean(),
@@ -228,12 +228,12 @@ export async function generatePersonas(
       !wb.depthChoice ||
       !wb.structureReview ||
       !wb.quizAttemptStyle ||
-      !wb.insightReviewStyle
+      !wb.recallReviewStyle
     ) {
       throw new Error(`Persona "${p.name}" is missing wizardBehavior fields`);
     }
     p.quizStyleFlags = normalizeQuizFlags(p.quizStyleFlags);
-    p.insightStyleFlags = normalizeInsightFlags(p.insightStyleFlags);
+    p.recallStyleFlags = normalizeRecallFlags(p.recallStyleFlags);
     if (!p.predictedGoalTypeReasoning || p.predictedGoalTypeReasoning.trim().length === 0) {
       // Reasoning is the assessor's only ground-truth anchor for scoring
       // classification accuracy — refuse silently-empty entries here so a
@@ -250,7 +250,7 @@ export async function generatePersonas(
     }
     const overrideStr = p.goalTypeOverrideTarget ? ` → override:${p.goalTypeOverrideTarget}` : '';
     console.log(
-      `${'[PersonaGen]'.magenta}   → ${p.name} [quiz: ${describeQuizFlags(p.quizStyleFlags)}, insight: ${describeInsightFlags(p.insightStyleFlags)}, goalType: ${p.predictedGoalType}${overrideStr}]`,
+      `${'[PersonaGen]'.magenta}   → ${p.name} [quiz: ${describeQuizFlags(p.quizStyleFlags)}, recall: ${describeRecallFlags(p.recallStyleFlags)}, goalType: ${p.predictedGoalType}${overrideStr}]`,
     );
   }
 
@@ -312,8 +312,8 @@ const normalizeQuizFlags = (raw: unknown): Persona['quizStyleFlags'] => {
   };
 };
 
-const normalizeInsightFlags = (raw: unknown): Persona['insightStyleFlags'] => {
-  const r = (raw ?? {}) as Partial<Record<keyof Persona['insightStyleFlags'], unknown>>;
+const normalizeRecallFlags = (raw: unknown): Persona['recallStyleFlags'] => {
+  const r = (raw ?? {}) as Partial<Record<keyof Persona['recallStyleFlags'], unknown>>;
   let struggles = toBool(r.struggles);
   let articulate = toBool(r.articulate);
   if (struggles && articulate) {
@@ -338,7 +338,7 @@ const describeQuizFlags = (f: Persona['quizStyleFlags']): string => {
   return set.length ? set.join('+') : 'none';
 };
 
-const describeInsightFlags = (f: Persona['insightStyleFlags']): string => {
+const describeRecallFlags = (f: Persona['recallStyleFlags']): string => {
   const set = (['struggles', 'articulate', 'generous', 'harsh'] as const).filter((k) => f[k]);
   return set.length ? set.join('+') : 'none';
 };

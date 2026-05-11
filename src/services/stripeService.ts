@@ -221,6 +221,7 @@ export const createSubscriptionCheckout = async ({
     line_items: [{ price: priceId, quantity: 1 }],
     success_url: buildSuccessUrl({ kind: 'subscription' }),
     cancel_url: buildCancelUrl(),
+    allow_promotion_codes: true,
     // Stripe Tax computes VAT automatically based on the customer's address.
     // Required for EU consumer sales (OSS rules from euro one). Toggled by
     // STRIPE_TAX_ENABLED env so dev / testing accounts without Stripe Tax
@@ -315,6 +316,7 @@ export const createTopupCheckout = async ({
     // Canceled top-up sends user back to where they probably clicked from —
     // the Billing tab under Profile.
     cancel_url: `${FRONTEND_URL}/profile?tab=billing`,
+    allow_promotion_codes: true,
     // Same Stripe Tax stance as subscription checkout. See note there.
     automatic_tax: { enabled: STRIPE_TAX_ENABLED },
     billing_address_collection: STRIPE_TAX_ENABLED ? 'required' : 'auto',

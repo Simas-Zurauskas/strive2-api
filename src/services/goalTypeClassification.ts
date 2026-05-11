@@ -27,9 +27,27 @@ export const GOAL_TYPE_GUIDANCE: Record<GoalType, string> = {
   pass:
     "exam, certification, school grade, standardized test, professional license, driving manual. Usually mentions a NAMED test (CPA, JEE, NEET, BITSAT, UPSC, CAT, AWS-SAA, GMAT, MCAT, SAT) or a date (\"by October\", \"before finals\").",
   build:
-    "build / ship / launch / create / make a SPECIFIC NAMED PROJECT. The deliverable is the project (a chat app, a SaaS, a portfolio site, a game, a Chrome extension), not the topic.",
+    "build / ship / launch / create / make / migrate / port / refactor a SPECIFIC NAMED DELIVERABLE. The deliverable can be a personal project (chat app, SaaS, portfolio site, game, Chrome extension) OR a workplace task (production migration, infrastructure rollout, system port, payments refactor, internal tool). Trigger phrases include 'for a migration at work', 'to ship our X', 'to refactor our Y', 'to set up our Z', 'for a production rollout'. The deliverable, not the topic, is the goal — the learner is learning Kubernetes/Spring/Terraform AS A MEANS to a named end.",
   fluency:
     "natural-language acquisition (Spanish, Japanese, Mandarin, German, French, ASL, etc.). NOT communication skills in the learner's own language — that's `master` over a `life-skills` domain.",
+};
+
+// One-sentence behavioral lens injected into mentor system context (both
+// lesson and course scope). Distinct from GOAL_TYPE_GUIDANCE (classifier
+// disambiguation) and GOAL_TYPE_STRUCTURE_GUIDANCE (curriculum shaping):
+// this map shapes how the mentor REPLIES — what to prioritize, where to
+// steer the learner — not what the curriculum looks like.
+export const GOAL_TYPE_MENTOR_LENS: Record<GoalType, string> = {
+  master:
+    'Learner wants depth and understanding. Conceptual tangents and cross-module connections are welcome when they sharpen the mental model.',
+  monetize:
+    "Learner wants revenue, audience, or clients. Prefer tactical next-actions over theory; tie examples to the learner's named niche / product / channel when present in the goal.",
+  pass:
+    'Learner is preparing for an exam or certification. Bias toward retrieval practice and exam-traps; steer to Module Quizzes or the Recall queue over re-explanation when the question is testable.',
+  build:
+    'Learner is shipping a specific project. Anchor answers to that project; prefer concrete decisions and code-level specifics over background theory.',
+  fluency:
+    'Learner is acquiring a natural language. Encourage attempts in the target language and active recall; the Recall queue is the right surface for vocabulary drilling.',
 };
 
 export const fallbackClassification = (goal: string): GoalTypeClassification => ({

@@ -69,7 +69,7 @@ export const createVerifiedTestUser = async ({
 
 /**
  * Best-effort cleanup. DELETE /api/auth/delete-account cascades across
- * courses, lessons, progress, insights, chat, gamification, and S3 assets
+ * courses, lessons, progress, recall cards, chat, gamification, and S3 assets
  * (see `services/courseCleanupService.ts`). We swallow failures with a
  * warning so one flaky teardown doesn't mask another persona's result.
  */

@@ -103,6 +103,7 @@ export const chat: NodeFunction = async (state, config) => {
     moduleTitle: state.moduleTitle,
     courseGoal: state.courseGoal,
     courseDepth: state.courseDepth,
+    goalType: state.goalType ?? null,
     lessonContent: state.lessonContent,
     learnerContext: state.learnerContext ?? '',
   });

@@ -5,10 +5,10 @@ import type {
   ModuleQuizForLearner,
   QuizAttemptResult,
 } from './types';
-import type { GetInsightQueueResult, InsightStats } from '@services/insightQueueService';
-import type { GradeResult } from '@services/insightGradingService';
-import type { InsightMode, InsightRating } from '@lib/insightConstants';
-import type { IUserInsightProgress } from '@models/UserInsightProgressModel';
+import type { GetRecallQueueResult, RecallStats } from '@services/recallQueueService';
+import type { GradeResult } from '@services/recallGradingService';
+import type { RecallMode, RecallRating } from '@lib/recallConstants';
+import type { IUserRecallProgress } from '@models/UserRecallProgressModel';
 
 interface ApiResponse<T = unknown> {
   data: T;
@@ -255,58 +255,58 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
       return data;
     },
 
-    // ── Insights ────────────────────────────────────────
-    async getInsightQueue(): Promise<GetInsightQueueResult> {
-      const { data } = await request<GetInsightQueueResult>({ method: 'GET', path: '/api/insight/queue' });
+    // ── Recall cards ────────────────────────────────────────
+    async getRecallQueue(): Promise<GetRecallQueueResult> {
+      const { data } = await request<GetRecallQueueResult>({ method: 'GET', path: '/api/recall/queue' });
       return data;
     },
 
-    async getInsightStats(): Promise<InsightStats> {
-      const { data } = await request<InsightStats>({ method: 'GET', path: '/api/insight/stats' });
+    async getRecallStats(): Promise<RecallStats> {
+      const { data } = await request<RecallStats>({ method: 'GET', path: '/api/recall/stats' });
       return data;
     },
 
-    async setInsightMode({ insightId, mode }: { insightId: string; mode: InsightMode }): Promise<{ mode: InsightMode }> {
-      const { data } = await request<{ mode: InsightMode }>({
+    async setRecallMode({ recallCardId, mode }: { recallCardId: string; mode: RecallMode }): Promise<{ mode: RecallMode }> {
+      const { data } = await request<{ mode: RecallMode }>({
         method: 'POST',
-        path: `/api/insight/${insightId}/mode`,
+        path: `/api/recall/${recallCardId}/mode`,
         body: { mode },
       });
       return data;
     },
 
-    async gradeInsight({ insightId, userAnswer }: { insightId: string; userAnswer: string }): Promise<GradeResult> {
+    async gradeRecall({ recallCardId, userAnswer }: { recallCardId: string; userAnswer: string }): Promise<GradeResult> {
       const { data } = await request<GradeResult>({
         method: 'POST',
-        path: `/api/insight/${insightId}/grade`,
+        path: `/api/recall/${recallCardId}/grade`,
         body: { userAnswer },
       });
       return data;
     },
 
-    async rateInsight({
-      insightId,
+    async rateRecall({
+      recallCardId,
       rating,
       typedMatch,
     }: {
-      insightId: string;
-      rating: InsightRating;
+      recallCardId: string;
+      rating: RecallRating;
       typedMatch?: number | null;
-    }): Promise<Pick<IUserInsightProgress, 'box' | 'state' | 'reps' | 'lapses' | 'nextDue' | 'lastReview'>> {
-      const body: { rating: InsightRating; typedMatch?: number | null } = { rating };
+    }): Promise<Pick<IUserRecallProgress, 'box' | 'state' | 'reps' | 'lapses' | 'nextDue' | 'lastReview'>> {
+      const body: { rating: RecallRating; typedMatch?: number | null } = { rating };
       if (typedMatch !== undefined) body.typedMatch = typedMatch;
-      const { data } = await request<Pick<IUserInsightProgress, 'box' | 'state' | 'reps' | 'lapses' | 'nextDue' | 'lastReview'>>({
+      const { data } = await request<Pick<IUserRecallProgress, 'box' | 'state' | 'reps' | 'lapses' | 'nextDue' | 'lastReview'>>({
         method: 'POST',
-        path: `/api/insight/${insightId}/rate`,
+        path: `/api/recall/${recallCardId}/rate`,
         body,
       });
       return data;
     },
 
-    async skipInsight({ insightId }: { insightId: string }): Promise<{ nextDue: Date }> {
+    async skipRecall({ recallCardId }: { recallCardId: string }): Promise<{ nextDue: Date }> {
       const { data } = await request<{ nextDue: Date }>({
         method: 'POST',
-        path: `/api/insight/${insightId}/skip`,
+        path: `/api/recall/${recallCardId}/skip`,
         body: {},
       });
       return data;
@@ -341,6 +341,28 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
         path: `/api/course/${courseId}/lesson/${moduleIndex}/${lessonIndex}/mentor/chat`,
         body: { messages: [{ role: 'user', content: message }] },
       });
+    },
+
+    // ── Billing (cost analytics for the orchestrator) ───
+    //
+    // Powers the per-step + per-persona cost breakdown in the markdown
+    // report. The orchestrator snapshots this at every step boundary;
+    // the delta between snapshots = credits spent on that step.
+    //
+    // The /api/billing/summary endpoint returns `data: { credits: { allowance,
+    // bonus, total, ... }, plan, ... }`. We narrow to the credit fields the
+    // orchestrator consumes; a future field addition on the server side
+    // won't break this caller.
+    async getBillingSummary(): Promise<{ allowance: number; bonus: number; total: number }> {
+      const { data } = await request<{ credits: { allowance: number; bonus: number; total: number } }>({
+        method: 'GET',
+        path: '/api/billing/summary',
+      });
+      return {
+        allowance: data.credits.allowance,
+        bonus: data.credits.bonus,
+        total: data.credits.total,
+      };
     },
 
     // ── Auth (account teardown) ─────────────────────────
