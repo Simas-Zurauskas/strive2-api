@@ -1,8 +1,8 @@
 # Debug Orchestrator — End-to-End Learning Flow Testing
 
-Generates AI personas with different learning needs and walks each one through the full learner journey — course wizard, lesson generation, module quizzes, and spaced-repetition insight reviews — recording every input/output to per-persona markdown reports.
+Generates AI personas with different learning needs and walks each one through the full learner journey — course wizard, lesson generation, module quizzes, and spaced-repetition recall reviews — recording every input/output to per-persona markdown reports.
 
-Each persona runs against its own auto-provisioned db user, so gamification, insight queues, and per-user state are genuinely isolated between runs.
+Each persona runs against its own auto-provisioned db user, so gamification, recall queues, and per-user state are genuinely isolated between runs.
 
 ## Prerequisites
 
@@ -18,11 +18,11 @@ cd api
 # Minimal — 1 persona, wizard only (no lessons)
 yarn debug:orchestrator --concurrency 1 --personas 1 --lessons 0
 
-# Wizard + lessons + insight review
-yarn debug:orchestrator --concurrency 3 --personas 5 --chat --lessons 2 --insights
+# Wizard + lessons + recall review
+yarn debug:orchestrator --concurrency 3 --personas 5 --chat --lessons 2 --recall
 
-# Full end-to-end: wizard + lessons + quizzes + insight review + mentor probes
-yarn debug:orchestrator --concurrency 5 --personas 5 --chat --lessons 4 --quizzes --insights --mentor
+# Full end-to-end: wizard + lessons + quizzes + recall review + mentor probes
+yarn debug:orchestrator --concurrency 5 --personas 5 --chat --lessons 4 --quizzes --recall --mentor
 ```
 
 No user credentials are passed — the orchestrator creates and tears down a separate account per persona.
@@ -37,7 +37,7 @@ No user credentials are passed — the orchestrator creates and tears down a sep
 | `--api-url`     | optional | API base URL (default: `http://localhost:4000`)                 |
 | `--chat`        | optional | Include structure review chat step (off by default)             |
 | `--quizzes`     | optional | Generate + submit module quizzes after lessons (off by default) |
-| `--insights`    | optional | Review every insight the queue returns (off by default)         |
+| `--recall`    | optional | Review every recall the queue returns (off by default)         |
 | `--mentor`      | optional | Probe course-design + lesson mentor chats with up to 3 persona-driven turns each (off by default) |
 
 `--email` and `--password` are accepted (for shell-history backward compatibility) but ignored — a warning is printed if either is passed.
@@ -49,7 +49,7 @@ Each persona is a real, isolated db user for the duration of its run. The lifecy
 1. **Signup** — `POST /api/auth/signup` with a random email `debug-<runId>-<personaSlug>-<rand>@strive-debug.test` and a random password. The response JWT is used throughout the persona flow.
 2. **Verify in Mongo** — `UserModel.updateOne({ _id }, { $set: { emailVerified: true }, $unset: { emailVerificationToken, emailVerificationExpiry } })`. Skips the Mailjet round-trip. `requireVerified` middleware live-reads from DB per request, so the change takes effect immediately with the signup-issued token.
 3. **Run persona flow** — normal orchestrator steps 1–14 with the persona's own token.
-4. **Teardown** — `DELETE /api/auth/delete-account` (wrapped in `try/finally`). Cascades through `Course`, `LessonContent`, `UserLessonProgress`, `ModuleQuizContent`, `UserModuleQuizProgress`, `Insight`, `UserInsightProgress`, `CourseDesignChat`, `LessonMentorChat`, `LessonChunk` (+ matching Pinecone vectors when RAG is configured), `UserGamification`, `User`, and per-course S3 assets (`lessons/{courseId}/`) — see [`services/courseCleanupService.ts`](../../services/courseCleanupService.ts) for the shared primitive.
+4. **Teardown** — `DELETE /api/auth/delete-account` (wrapped in `try/finally`). Cascades through `Course`, `LessonContent`, `UserLessonProgress`, `ModuleQuizContent`, `UserModuleQuizProgress`, `Recall`, `UserRecallProgress`, `CourseDesignChat`, `LessonMentorChat`, `LessonChunk` (+ matching Pinecone vectors when RAG is configured), `UserGamification`, `User`, and per-course S3 assets (`lessons/{courseId}/`) — see [`services/courseCleanupService.ts`](../../services/courseCleanupService.ts) for the shared primitive.
 
 Emails use the RFC-6761 reserved `.test` TLD so they never collide with real inboxes. The `runId` is a per-invocation timestamp (`Date.now().toString(36)`) so two concurrent orchestrator processes don't clash.
 
@@ -74,8 +74,8 @@ For each AI-generated persona, the orchestrator runs the full learner journey:
 10. **Complete Lessons** — marks each generated lesson as completed via the progress API
 11. **Generate Module Quizzes** — for every module whose lessons were all generated in this run, triggers `POST /module-quiz/:m/generate` and fetches the quiz _(skipped unless `--quizzes`)_
 12. **Submit Quiz Attempts** — AI answers each quiz as the persona (Claude Sonnet 4.6, multiple-choice only) and posts to `/submit`; records score, mastery tier, question-by-question correctness, and next review date
-13. **Fetch Insight Queue** — GET `/api/insight/queue`; logs due/fresh/learned counts and lists every item the server returned _(skipped unless `--insights`)_
-14. **Review Insights** — walks every card the queue returned (due first, then fresh) and reviews each one. Mode (`tap-reveal` vs `typed-recall`) is chosen from the persona's `insightReviewStyle`. Tap-reveal runs `rateInsight` directly. Typed-recall generates a typed answer, hits `/grade`, maps the score to an Again/Hard/Good/Easy rating, and submits via `rateInsight` with `typedMatch`. Cards that fit the persona's "skip" profile get one deferral. Queue size is bounded server-side by `INSIGHT_QUEUE_DUE_LIMIT` + `INSIGHT_QUEUE_FRESH_LIMIT_DEFAULT`.
+13. **Fetch Recall Queue** — GET `/api/recall/queue`; logs due/fresh/learned counts and lists every item the server returned _(skipped unless `--recall`)_
+14. **Review Recall cards** — walks every card the queue returned (due first, then fresh) and reviews each one. Mode (`tap-reveal` vs `typed-recall`) is chosen from the persona's `recallReviewStyle`. Tap-reveal runs `rateRecall` directly. Typed-recall generates a typed answer, hits `/grade`, maps the score to an Again/Hard/Good/Easy rating, and submits via `rateRecall` with `typedMatch`. Cards that fit the persona's "skip" profile get one deferral. Queue size is bounded server-side by `RECALL_QUEUE_DUE_LIMIT` + `RECALL_QUEUE_FRESH_LIMIT_DEFAULT`.
 
 Because each persona has a fresh db user, Step 13 on a new run starts with `Learned: 0` — previously it always showed the shared account's accumulated history.
 
@@ -93,20 +93,20 @@ Reports include:
 
 - Persona profile (name, background, goal, personality, priorities)
 - Predicted goal type — orchestrator's ground-truth bucket for the classifier (master / monetize / pass / build / fluency) plus a one-sentence rationale. When set, the persona's `goalTypeOverrideTarget` is also surfaced ("would switch to X via the chip if given the chance").
-- Predicted behavior for all five dimensions (survey / depth / structure / quiz / insight review)
-- Run summary (duration, status, course domain, **goal type predicted/final/confidence + match flag**, lesson/quiz/insight counts)
+- Predicted behavior for all five dimensions (survey / depth / structure / quiz / recall review)
+- Run summary (duration, status, course domain, **goal type predicted/final/confidence + match flag**, lesson/quiz/recall counts)
 - Each step with timing, API responses, AI reasoning
 - Generated lesson content: block breakdown by type, code, mermaid diagrams, exercises (collapsible)
 - Module quiz: per-module score, mastery tier, next-review interval, and every question with selected vs correct option + explanation (collapsible)
-- Insight queue snapshot + per-card review log: mode, user answer (typed-recall), grade score + verdict, final rating, new Leitner box, next due date
+- Recall queue snapshot + per-card review log: mode, user answer (typed-recall), grade score + verdict, final rating, new Leitner box, next due date
 
 ## Concurrency Notes
 
-- Each persona runs against its own db user — no shared-account contention on gamification, insight progress, or rate-limited endpoints
+- Each persona runs against its own db user — no shared-account contention on gamification, recall progress, or rate-limited endpoints
 - Server-side limit: 10 concurrent jobs globally (`jobRunner.ts`)
 - Default script concurrency of 3 stays well within this limit
 - Lesson generation adds ~30–120s per lesson and quiz generation another ~20–60s per module — plan concurrency accordingly
-- Insight grading is rate-limited to 120/hour/user server-side; typed-recall reviews count against this cap. Since each persona has its own user, the cap is per-persona, not shared
+- Recall grading is rate-limited to 120/hour/user server-side; typed-recall reviews count against this cap. Since each persona has its own user, the cap is per-persona, not shared
 - `authLimiter` on `/api/auth/signup` is 30 requests / 10 minutes / IP (see [`routes/authRoutes.ts`](../../routes/authRoutes.ts)). Running 30+ personas in one 10-minute window from the same IP will hit it
 
 ## Orphan cleanup

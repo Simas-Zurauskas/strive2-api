@@ -21,8 +21,10 @@ import { lintDistractors, repairDistractors } from '@lib/ai/distractorLint';
 import { lintQuizIntegrity } from '@lib/ai/quizIntegrityLint';
 import type { LessonProgressWriter } from '@src/types/socketEvents';
 import { genLog } from '@lib/loggers';
+import { sanitizePromptInput } from '@lib/sanitize';
 import { LessonState } from '../state';
 import { interactiveOutputSchema, buildInteractiveSystemPrompt } from '../prompts';
+import { formatAnswers } from './contextLoad';
 
 // One retry max (2 total attempts). Production logs showed attempt 3 was
 // usually the same failure flavor as attempt 2 — diminishing returns. With
@@ -285,7 +287,23 @@ export const interactiveGeneration = async (state: LessonState, config?: Runnabl
       .map((b) => b.metadata!.language as string),
   )];
 
-  const humanMessage = `## Lesson content
+  // Course-level learner context. Threaded into the human message (NOT the
+  // cached system prompt) because goal + clarify answers vary per course and
+  // would otherwise have no path into the exercise. Anchors the exercise to
+  // the persona's stated artifact (project, niche, dataset, exam, target
+  // language) so we don't ship "build a generic calculator" when the learner
+  // explicitly named a logistics-app migration in clarify. Suppresses the
+  // section entirely when both fields are empty so legacy / pre-clarify
+  // courses don't get an empty header dumped into the prompt.
+  const goalLine = state.goal ? `Learning goal: ${sanitizePromptInput(state.goal)}` : '';
+  const answersBlock = state.answers && state.answers.length > 0
+    ? `Learner's answers to clarifying questions:\n${formatAnswers(state.answers)}`
+    : '';
+  const learnerContextSection = (goalLine || answersBlock)
+    ? `## Learner context\n\n${[goalLine, answersBlock].filter(Boolean).join('\n\n')}\n\n`
+    : '';
+
+  const humanMessage = `${learnerContextSection}## Lesson content
 
 ${formatBlocksForContext(state.contentBlocks)}
 

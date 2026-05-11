@@ -56,6 +56,15 @@ export const ARTIFACT_PATTERNS: { name: string; pattern: RegExp }[] = [
   // "Wait, that's / let me / I need…" — AI backtracking. Teaching prose uses
   // "Wait for…" or "Wait until…", never "Wait, that's…" at sentence start.
   { name: 'wait_backtrack', pattern: /\bWait,\s+(that('| i)s| let me| I need)\b[^.\n]*\.?/gi },
+
+  // "wait, consider these N actual options" — observed in MCQ stems where the
+  // model wrote some options, then self-corrected with a meta-instruction to
+  // the schema field. The phrase "actual options" is the LLM tell — humans do
+  // not call options "actual" in teaching prose, so the false-positive surface
+  // is essentially zero. Bounded by `[^.\n]*` like the rest so a single match
+  // never crosses sentences. Kept narrow on purpose: a generic "wait, consider"
+  // strip would over-collapse legitimate prose ("wait, consider both sides").
+  { name: 'wait_consider_actual_options', pattern: /\b(?:—\s*)?wait,?\s+consider\s+(?:these\s+)?(?:\w+\s+)?actual\s+options?\b[^.\n]*\.?/gi },
 ];
 
 /**

@@ -23,6 +23,7 @@ import { makeUser, makeCourse, makeJob, UserModel, CourseModel, JobModel } from 
 import { buildReqRes, invokeController } from '../../../test-helpers/express';
 import { AuthProvider } from '@lib/constants';
 import CreditLedgerModel from '@models/CreditLedgerModel';
+import { AppError } from '@middleware/errorMiddleware';
 
 // Mock Stripe + abuse-log + cleanupCourseContent + securityActionService.
 const { fakeCancelAllSubs, fakeRecordDeletion, fakeCleanupCourse, fakeConsumeCode } = vi.hoisted(() => ({
@@ -198,7 +199,6 @@ describe('deleteAccountController — happy paths', () => {
 
 describe('deleteAccountController — failure paths', () => {
   test('invalid OTP code → AppError; no deletion', async () => {
-    const { AppError } = await import('@middleware/errorMiddleware');
     fakeConsumeCode.mockRejectedValueOnce(
       new AppError('Confirmation code is incorrect.', {
         errorCode: 'SECURITY_CODE_INVALID',

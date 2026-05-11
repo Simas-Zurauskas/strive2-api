@@ -1,6 +1,6 @@
 import type { ICourse } from '@models/CourseModel';
 import type { CourseDepth, GoalType, GoalTypeConfidence, QuestionType } from '@lib/constants';
-import type { InsightKind, InsightMode, InsightRating } from '@lib/insightConstants';
+import type { RecallCardKind, RecallMode, RecallRating } from '@lib/recallConstants';
 
 // ── Persona (orchestrator-only) ──────────────────────────
 
@@ -25,11 +25,11 @@ export interface QuizStyleFlags {
 }
 
 /**
- * Structured insight-review flags parsed from the free-text
- * `insightReviewStyle`. Drives typed-recall answer degradation and
+ * Structured recall-review flags parsed from the free-text
+ * `recallReviewStyle`. Drives typed-recall answer degradation and
  * tap-reveal rating bias.
  */
-export interface InsightStyleFlags {
+export interface RecallStyleFlags {
   /** Types short, imperfect answers; would grade "partial" on exact-match canon. */
   struggles: boolean;
   /** Types canonical-quality answers. The stable persona baseline. */
@@ -51,7 +51,7 @@ export interface Persona {
     depthChoice: string;
     structureReview: string;
     quizAttemptStyle: string;
-    insightReviewStyle: string;
+    recallReviewStyle: string;
   };
   /**
    * Structured flags derived from the free-text behavior fields at
@@ -61,7 +61,7 @@ export interface Persona {
    * re-parsing prose.
    */
   quizStyleFlags: QuizStyleFlags;
-  insightStyleFlags: InsightStyleFlags;
+  recallStyleFlags: RecallStyleFlags;
   /**
    * Ground-truth goalType for this persona's goal — what the pre-flight
    * classifier *should* emit if it works correctly. Set by the persona
@@ -94,7 +94,7 @@ export interface OrchestratorConfig {
   outputDir: string;
   enableChatReview: boolean;
   enableQuiz: boolean;
-  enableInsights: boolean;
+  enableRecall: boolean;
   /**
    * When true, persona asks one open-ended question against the
    * course-design chat after accepting the structure (Step 8b) AND one
@@ -151,6 +151,14 @@ export interface PersonaRun {
    * regression that only slows one bucket's pipeline.
    */
   metrics?: PersonaMetrics;
+  /**
+   * Per-step credit-spend snapshots. Populated even on partial runs (each
+   * snapshot is recorded immediately after its step completes, so a
+   * failure mid-run still leaves a partial cost trail). Surfaced in the
+   * markdown report's `## Cost Breakdown` section and aggregated into the
+   * orchestrator's cohort total.
+   */
+  costSummary?: CostSummary;
 }
 
 export interface PersonaAssertions {
@@ -167,6 +175,37 @@ export interface PersonaMetrics {
   quizzesAttempted?: number;
   /** Average quiz score [0..1] across attempted module quizzes. */
   quizScoreAvg?: number;
+}
+
+// ── Cost tracking (analytics, not evaluation) ───────────
+//
+// Captured per-persona via /api/billing/summary snapshots at every step
+// boundary. NOT scored by the assessment rubric — surfaced in markdown
+// reports for cost analytics and in the cohort summary at run completion.
+
+/** One per-step cost snapshot. `deltaCredits = balanceBefore - balanceAfter`. */
+export interface CostEvent {
+  /** Step label (e.g. "Step 6: Generate Structure", "Step 9: Lesson [0/2]"). */
+  label: string;
+  /** Credit balance before this step ran. */
+  balanceBefore: number;
+  /** Credit balance after this step ran. */
+  balanceAfter: number;
+  /** Credits debited during this step. Negative would indicate a refill (rare). */
+  deltaCredits: number;
+  /** Wall-clock when the post-step snapshot was taken. */
+  ts: Date;
+}
+
+export interface CostSummary {
+  /** Credit balance at the start of the persona run (before Step 1). */
+  startBalance: number;
+  /** Credit balance at the end of the persona run (after the last step). */
+  endBalance: number;
+  /** Sum of all event deltas — total credits spent during this persona run. */
+  totalSpent: number;
+  /** Per-step events in chronological order. */
+  events: CostEvent[];
 }
 
 // ── Re-exported from real models ─────────────────────────
@@ -244,7 +283,7 @@ export interface GoalTypeOverrideRecord {
 export interface LessonContentStats {
   blockCount: number;
   blockCountsByType: Record<string, number>;
-  insightCount: number;
+  recallCardCount: number;
   linkCount: number;
 }
 
@@ -384,23 +423,23 @@ export interface LessonMentorRecord extends MentorChatProbeRecord {
   lessonName: string;
 }
 
-// ── Insight review (orchestrator-only) ───────────────────
+// ── Recall review (orchestrator-only) ───────────────────
 
-export interface InsightReviewResult {
-  insightId: string;
+export interface RecallReviewResult {
+  recallCardId: string;
   courseName: string;
   lessonName: string;
-  kind: InsightKind;
+  kind: RecallCardKind;
   prompt: string;
   canonicalAnswer: string;
-  mode: InsightMode;
+  mode: RecallMode;
   /** typed-recall only */
   userAnswer?: string;
   /** typed-recall only */
   grade?: { score: number; verdict: 'correct' | 'partial' | 'incorrect'; feedback: string };
   action: 'rated' | 'skipped';
   /** only set when action === 'rated' */
-  rating?: InsightRating;
+  rating?: RecallRating;
   newBox?: number;
   nextDue?: string | null;
   aiReasoning: string;

@@ -132,6 +132,24 @@ test('P7 does not match "Wait for the page to load"', () => {
   assert.equal(r.text, input);
 });
 
+test('P8 wait_consider_actual_options — matches the Yuki MCQ-stem leak', () => {
+  const input = "(A) 'Somos una empresa fundada en 2005...' — wait, consider these four actual options for the second clause only.";
+  const r = sanitizeArtifacts(input);
+  assert.equal(r.stripped, 1);
+  // The artifact phrase is gone; the option-quote prefix survives.
+  assert.equal(/wait, consider/i.test(r.text), false);
+  assert.equal(/Somos una empresa fundada en 2005/.test(r.text), true);
+});
+
+test('P8 does not match legitimate "wait, consider both sides" prose', () => {
+  // The pattern requires the literal token "actual" before "option(s)" so
+  // common educational hedging stays untouched.
+  const input = "Before deciding, wait, consider both sides of the trade-off.";
+  const r = sanitizeArtifacts(input);
+  assert.equal(r.stripped, 0);
+  assert.equal(r.text, input);
+});
+
 // ── Gutted detection ──────────────────────────────────────────
 
 test('flags gutted when >60% stripped', () => {

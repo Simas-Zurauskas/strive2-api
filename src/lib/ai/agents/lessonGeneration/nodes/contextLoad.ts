@@ -4,7 +4,12 @@ import { genLog } from '@lib/loggers';
 import LessonContentModel from '@models/LessonContentModel';
 import { LessonState } from '../state';
 
-const formatAnswers = (answers: { questionId: string; answer: string }[]) =>
+// Exported so peer nodes (e.g. interactiveGeneration) can render the same
+// "questionId: sanitized-answer" shape into their own human messages without
+// re-implementing sanitization. Returns empty string for empty input — caller
+// should suppress the surrounding section header on `''` rather than rendering
+// "Learner's answers: \n" with no body.
+export const formatAnswers = (answers: { questionId: string; answer: string }[]): string =>
   answers.map((a) => `- ${a.questionId}: ${sanitizePromptInput(a.answer)}`).join('\n');
 
 const formatCourseOutline = (

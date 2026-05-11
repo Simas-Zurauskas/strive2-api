@@ -251,6 +251,7 @@ export const lessonChatController = asyncHandler(async (req, res) => {
     courseGoal: course.goal ?? '',
     lessonContent: lessonMarkdown,
     courseDepth: course.depth ?? 'comprehensive',
+    goalType: course.goalType ?? null,
     learnerContext,
     // Pass ALL session attachments (not just this turn's) so the model
     // can reference files attached on prior turns. This is the cached

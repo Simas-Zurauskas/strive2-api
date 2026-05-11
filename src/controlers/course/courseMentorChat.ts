@@ -237,6 +237,7 @@ export const courseMentorChatController = asyncHandler(async (req, res) => {
   const courseSummary = buildCourseSummaryBlock({
     courseGoal: course.goal ?? '',
     courseDepth: course.depth ?? 'comprehensive',
+    goalType: course.goalType ?? null,
     modules: moduleSummaries,
   });
 

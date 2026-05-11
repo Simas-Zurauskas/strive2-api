@@ -34,7 +34,7 @@ export async function runAll({
   console.log(`Chat review: ${config.enableChatReview ? 'enabled'.green : 'disabled'.yellow}`.gray);
   console.log(`Lessons: ${config.maxLessons === 0 ? 'skipped'.yellow : String(config.maxLessons)}`.gray);
   console.log(`Quizzes: ${config.enableQuiz ? 'enabled'.green : 'disabled'.yellow}`.gray);
-  console.log(`Insights: ${config.enableInsights ? 'enabled (review all returned)'.green : 'disabled'.yellow}`.gray);
+  console.log(`Recall cards: ${config.enableRecall ? 'enabled (review all returned)'.green : 'disabled'.yellow}`.gray);
   console.log(`Mentor probes: ${config.enableMentor ? 'enabled (course + lesson)'.green : 'disabled'.yellow}`.gray);
   console.log(`Output: ${config.outputDir}`.gray);
   console.log(`${'='.repeat(60).dim}\n`);
@@ -89,6 +89,27 @@ export async function runAll({
   const failed = runs.filter((r) => r.status === 'failed').length;
   const errored = results.filter((r) => r.status === 'rejected').length;
   console.log(`\nResults: ${String(succeeded).green} completed, ${String(failed).yellow} failed, ${String(errored).red} errored`);
+
+  // Cohort cost: sum of every persona's totalSpent. Includes failed runs
+  // because a partial run still incurs spend up to the failing step. Per-
+  // persona breakdown is in each run's markdown report; this line is the
+  // headline number for the orchestrator session.
+  const costRuns = runs.filter((r) => r.costSummary !== undefined);
+  if (costRuns.length > 0) {
+    const totalCredits = costRuns.reduce((sum, r) => sum + (r.costSummary?.totalSpent ?? 0), 0);
+    const avgPerPersona = totalCredits / costRuns.length;
+    console.log(
+      `${'Cohort spend:'.cyan} ${totalCredits.toFixed(2)} credits across ${costRuns.length} persona(s) ` +
+        `(avg ${avgPerPersona.toFixed(2)}/persona, includes ${failed} failed run(s) up to their failing step)`,
+    );
+    console.log(
+      '  per-persona:'.dim +
+        '\n' +
+        costRuns
+          .map((r) => `    ${r.persona.name.padEnd(38)} ${(r.costSummary?.totalSpent ?? 0).toFixed(2)} credits`.gray)
+          .join('\n'),
+    );
+  }
 
   // Goal-type cohort matrix — per-bucket × per-metric. Surfaces drift
   // that's invisible in a flat aggregate: a regression that breaks only

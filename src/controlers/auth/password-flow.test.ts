@@ -16,6 +16,7 @@ import { makeUser, UserModel } from '../../../test-helpers/factories';
 import { buildReqRes, invokeController } from '../../../test-helpers/express';
 import { generateVerificationToken } from '@lib/auth';
 import { AuthProvider } from '@lib/constants';
+import { AppError } from '@middleware/errorMiddleware';
 
 // Stub the email-OTP service so changePassword tests stay focused on the
 // post-confirmation logic. The OTP flow itself is exercised by the
@@ -231,7 +232,6 @@ describe('setPasswordController', () => {
   });
 
   test('invalid OTP code → 400 SECURITY_CODE_INVALID; no password set', async () => {
-    const { AppError } = await import('@middleware/errorMiddleware');
     consumeMock.mockRejectedValueOnce(
       new AppError('Confirmation code is incorrect.', {
         errorCode: 'SECURITY_CODE_INVALID',
@@ -327,7 +327,6 @@ describe('changePasswordController', () => {
   });
 
   test('invalid OTP code → 400 SECURITY_CODE_INVALID; no password change', async () => {
-    const { AppError } = await import('@middleware/errorMiddleware');
     consumeMock.mockRejectedValueOnce(
       new AppError('Confirmation code is incorrect.', {
         errorCode: 'SECURITY_CODE_INVALID',

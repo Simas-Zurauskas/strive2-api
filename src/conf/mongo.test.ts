@@ -156,7 +156,7 @@ describe('cleanupOrphanedJobs', () => {
 
     vi.mocked(deleteByPrefix)
       .mockRejectedValueOnce(new Error('S3 unreachable'))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce(0);
 
     await cleanupOrphanedJobs();
     // Both LessonContent rows still get deleted from Mongo even though S3

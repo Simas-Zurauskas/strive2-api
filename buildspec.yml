@@ -15,6 +15,10 @@ phases:
   pre_build:
     commands:
       - yarn install --frozen-lockfile
+      # Fail fast on type errors or broken tests before the production
+      # emit step — CodeBuild minutes are cheaper than a broken deploy.
+      - yarn tsc
+      - yarn test
   build:
     commands:
       - yarn build
