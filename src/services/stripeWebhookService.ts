@@ -1,32 +1,7 @@
-/**
- * NOTE — split lines for the next maintainer.
- *
- * This file is ~720 LOC and dispatches across 5+ Stripe webhook event
- * types in one giant switch statement. The next change here should
- * extract along this seam:
- *
- *   - This file → `stripeWebhookDispatch.ts`: signature verify,
- *     deduplication via `stripeEventId`, event-type dispatch.
- *   - `stripeWebhookHandlers/` directory:
- *       `subscriptionUpdated.ts`
- *       `subscriptionDeleted.ts`
- *       `chargeSucceeded.ts`
- *       `chargeRefunded.ts`
- *       `paymentIntentSucceeded.ts`
- *       `invoicePaid.ts`  (etc.)
- *
- * Each handler should accept `(event, opts)` and own its own ledger /
- * E11000-idempotency logic. The dispatch file just routes to the
- * right handler based on `event.type`.
- *
- * Tests: keep `stripeWebhookService.test.ts` pinned to the public
- * surface of the dispatch file. Per-handler tests can be added later
- * once handlers are extracted.
- */
 import mongoose, { ClientSession } from 'mongoose';
 import UserModel from '@models/UserModel';
 import CreditLedgerModel, { CreditLedgerReason } from '@models/CreditLedgerModel';
-import { PLANS, PlanKey } from '@lib/creditPricing';
+import { FREE_PERIOD_DAYS, PLANS, PlanKey } from '@lib/creditPricing';
 import { emitCreditsUpdated } from '@lib/creditSocket';
 import { monetizationLog } from '@lib/loggers';
 import { captureError } from '@lib/errorReporter';
@@ -142,7 +117,12 @@ const onSubscriptionCheckoutCompleted = async ({
   }
 
   const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
-  if (!subscriptionId) return;
+  if (!subscriptionId) {
+    monetizationLog.warn(
+      `Subscription checkout session without subscription id (mode=${session.mode}, payment_status=${session.payment_status}), event ${event.id}`,
+    );
+    return;
+  }
 
   const stripe = getStripe();
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
@@ -553,7 +533,10 @@ const handleSubscriptionDeleted = async (event: Stripe.Event): Promise<void> => 
 
   const freeAllowance = PLANS.free.monthlyAllowance;
   const now = new Date();
-  const periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  // FREE_PERIOD_DAYS lives in pricingConfig (KNOB 7) and is the single
+  // source of truth for the Free-tier rollover window. Kept in sync with
+  // the lazy reset path in creditService.applyFreePeriodReset.
+  const periodEnd = new Date(now.getTime() + FREE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
 
   await UserModel.updateOne(
     { _id: user._id },

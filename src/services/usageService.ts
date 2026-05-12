@@ -3,7 +3,8 @@ import UsageEventModel from '@models/UsageEventModel';
 import { bgError } from '@lib/bg';
 import { getUsageContext } from '@lib/usageContext';
 import { UsageService } from '@lib/usageConstants';
-import { applyStaticMarkup } from '@lib/pricing';
+import { applyMarkup } from '@lib/pricing';
+import { PRICING_CONFIG } from '@lib/pricingConfig';
 
 /**
  * Append one row to the per-user usage ledger AND increment the active
@@ -39,10 +40,17 @@ export const recordUsage = ({
   if (!ctx) return;
   if (!Number.isFinite(costMicroCents) || costMicroCents <= 0) return;
 
-  // The user is debited against `chargedMicroCents` (vendor cost × any
-  // per-service markup). For services without markup the two values are
-  // identical, so this stays a pass-through for Anthropic LLM cost.
-  const chargedMicroCents = applyStaticMarkup({ service, costMicroCents });
+  // The user is debited against `chargedMicroCents` (vendor cost × markup).
+  // Markup is ACTION-driven: `applyMarkup` resolves the category from the
+  // action label (only `lesson:content` qualifies for the lesson premium;
+  // everything else — including supporting calls inside a lesson job like
+  // recall extraction, link search, image generation — bills at `other`).
+  // The bucket snapshot still drives the allowance-vs-bonus rate split.
+  const chargedMicroCents = applyMarkup({
+    action,
+    creditBucket: ctx.creditBucketAtScope,
+    costMicroCents,
+  });
 
   // Increment the scope's running user-charged total BEFORE the DB write so
   // a DB failure can't desync the accumulator from the analytics ledger
@@ -67,6 +75,7 @@ export const recordUsage = ({
     action,
     costMicroCents,
     chargedMicroCents,
+    pricingVersion: PRICING_CONFIG.pricingVersion,
     ...(ctx.plan ? { planAtTime: ctx.plan } : {}),
     ...(ctx.subscriptionStatus ? { subscriptionStatusAtTime: ctx.subscriptionStatus } : {}),
     metadata: mergedMetadata,

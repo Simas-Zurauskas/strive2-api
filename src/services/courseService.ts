@@ -640,13 +640,23 @@ Generate personalized depth previews for each tier.`;
 
   // Migrated from LangChain `withStructuredOutput` → raw Anthropic SDK +
   // explicit tool_use after a recurring "Failed to parse" regression where
-  // Haiku leaked tool-use-style XML (`<parameter name="summary">...</parameter>`)
+  // the model leaked tool-use-style XML (`<parameter name="summary">...</parameter>`)
   // into the JSON output, collapsing `overview` from an object into a
   // string. The hand-written `input_schema` above is a stronger contract
   // for the model than the LangChain-converted Zod schema, and we own the
   // parse step (sanitize + Zod) so a future leak surfaces as a clean
-  // retry rather than an unrecoverable parse failure. Same model (Haiku) —
-  // the migration is about robustness, not capability.
+  // retry rather than an unrecoverable parse failure.
+  //
+  // Model: SONNET. Previously HAIKU; swapped after a recurring structural
+  // collapse failure mode where, on sprawling inputs ("learn everything
+  // about app development — iOS, Android, backend, databases, APIs, UI"),
+  // Haiku emitted a partial payload containing only `overview` and dropped
+  // the `comprehensive` / `deep_dive` / `recommended` / `recommendationReason`
+  // fields entirely, exhausting all retries with the same shape. Sonnet
+  // holds nested structured output through cognitively-heavy inputs much
+  // better. Depth-previews is once-per-course and well below the volume
+  // of structure / lesson-content generation, so the cost delta is
+  // negligible vs. the loss of a whole course-creation flow.
   //
   // Retry label `clarify:depth-previews` keeps the `with_retry_total{label=...}`
   // dashboard slice intact so retry rates remain comparable across the
@@ -654,7 +664,7 @@ Generate personalized depth previews for each tier.`;
   const response = await withRetry(
     async () => {
       const result = await withCallTimeout((signal) => anthropic.messages.create({
-        model: MODEL_IDS.HAIKU,
+        model: MODEL_IDS.SONNET,
         max_tokens: 4096,
         temperature: 0.7,
         system: [
@@ -672,7 +682,7 @@ Generate personalized depth previews for each tier.`;
       logCacheUsage({
         label: 'clarify:depth-previews',
         usage: usageFromAnthropic(result),
-        model: MODEL_IDS.HAIKU,
+        model: MODEL_IDS.SONNET,
       });
 
       const toolUse = result.content.find(

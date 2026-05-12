@@ -249,7 +249,19 @@ export const updateCourseController = asyncHandler(async (req, res) => {
     const [minHours, maxHours] = getEstimatedHoursRange({ depth: updates.depth, isSoft: useSoftBand });
     const isLargeCourse = maxLessons > 15;
 
-    const hasExpansionSignal = isUpgradeBeyondRecommendation || isFirstTimeAboveRecommendation || isLargeCourse;
+    // `isLargeCourse` (selected depth produces >15 lessons) only counts
+    // as expansion when there is NO recommendation to compare against —
+    // it's a "you picked something big, no context to judge against"
+    // fallback. With a recommendation, direction (above vs at/below) is
+    // the source of truth: picking AT the recommended tier must never
+    // fire overcommit, even if that tier itself is large. Without this
+    // guard, a learner who follows the system's recommended Comprehensive
+    // would still get the gate dialog because Comprehensive happens to
+    // produce >15 lessons.
+    const hasExpansionSignal =
+      isUpgradeBeyondRecommendation ||
+      isFirstTimeAboveRecommendation ||
+      (recommendedRank === -1 && isLargeCourse);
 
     // ── Cost signals (undercommit side) ────────────────────
     const undercommitRisk = (resolved.depthPreviews as { undercommitRisk?: unknown } | null)?.undercommitRisk;
@@ -291,10 +303,20 @@ export const updateCourseController = asyncHandler(async (req, res) => {
     // ── Fire decisions ─────────────────────────────────────
     // Overcommit:
     //   (a) original strict path: any expansion + any high-confidence cost
-    //   (b) NEW lenient path: largeCourse + moderate LLM risk
+    //   (b) lenient path: largeCourse + moderate LLM risk
     //       — catches the "deep_dive override against comprehensive
     //          recommendation, LLM emitted moderate not high" case.
-    const fireOvercommit = (hasExpansionSignal && hasHighCostSignal) || (isLargeCourse && isModerateOvercommitRisk);
+    //
+    // Both paths additionally require the pick to be ABOVE the
+    // recommendation (or there to be no recommendation). The lenient
+    // path's `isLargeCourse` is independent of direction by design, so
+    // we explicitly guard it here — otherwise a learner picking the
+    // recommended Comprehensive (which produces >15 lessons) would
+    // trip the gate even though they followed the recommendation.
+    const pickedAboveRecommendation = recommendedRank === -1 || newRank > recommendedRank;
+    const fireOvercommit =
+      pickedAboveRecommendation &&
+      ((hasExpansionSignal && hasHighCostSignal) || (isLargeCourse && isModerateOvercommitRisk));
 
     // Undercommit: contraction + LLM risk above 'low'.
     const fireUndercommit = hasContractionSignal && hasUndercommitSignal;

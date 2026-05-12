@@ -143,6 +143,15 @@ export const recallCardGeneration = async (
 ): Promise<Partial<LessonState>> => {
   const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
+  // Per-lesson opt-out. The user chose to skip recall card extraction at
+  // generate time; the Haiku call costs a couple of credits per lesson
+  // and the user said "not this time". They can regenerate later via
+  // the /regenerate-recall endpoint when they change their mind.
+  if (!state.includeRecallCards) {
+    genLog.info(`lesson:recall skip reason=opt_out`);
+    return { recallCards: [] };
+  }
+
   // Guard: nothing to do if no teachable content.
   const teachable = state.contentBlocks.filter((b) =>
     ['intro', 'section', 'callout', 'summary'].includes(b.type),

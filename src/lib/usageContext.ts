@@ -41,6 +41,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PlanKey, SubscriptionStatus } from '@lib/creditPricing';
+import type { CreditBucket } from '@lib/pricingConfig';
 
 export interface UsageContext {
   userId: string;
@@ -63,6 +64,22 @@ export interface UsageContext {
   plan?: PlanKey;
   subscriptionStatus?: SubscriptionStatus;
   /**
+   * Snapshot of which balance bucket pays for this scope, taken at scope
+   * entry. `'allowance'` if the user had any allowance credits when the
+   * scope started; `'bonus'` if they only had top-up bonus credits.
+   * Locked for the duration of the scope — if the user's allowance runs
+   * out mid-scope, the remaining cost still bills at the snapshot rate
+   * and any excess is absorbed by the existing debit-clamp logic in
+   * `debitActualSpend`. Defaults to `'allowance'` when missing (Free plan
+   * + most subscribers always have allowance > 0).
+   *
+   * Markup itself is action-driven (see `lib/pricing.ts:applyMarkup` and
+   * `LESSON_PREMIUM_ACTIONS` in pricingConfig). The bucket only chooses
+   * between the allowance and bonus columns of the markup matrix; the
+   * category column is resolved per-call from the action label.
+   */
+  creditBucketAtScope: CreditBucket;
+  /**
    * Mutable accumulator of user-charged spend for this scope (vendor cost ×
    * per-service markup). Incremented by `recordUsage` on every paid call;
    * read at job end by `debitActualSpend`. The object wrapper is required
@@ -71,9 +88,15 @@ export interface UsageContext {
   spendMicroCents: { current: number };
 }
 
-/** Shape accepted by callers — they don't need to construct the accumulator. */
-export type UsageContextInit = Omit<UsageContext, 'spendMicroCents'> & {
+/**
+ * Shape accepted by callers — they don't need to construct the accumulator,
+ * and `creditBucketAtScope` is optional (defaults to the cheaper allowance
+ * rate when missing).
+ */
+export type UsageContextInit = Omit<UsageContext, 'spendMicroCents' | 'creditBucketAtScope'> & {
   spendMicroCents?: { current: number };
+  /** Defaults to `'allowance'` — if a caller forgets to fetch the bucket, we assume the cheaper rate. */
+  creditBucketAtScope?: UsageContext['creditBucketAtScope'];
 };
 
 const als = new AsyncLocalStorage<UsageContext>();
@@ -87,6 +110,7 @@ export const runWithUsageContext = <T,>({
 }): Promise<T> | T => {
   const fullCtx: UsageContext = {
     ...ctx,
+    creditBucketAtScope: ctx.creditBucketAtScope ?? 'allowance',
     // Fresh accumulator per scope. If one was passed (rare; only meaningful
     // for tests that want to inspect spend after the scope exits), honor it.
     spendMicroCents: ctx.spendMicroCents ?? { current: 0 },

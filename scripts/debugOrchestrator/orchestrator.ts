@@ -36,6 +36,11 @@ export async function runAll({
   console.log(`Quizzes: ${config.enableQuiz ? 'enabled'.green : 'disabled'.yellow}`.gray);
   console.log(`Recall cards: ${config.enableRecall ? 'enabled (review all returned)'.green : 'disabled'.yellow}`.gray);
   console.log(`Mentor probes: ${config.enableMentor ? 'enabled (course + lesson)'.green : 'disabled'.yellow}`.gray);
+  console.log(
+    `Per-lesson features: hero=${(config.includeHero ? 'on'.green : 'off'.yellow)} ` +
+      `links=${(config.includeLinks ? 'on'.green : 'off'.yellow)} ` +
+      `recall-gen=${(config.includeRecall ? 'on'.green : 'off'.yellow)}`.gray,
+  );
   console.log(`Output: ${config.outputDir}`.gray);
   console.log(`${'='.repeat(60).dim}\n`);
 
@@ -57,7 +62,16 @@ export async function runAll({
         const recorder = new MarkdownRecorder();
 
         try {
-          return await runPersonaFlow({ persona, client, recorder, config, label, runId, personaSlug });
+          return await runPersonaFlow({
+            persona,
+            client,
+            recorder,
+            config,
+            label,
+            runId,
+            personaSlug,
+            userId: testUser.userId,
+          });
         } finally {
           await deleteTestUser({ client, password: testUser.password, email: testUser.email });
           console.log(`[${label}]`.cyan + ` Cleaned up test user ${testUser.email}`.gray);

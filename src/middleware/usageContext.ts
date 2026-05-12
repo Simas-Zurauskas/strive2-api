@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/node';
 import { runWithUsageContext } from '@lib/usageContext';
 import UserModel from '@models/UserModel';
 import { bgError } from '@lib/bg';
+import { determineCreditBucket } from '@services/creditService';
 
 /**
  * Enter an AsyncLocalStorage scope stamped with the authenticated user for
@@ -34,6 +35,13 @@ export const usageContextMiddleware = async (req: Request, _res: Response, next:
       return null;
     });
 
+  // Snapshot which balance bucket pays for any paid actions taken during this
+  // request. Markup is action-driven (only `lesson:content` calls get the
+  // lesson premium — see `LESSON_PREMIUM_ACTIONS` in pricingConfig.ts), so
+  // we only need the bucket here; the per-call category is resolved by
+  // `applyMarkup` from the action label at recordUsage time.
+  const creditBucketAtScope = await determineCreditBucket(userId);
+
   // Refine the Sentry scope with plan/subscription tags so any downstream
   // capture in this request can be sliced by tier. The user id was already
   // tagged by `protect` (or `optionalProtect`) — these tags layer on top.
@@ -51,6 +59,7 @@ export const usageContextMiddleware = async (req: Request, _res: Response, next:
     ctx: {
       userId,
       source: 'request',
+      creditBucketAtScope,
       ...(user?.subscription?.plan ? { plan: user.subscription.plan } : {}),
       ...(user?.subscription?.status ? { subscriptionStatus: user.subscription.status } : {}),
     },

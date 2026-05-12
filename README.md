@@ -41,8 +41,8 @@ yarn stripe:webhook
 | `yarn start` | Run the compiled `build/index.js` |
 | `yarn tsc` | Type-check without emit |
 | `yarn test` | Vitest with `mongodb-memory-server` |
-| `yarn stripe:webhook` | Forward Stripe events to `http://localhost:4000/api/stripe/webhook` |
-| `yarn debug:orchestrator` | End-to-end course-generation harness (see [wiki/reference/api/scripts.md](../wiki/reference/api/scripts.md)) |
+| `yarn stripe:webhook` | Forward Stripe events to `http://localhost:4000/api/billing/stripe/webhook` |
+| `yarn debug:orchestrator` | End-to-end course-generation harness (persona generation + deterministic noise + per-persona Markdown reports) |
 | `yarn kb:index` | Re-index product knowledge-base content into Pinecone |
 | `yarn kb:check` | Dry-run the product-KB indexer |
 
@@ -108,7 +108,7 @@ Variables marked **required** are validated at boot — missing values trigger `
 ### Billing (Stripe)
 
 - `STRIPE_SECRET_KEY` (required)
-- `STRIPE_WEBHOOK_SECRET` — Used for raw-body HMAC verification at `/api/stripe/webhook` (required)
+- `STRIPE_WEBHOOK_SECRET` — Used for raw-body HMAC verification at `/api/billing/stripe/webhook` (required)
 - `STRIPE_PRICE_ID_STARTER_MONTHLY` (required)
 - `STRIPE_PRICE_ID_STARTER_ANNUAL` (required)
 - `STRIPE_PRICE_ID_PRO_MONTHLY` (required)
@@ -127,18 +127,9 @@ Variables marked **required** are validated at boot — missing values trigger `
 
 ## Operational notes
 
-- **Single-instance deployment.** The job runner, the in-process `EventEmitter` bridge, and Socket.io's in-memory adapter all live in module scope. Horizontal scaling requires a Redis adapter for Socket.io and a distributed job queue. See [wiki/reference/api/architecture.md](../wiki/reference/api/architecture.md).
+- **Single-instance deployment.** The job runner, the in-process `EventEmitter` bridge, and Socket.io's in-memory adapter all live in module scope. Horizontal scaling requires a Redis adapter for Socket.io and a distributed job queue.
 - **Stripe webhook must remain mounted before the global JSON parser** ([index.ts:74](src/index.ts#L74)) — the HMAC check runs against the exact bytes Stripe sent.
 - **Sentry import order** — `import '@conf/sentry'` MUST sit before `express`, `http`, and `mongoose`. Late init silently disables auto-instrumentation.
+- **Auth gate stack on feature routes** — `protect` (JWT decode + `tokenVersion` check) → `requireVerified` (email verification) → optionally `requireCredits()` (1-credit pre-flight on AI-generation routes). Actual credit debit happens post-job from real LLM token spend via `creditService.debitActualSpend`.
 - **Health endpoints** — `/live` (liveness, dependency-free), `/ready` and `/health` (readiness, pings Mongo with a 2 s race), `/version` (build info from `package.json`), `/metrics` (Prometheus text format).
-
-## Documentation
-
-The wiki under [`/wiki`](../wiki/OVERVIEW.md) is the authoritative reference. Start with:
-
-- [API overview](../wiki/reference/api/OVERVIEW.md)
-- [Architecture](../wiki/reference/api/architecture.md)
-- [HTTP API surface](../wiki/reference/api/http-api.md)
-- [Course generation](../wiki/reference/api/course-generation/OVERVIEW.md)
-- [Billing](../wiki/reference/api/billing/OVERVIEW.md)
-- [Jobs and realtime](../wiki/reference/api/jobs-and-realtime.md)
+- **Swagger** — `/swagger` UI and `/swagger.json` spec are exposed in non-production only; the client codegen (`yarn codegen` in `client/`) targets that spec.

@@ -3,7 +3,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import type { ApiClient } from './apiClient';
 import { LESSON_POLL_TIMEOUT_MS, WITH_RETRY_POLL_TIMEOUT_MS } from './apiClient';
-import { MarkdownRecorder, CostTracker } from './markdownRecorder';
+import { MarkdownRecorder, CostTracker, aggregatePersonaCostByAction } from './markdownRecorder';
 import { withRetry } from '@lib/retry';
 import { MODEL_IDS } from '@lib/langchain';
 import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
@@ -1030,6 +1030,7 @@ export async function runPersonaFlow({
   label,
   runId,
   personaSlug,
+  userId,
 }: {
   persona: Persona;
   client: ApiClient;
@@ -1038,6 +1039,9 @@ export async function runPersonaFlow({
   label: string;
   runId: string;
   personaSlug: string;
+  /** Persona's auto-provisioned test-user id, used for byAction
+   *  aggregation against UsageEventModel at end-of-run. */
+  userId: string;
 }): Promise<PersonaRun> {
   const log = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`);
   const logDone = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`.green);
@@ -1089,6 +1093,7 @@ export async function runPersonaFlow({
 
   recorder.setPersona(persona);
   recorder.addHeader();
+  recorder.addRunConfiguration(config);
 
   try {
     // ── Step 1: Create Course ────────────────────────────
@@ -1514,15 +1519,19 @@ export async function runPersonaFlow({
           const s9 = beginStep({ step: 9, name: `Generate Lesson ${mi}/${li}` });
           const genStart = Date.now();
 
-          // Hero images cost real money (BFL API) and are irrelevant to the
-          // assessment signal, so opt out for the whole orchestrator run.
-          // Links are kept on — they're one of the quality signals we grade.
+          // Per-feature toggles come from the orchestrator config so the
+          // operator can isolate per-step cost ("how much does recall
+          // extraction add to a typical 5-lesson run?") with --no-* flags.
+          // Defaults: hero off (cosmetic + BFL costs real $), links on
+          // (one of the quality signals we grade), recall on (highest-
+          // value pedagogical feature).
           const jobId = await client.generateLesson({
             courseId,
             moduleIndex: mi,
             lessonIndex: li,
-            includeImage: false,
-            includeLinks: true,
+            includeImage: config.includeHero,
+            includeLinks: config.includeLinks,
+            includeRecallCards: config.includeRecall,
           });
           await client.pollJob({ jobId, timeoutMs: LESSON_POLL_TIMEOUT_MS });
           const content = await client.getLessonContent({ courseId, moduleIndex: mi, lessonIndex: li });
@@ -1844,7 +1853,13 @@ export async function runPersonaFlow({
     // that completed (the last beginStep().finish() call enqueues but
     // doesn't await — without drain() we'd lose the final 1–2 events).
     await costTracker.drain();
-    const costSummary = costTracker.summary();
+    // Enrich the per-step cost summary with a per-action rollup queried
+    // directly from UsageEventModel. Gives the report a second, orthogonal
+    // view of where credit went: "lesson:content vs lesson:image vs
+    // lesson:recall vs lesson:links". Falls back to an empty array on
+    // query failure — analytics, not the persona's job contract.
+    const byAction = await aggregatePersonaCostByAction(userId);
+    const costSummary = { ...costTracker.summary(), byAction };
     recorder.addSummary({
       totalDurationMs,
       course,

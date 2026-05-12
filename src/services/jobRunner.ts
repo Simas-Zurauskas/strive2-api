@@ -1,31 +1,3 @@
-/**
- * NOTE — split lines for the next maintainer.
- *
- * This file is ~780 LOC and mixes the job lifecycle (submit / process /
- * complete / fail) with type-specific logic (a 9-branch switch over
- * `executeJob`). The next change here should extract along this seam:
- *
- *   - This file (kept) — `submitJob`, `processJob`, the pLimit
- *     concurrency cap, the `activeJobId` mutex, status transitions.
- *   - `jobTypes/` directory — one file per job type:
- *       `clarifyJob.ts`
- *       `generateStructureJob.ts`
- *       `refineStructureJob.ts`
- *       `generateDepthPreviewsJob.ts`
- *       `generateLessonJob.ts`
- *       `regenerateHeroJob.ts`
- *       `regenerateLinksJob.ts`
- *       `generateModuleQuizJob.ts`
- *       `lessonNarrationJob.ts`
- *
- * Each file exports `executeXxxJob({ jobId, userId, courseId, metadata, course })`
- * and `executeJob` becomes a thin dispatch table. The shared course
- * fetch + `cleanupCourseContent` calls stay in the dispatcher.
- *
- * Add bounds-checking on `metadata.moduleIndex` / `metadata.lessonIndex`
- * to the dispatcher (audit P2 finding: client-supplied indices are
- * currently used directly as array accessors with no validation).
- */
 import mongoose from 'mongoose';
 import pLimit from 'p-limit';
 import { captureError, captureWarning, addBreadcrumb } from '@lib/errorReporter';
@@ -36,7 +8,7 @@ import RecallCardModel from '@models/RecallCardModel';
 import { JobType, CourseDepth } from '@lib/constants';
 import { analytics } from '@lib/analytics';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
-import { contextLoad, imageGeneration, linksGeneration } from '@lib/ai/agents/lessonGeneration/nodes';
+import { contextLoad, imageGeneration, linksGeneration, recallCardGeneration } from '@lib/ai/agents/lessonGeneration/nodes';
 import type { LessonState } from '@lib/ai/agents/lessonGeneration/state';
 import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
@@ -47,7 +19,7 @@ import { deleteByPrefix } from './s3Service';
 import { jobEvents } from './jobEvents';
 import type { LessonProgressEvent } from '@src/types/socketEvents';
 import { bgError } from '@lib/bg';
-import { InsufficientCreditsError, MaxConcurrentJobsError, debitActualSpend, getBalance } from './creditService';
+import { InsufficientCreditsError, MaxConcurrentJobsError, debitActualSpend, determineCreditBucket, getBalance } from './creditService';
 import UserModel from '@models/UserModel';
 import { PLANS, PlanKey } from '@lib/creditPricing';
 import { monetizationLog, jobLog } from '@lib/loggers';
@@ -362,12 +334,16 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       const lessonIndex = (metadata?.lessonIndex as number) ?? 0;
       const includeImage = (metadata?.includeImage as boolean) ?? true;
       const includeLinks = (metadata?.includeLinks as boolean) ?? false;
+      // Recall cards default ON — the highest-value optional feature.
+      // Older queued jobs predating this flag end up with `undefined`;
+      // the `?? true` keeps them on the legacy "always extract" path.
+      const includeRecallCards = (metadata?.includeRecallCards as boolean) ?? true;
       const mod = course.structure?.modules?.[moduleIndex];
       const lesson = mod?.lessons?.[lessonIndex];
       if (!mod || !lesson) throw new Error(`Lesson not found: module ${moduleIndex}, lesson ${lessonIndex}`);
 
       jobLog.info(
-        `generate_lesson:start jobId=${jobId} userId=${userId} course=${courseId} module=${moduleIndex} lesson=${lessonIndex} hero=${includeImage} links=${includeLinks}`,
+        `generate_lesson:start jobId=${jobId} userId=${userId} course=${courseId} module=${moduleIndex} lesson=${lessonIndex} hero=${includeImage} links=${includeLinks} recall=${includeRecallCards}`,
       );
 
       const lessonGenStart = Date.now();
@@ -466,6 +442,7 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
             lessonIndex,
             includeImage,
             includeLinks,
+            includeRecallCards,
           },
           {
             streamMode: 'updates',
@@ -799,6 +776,67 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       );
       return;
     }
+    case 'regenerate_recall': {
+      // Mirrors regenerate_links: load existing lesson content, run the
+      // recall-extraction node against the captured blocks, persist
+      // resulting cards via the same path the full lesson agent uses.
+      const moduleIndex = (metadata?.moduleIndex as number) ?? 0;
+      const lessonIndex = (metadata?.lessonIndex as number) ?? 0;
+      const lessonContent = await LessonContentModel.findOne({ courseId, moduleIndex, lessonIndex });
+      if (!lessonContent) throw new Error(`Lesson content missing: ${moduleIndex}/${lessonIndex}`);
+
+      const emitProgress = (event: LessonProgressEvent) => {
+        jobEvents.emit('progress', {
+          jobId, userId, courseId, type: 'regenerate_recall', moduleIndex, lessonIndex, event,
+        });
+      };
+
+      // Seed the agent state from saved blocks. `includeRecallCards: true`
+      // forces the recall node to run regardless of the original lesson's
+      // generate-time flag.
+      const baseState = {
+        courseId,
+        goal: course.goal,
+        answers: formatCourseAnswers(course),
+        depth: course.depth ?? 'comprehensive',
+        domain: course.domain ?? null,
+        structure: course.structure as LessonState['structure'],
+        moduleIndex,
+        lessonIndex,
+        includeImage: false,
+        includeLinks: false,
+        includeRecallCards: true,
+        contentBlocks: lessonContent.blocks,
+        contentSummary: lessonContent.summary ?? '',
+      };
+      const derived = await contextLoad(baseState as unknown as LessonState);
+      const state = { ...baseState, ...derived } as LessonState;
+
+      const result = await recallCardGeneration(state, { configurable: { writer: emitProgress } });
+      const cards = result.recallCards ?? [];
+      if (cards.length === 0) return;
+
+      if (!(await CourseModel.exists({ _id: courseId }))) return;
+
+      // Wipe previous recall cards for this lesson so the new set fully
+      // replaces them (rather than appending duplicates). Mongoose-level
+      // deletion is fine here — no foreign keys point to RecallCard ids
+      // beyond UserRecallProgress, which has its own tombstone handling
+      // via the queue service.
+      await RecallCardModel.deleteMany({ courseId, moduleIndex, lessonIndex });
+      const persistedIds = await persistLessonRecallCards({
+        courseId,
+        moduleIndex,
+        lessonIndex,
+        cards,
+      }).catch((e) => {
+        bgError('jobRunner.persistLessonRecallCards.regenerate')(e);
+        return [] as string[];
+      });
+
+      emitProgress({ type: 'recall_cards_saved', count: persistedIds.length });
+      return;
+    }
     case 'lesson_narration': {
       const moduleIndex = (metadata?.moduleIndex as number) ?? 0;
       const lessonIndex = (metadata?.lessonIndex as number) ?? 0;
@@ -916,6 +954,20 @@ const processJob = async (jobId: string): Promise<void> => {
       bgError('jobRunner.planSnapshot')(e);
       return null;
     });
+  // Snapshot which balance bucket pays for this job. Locked for the job's
+  // lifetime: if the user's allowance runs out mid-job (e.g. on a long
+  // 6-lesson generation that exhausts a 200 cr Free balance), the remaining
+  // spend still bills at the snapshot rate and overflow is absorbed by
+  // `debitActualSpend`'s clamp. Bounded loss — much simpler than per-call
+  // bucket determination.
+  //
+  // Markup is action-driven (see `lib/pricing.ts:applyMarkup` and
+  // LESSON_PREMIUM_ACTIONS in pricingConfig.ts) — we don't need to tag the
+  // whole job as "lesson scope" anymore. Only the singular `lesson:content`
+  // action call within a lesson job picks up the premium rate; everything
+  // else (image:hero, lesson:recall, lesson:links.*, search:basic, etc.)
+  // bills at the standard `other` rate regardless of job type.
+  const creditBucketAtScope = await determineCreditBucket(job.userId);
   // Enter a usage-tracking scope so every paid action the agents trigger
   // (LLMs, image gen, Tavily, Jina) is attributed to this user + job.
   // Module/lesson indices are threaded where present so a single
@@ -927,6 +979,7 @@ const processJob = async (jobId: string): Promise<void> => {
         source: 'job',
         jobId,
         courseId: job.courseId.toString(),
+        creditBucketAtScope,
         ...(typeof jobMetadata.moduleIndex === 'number' ? { moduleIndex: jobMetadata.moduleIndex } : {}),
         ...(typeof jobMetadata.lessonIndex === 'number' ? { lessonIndex: jobMetadata.lessonIndex } : {}),
         ...(planSnapshot?.subscription?.plan ? { plan: planSnapshot.subscription.plan } : {}),

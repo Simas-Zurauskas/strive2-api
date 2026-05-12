@@ -228,7 +228,7 @@ export const schemas: SchemaMap = {
 
   BillingTopupRate: {
     type: 'object',
-    required: ['creditsPerUsd', 'minUsd', 'maxUsd'],
+    required: ['creditsPerUsd', 'minUsd', 'maxUsd', 'quickPicks'],
     properties: {
       // How many credits one USD buys. Integer so any whole-dollar amount
       // yields an integer credit grant.
@@ -237,18 +237,87 @@ export const schemas: SchemaMap = {
       // server-side (Zod schema on the /topup endpoint).
       minUsd: { type: 'integer' },
       maxUsd: { type: 'integer' },
+      // Curated quick-pick chip amounts (USD). Clients render only those
+      // entries falling inside [minUsd, maxUsd]. Configured server-side
+      // so a knob change cascades without a client deploy.
+      quickPicks: {
+        type: 'array',
+        items: { type: 'integer' },
+      },
+    },
+  },
+
+  /**
+   * Per-plan allowance shape — `unit * multipliers[planKey]` gives each plan's
+   * monthly credit grant. Exposed so clients can render multiplier strings
+   * ("10×", "22×", "48×") and recompute "lessons per month" without
+   * hardcoding.
+   */
+  BillingAllowanceShape: {
+    type: 'object',
+    required: ['unit', 'multipliers'],
+    properties: {
+      unit: { type: 'integer' },
+      multipliers: {
+        type: 'object',
+        required: ['free', 'starter', 'pro', 'studio'],
+        properties: {
+          free: { type: 'integer' },
+          starter: { type: 'integer' },
+          pro: { type: 'integer' },
+          studio: { type: 'integer' },
+        },
+      },
+    },
+  },
+
+  /**
+   * Empirical per-action credit ranges (measured from orchestrator cohorts).
+   * NOT a billing contract — actual debits are real-cost metered. Used by
+   * the client purely to render "≈ X lessons" approximations.
+   */
+  BillingReferenceCosts: {
+    type: 'object',
+    required: [
+      'lessonCredits',
+      'lessonCreditsTopup',
+      'recallCardExtractionCredits',
+      'courseStructureCredits',
+      'moduleQuizCredits',
+      'mentorTurnCredits',
+      'recallReviewCredits',
+    ],
+    properties: {
+      // ALL-IN lesson cost at the SUB-ALLOWANCE rate (4× markup) — content +
+      // validation + interactive + links + (optional) image + recall card
+      // extraction. Used by UI for subscriber-facing "≈ X lessons / month".
+      lessonCredits: { type: 'array', items: { type: 'integer' } },
+      // ALL-IN lesson cost at the TOP-UP BONUS rate (5× markup). Used by
+      // the top-up control's "$X ≈ N lessons" chips so top-up estimates
+      // don't overstate generosity by ~25%.
+      lessonCreditsTopup: { type: 'array', items: { type: 'integer' } },
+      // Sub-portion of lessonCredits attributable to recall card extraction
+      // (Haiku, parallel node `lesson:recall`, 3–5 cards/lesson). Surfaced
+      // for observability — do NOT add to lessonCredits in UI math.
+      recallCardExtractionCredits: { type: 'array', items: { type: 'integer' } },
+      courseStructureCredits: { type: 'array', items: { type: 'integer' } },
+      moduleQuizCredits: { type: 'array', items: { type: 'integer' } },
+      mentorTurnCredits: { type: 'array', items: { type: 'integer' } },
+      recallReviewCredits: { type: 'array', items: { type: 'integer' } },
     },
   },
 
   BillingCatalog: {
     type: 'object',
-    required: ['plans', 'topupRate'],
+    required: ['plans', 'topupRate', 'allowance', 'referenceCosts'],
     properties: {
       plans: {
         type: 'array',
         items: { $ref: '#/components/schemas/BillingPlan' },
       },
       topupRate: { $ref: '#/components/schemas/BillingTopupRate' },
+      allowance: { $ref: '#/components/schemas/BillingAllowanceShape' },
+      referenceCosts: { $ref: '#/components/schemas/BillingReferenceCosts' },
     },
   },
 
@@ -500,6 +569,13 @@ export const schemas: SchemaMap = {
       audioGeneratedAt: { type: 'string', format: 'date-time', nullable: true },
       summary: { type: 'string', nullable: true },
       version: { type: 'integer' },
+      /**
+       * Number of recall cards persisted for this lesson. Zero means the
+       * user either generated the lesson with includeRecallCards=false, or
+       * the lesson predates recall extraction. UIs use this to render a
+       * "generate recall cards" CTA when it's 0 and a status badge when >0.
+       */
+      recallCardCount: { type: 'integer' },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
     },
@@ -1384,6 +1460,9 @@ export const schemas: SchemaMap = {
       // The user's plan when the row was recorded; null for legacy rows or
       // for events recorded outside an authenticated/job scope.
       planAtTime: nullableRef('#/components/schemas/PlanKey'),
+      // Pricing config version in force when this row was charged (see
+      // `PRICING_VERSION` in pricingConfig.ts). null for pre-stamp rows.
+      pricingVersion: { type: 'string', nullable: true },
       // Dominant balance source for the row's pro-rated debit, or null when
       // no debit row is associated yet (job in flight / failed).
       source: {
@@ -1438,9 +1517,27 @@ export const schemas: SchemaMap = {
     },
   },
 
+  /**
+   * Granular per-action (per-feature) cost row. `action` is the LLM
+   * call-site label as recorded on UsageEvent.action (e.g.
+   * "lesson:content", "lesson:recall", "lesson:image", "lesson:links",
+   * "recall:grade"). Lets the admin Usage view answer "what fraction of
+   * this user's spend went to recall card extraction" etc.
+   */
+  UsageActionTotal: {
+    type: 'object',
+    required: ['action', 'costMicroCents', 'chargedMicroCents', 'count'],
+    properties: {
+      action: { type: 'string' },
+      costMicroCents: { type: 'integer' },
+      chargedMicroCents: { type: 'integer' },
+      count: { type: 'integer' },
+    },
+  },
+
   UsageSummary: {
     type: 'object',
-    required: ['today', 'thisMonth', 'allTime', 'byService'],
+    required: ['today', 'thisMonth', 'allTime', 'byService', 'byAction'],
     properties: {
       today: { $ref: '#/components/schemas/UsageCostBucket' },
       thisMonth: { $ref: '#/components/schemas/UsageCostBucket' },
@@ -1448,6 +1545,10 @@ export const schemas: SchemaMap = {
       byService: {
         type: 'array',
         items: { $ref: '#/components/schemas/UsageServiceTotal' },
+      },
+      byAction: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/UsageActionTotal' },
       },
     },
   },

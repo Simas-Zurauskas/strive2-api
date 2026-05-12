@@ -38,6 +38,14 @@ import { generateLessonSchema, assertPreviousLessonGenerated } from './validatio
  *               includeLinks:
  *                 type: boolean
  *                 default: false
+ *               includeRecallCards:
+ *                 type: boolean
+ *                 default: true
+ *                 description: >
+ *                   Whether to extract spaced-retrieval recall cards from
+ *                   the generated lesson. Defaults true — recall is the
+ *                   highest-value optional feature pedagogically. Users
+ *                   can regenerate later via /regenerate-recall.
  *     responses:
  *       202:
  *         content:
@@ -55,7 +63,8 @@ import { generateLessonSchema, assertPreviousLessonGenerated } from './validatio
  */
 export const generateLessonController = asyncHandler(async (req, res) => {
   const userId = req.userId!;
-  const { moduleIndex, lessonIndex, includeImage, includeLinks } = generateLessonSchema.parse(req.body);
+  const { moduleIndex, lessonIndex, includeImage, includeLinks, includeRecallCards } =
+    generateLessonSchema.parse(req.body);
   const course = await getUserCourseLean({ userId, courseId: req.params.courseId as string });
   const courseId = course._id.toString();
 
@@ -96,7 +105,7 @@ export const generateLessonController = asyncHandler(async (req, res) => {
     userId,
     courseId,
     type: 'generate_lesson',
-    metadata: { moduleIndex, lessonIndex, includeImage, includeLinks },
+    metadata: { moduleIndex, lessonIndex, includeImage, includeLinks, includeRecallCards },
     activeLesson: { moduleIndex, lessonIndex },
   });
 

@@ -102,6 +102,10 @@ export const generateLessonSchema = z.object({
   lessonIndex: z.number().int().min(0, 'lessonIndex must be a non-negative integer'),
   includeImage: z.boolean().optional().default(true),
   includeLinks: z.boolean().optional().default(false),
+  // Defaults TRUE — spaced retrieval is the highest-value optional feature
+  // pedagogically, so we want the typical user to get it without thinking.
+  // Users who opt out per lesson can regenerate via /regenerate-recall later.
+  includeRecallCards: z.boolean().optional().default(true),
 });
 
 export const upsertProgressSchema = z.object({

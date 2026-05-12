@@ -30,6 +30,14 @@ export const LessonStateAnnotation = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => true,
   }),
+  // Recall cards are the highest-value optional feature pedagogically
+  // (spaced repetition + retrieval practice), so they default ON. Users
+  // can opt out per lesson at generation time, then regenerate on demand
+  // from inside the lesson if they change their mind.
+  includeRecallCards: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => true,
+  }),
 
   // ── Derived (set by contextLoad) ───────────────────────
   humanMessage: Annotation<string>({

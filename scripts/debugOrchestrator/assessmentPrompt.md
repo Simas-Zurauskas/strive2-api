@@ -14,7 +14,17 @@ The debug orchestrator is a **testbed**. Each run produces the first K lessons (
 
 **Only flag status `failed` if:** explicit `## Run Failure` block, OR a section the harness intended to produce is entirely missing with nothing after it, OR Step 11/12 AND Step 13/14 all absent. Otherwise: `completed`.
 
-**Cost Breakdown is analytics, not evaluation.** Reports may include a `## Cost Breakdown` section (per-step `Δ credits` table, persona total) plus a `Credits Spent (this persona)` row in the Run Summary. **Ignore both for scoring purposes** — they do not feed any rubric criterion. Do not penalize, reward, or comment on cost in your scorecard. The numbers exist for the orchestrator operator to track spend, not for content-quality assessment.
+**Run Configuration block.** Every report starts with a `## Run Configuration` block listing the orchestrator's active flags: lessons target, structure-review chat, module quizzes, recall-queue review, mentor probes, and per-lesson feature toggles (`hero`, `links`, `recall-gen`). **Read this block before scoring** — it is the authoritative source for which features were *enabled* in this run. A criterion that scores a feature is `n/a` when its toggle is off (the artifact never could have been generated), not a failure.
+
+Concrete mapping:
+- `links=off` → E24 (Links curated) is `n/a` ("feature disabled in this run"). Do NOT score E24 from a missing or empty `links` block when the toggle was off.
+- `recall-gen=off` → G29–G33 are `n/a` ("recall-card extraction disabled in this run"). The lesson body never carried recall cards in the first place; the queue is empty by design, not by failure.
+- `hero=off` → no rubric criterion currently scores hero images; the toggle is purely a cost lever.
+- `Mentor probes=off` → I36–I39 all `n/a` (already documented below).
+- `Recall queue review=off` → G33 (Grading fairness) is `n/a` if no typed-recall attempts; G29–G32 still scorable from the lesson-body recall cards when `recall-gen=on`.
+- `Module quizzes=off` → F27, F28 are `n/a` (already covered by the missing-artifact rule).
+
+**Cost Breakdown is analytics, not evaluation.** Reports include a `## Cost Breakdown` section with TWO tables: (1) per-step `Δ credits` rows from `/api/billing/summary` snapshots and (2) `### By feature (UsageEvent.action label)` — credits rolled up by per-LLM-call label (`lesson:content`, `lesson:recall`, `lesson:image`, `lesson:links`, `recall:grade`, etc.). The Run Summary also carries a `Credits Spent (this persona)` row. **Ignore all three for scoring purposes** — they do not feed any rubric criterion. Do not penalize, reward, or comment on cost in your scorecard. The numbers exist for the orchestrator operator to track spend, not for content-quality assessment.
 
 ## Your job
 
@@ -73,7 +83,7 @@ Maps to Strive's pillars: course generation [A, B, C, J], lessons [E], assessmen
 21. **ICAP ≥ Constructive.** ≥1 section/exercise asks the learner to generate (predict, explain, derive, apply to their artifact). Explain-only caps at 2.
 22. **Desirable difficulty & retrieval cadence.** Productive struggle exists; inline quiz/exercise appears within the lesson, not only end-of-module.
 23. **Exercises doable by *this* persona with persona-specific hooks.** Generic "apply the concept" fails; prompt tied to the persona's artifact passes. Exercise must also have a clear task statement, named success criteria (expected output, test, rubric), and be completable inside the lesson context. **Programming-domain code exercises:** runnable-looking starter code or scaffolding, explicit expected behavior; ignoring the persona's stated project (e.g. generic "build a calculator" when the persona supplied a domain artifact) caps E23 at 2 *and* registers as a B6 failure.
-24. **Links curated, not filler.** Annotations add a reason to click; no SEO-farm sources; flag implausible URLs / author names / paper titles.
+24. **Links curated, not filler.** Annotations add a reason to click; no SEO-farm sources; flag implausible URLs / author names / paper titles. `n/a` if Run Configuration shows `links=off` (the feature was disabled — no `links` block could have been generated).
 
 ### F. Assessment quality (4)
 
@@ -85,6 +95,9 @@ Maps to Strive's pillars: course generation [A, B, C, J], lessons [E], assessmen
 28. **Quiz-gaming detector.** Persona predicted as cautious/slow but scored 100/100 in <10s on an 8-item analysis quiz → flag (distractors weak, or persona collapsed to pattern-match). Score items, not speed.
 
 ### G. Spaced-repetition recall cards (5)
+
+**Missing-artifact rule:** If Run Configuration shows `recall-gen=off`, all of G29–G33 are `n/a` ("recall-card extraction disabled in this run") — the lesson body never carried recall cards and the queue is empty by design.
+
 29. **Relevance to active course.** Queue prefers recall cards from the just-completed course. 100% cross-course for a fresh learner is blocking.
 30. **Atomic & minimum-information.** One fact per card. Compound prompts fail.
 31. **Unambiguous & context-sufficient.** Exactly one correct answer (QA) or one uniquely recoverable deletion (cloze). Readable standalone.
@@ -154,7 +167,7 @@ Summarize as:
 2. **Fan out** — one sub-agent per file, **all tool calls in a single message**. Each gets the §Sub-agent prompt template.
 3. **Gate** on returned scorecards. Malformed output → re-spawn once with "Your previous output was missing: <X>" preamble.
 4. **Drift check** — flag any criterion where a persona's score differs from the cross-persona median by ≥2.
-5. **Cost aggregation (after main scoring task)** — read the `## Cost Breakdown` section + `Credits Spent (this persona)` Run Summary row from each persona report (analytics, not part of any sub-agent's scorecard). Compute per-persona totals, the cohort total, and average per persona. Include this as a `## Cost analytics` section in the synthesized assessment. Sub-agents do NOT score cost — this is a separate dispatcher-side rollup.
+5. **Cost aggregation (after main scoring task)** — read the `## Cost Breakdown` section + `Credits Spent (this persona)` Run Summary row from each persona report (analytics, not part of any sub-agent's scorecard). The breakdown carries two tables: per-step `Δ credits` (cost attributed to each step boundary) and `### By feature (UsageEvent.action label)` (credits rolled up by per-LLM-call label — `lesson:content`, `lesson:recall`, `lesson:image`, `lesson:links`, `recall:grade`, etc.). Compute per-persona totals, the cohort total, average per persona, and a cohort-level per-feature rollup (sum across personas, per action). Include this as a `## Cost analytics` section in the synthesized assessment. Sub-agents do NOT score cost — this is a separate dispatcher-side rollup.
 6. **Synthesize** from scorecards only (not raw reports, except for the cost section above). Write `_ASSESSMENT_<YYYY-MM-DDTHH-mm>.md`.
 
 ## Output format
@@ -208,11 +221,26 @@ Rank the shortlist by RICE (Reach × Impact × Confidence ÷ Effort). Synthetic 
 
 (Pulled from each persona report's `## Cost Breakdown` section + Run Summary `Credits Spent` row. NOT scored — surfaced for spend tracking.)
 
+### Per persona
+
 | Persona | Status | Credits spent | Largest single step |
 |---|---|---:|---|
 | <persona 1> | completed | <total> | <step name + Δ credits> |
 
 **Cohort total:** <sum> credits across <n> persona(s) (avg <avg>/persona, includes <n_failed> failed run(s) up to their failing step).
+
+### Cohort by feature (sum across personas)
+
+(Aggregated from each persona report's `### By feature (UsageEvent.action label)` sub-table.)
+
+| Action | Calls | Credits | % of cohort total |
+|---|---:|---:|---:|
+| lesson:content | | | |
+| lesson:recall | | | |
+| lesson:image | | | |
+| lesson:links | | | |
+| recall:grade | | | |
+| <other actions> | | | |
 
 ## Confidence
 - High-confidence calls: …
@@ -245,7 +273,7 @@ Steps:
 2. Apply the §Harness-context true-failure check. Do not flag lesson caps as failure.
 3. E-band sampling: first / middle / last of the generated set. Note single-module collapse in provenance.
 4. Score all 43 criteria. Each row: `{score 1–4, one-sentence rationale, quote-or-n/a, severity, frequency}`. No row skipped — `n/a` with explanation is valid.
-5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state; **I36–I39 all `n/a` if no mentor probes (no Step 8b AND no `🎓 Lesson Mentor probe` blocks).** **J42/J43 `n/a` if classified goalType is `master` (no special tilt/shape expected).** **All J40–J43 `n/a` if Step 2 lacks the `### Goal Type Classification` block (pre-feature run, run before the api classifier was deployed).** Not a "reliability silence" red flag unless §Harness-context true-failure fires.
+5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state; **I36–I39 all `n/a` if no mentor probes (no Step 8b AND no `🎓 Lesson Mentor probe` blocks).** **J42/J43 `n/a` if classified goalType is `master` (no special tilt/shape expected).** **All J40–J43 `n/a` if Step 2 lacks the `### Goal Type Classification` block (pre-feature run, run before the api classifier was deployed).** **Toggle-driven n/a (read the `## Run Configuration` block):** `links=off` → E24 `n/a`; `recall-gen=off` → G29–G33 all `n/a`. Not a "reliability silence" red flag unless §Harness-context true-failure fires.
 6. Leniency self-check: if >70% of non-n/a ≥3, re-examine lowest items.
 7. Self-preference adjustment (medium risk, same family): E17/E18/E19=4 on polish alone drops to 3.
 8. Answer §Satisfaction with quotes.

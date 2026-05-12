@@ -22,6 +22,7 @@ import { setupTestDb } from '../../test-helpers/db';
 import { makeUser, UserModel } from '../../test-helpers/factories';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import { PLANS } from '@lib/creditPricing';
+import { PRICING_CONFIG } from '@lib/pricingConfig';
 import { runWithUsageContext } from '@lib/usageContext';
 
 vi.mock('@lib/creditSocket', () => ({
@@ -63,7 +64,9 @@ describe('Error classes', () => {
     expect(err.statusCode).toBe(402);
     expect(err.errorCode).toBe('INSUFFICIENT_CREDITS');
     expect(err.meta).toEqual({ need: 1, have: 0 });
-    expect(err.message).toBe('Insufficient credits');
+    // .message is user-visible — must NOT leak the internal "credits" unit.
+    expect(err.message).toMatch(/allowance/i);
+    expect(err.message).not.toMatch(/credit/i);
     expect(err).toBeInstanceOf(Error);
   });
 
@@ -319,60 +322,71 @@ describe('debitActualSpend', () => {
   });
 });
 
-// ── End-to-end: recordUsage → debitActualSpend with static markup ──
+// ── End-to-end: recordUsage → debitActualSpend under single-layer markup ──
 
-describe('static-markup integration (recordUsage → debit)', () => {
-  test('marked services debit at 2× vendor; anthropic at 1×; ledger preserves vendor', async () => {
+describe('action-driven single-layer markup integration (recordUsage → debit)', () => {
+  test('only lesson:content gets the lesson rate; supporting calls in same job bill at other rate', async () => {
+    // Read markup from the live config so this test survives knob changes
+    // — only one test pins exact factors, and it's pricing.test.ts.
+    const lessonFactor = PRICING_CONFIG.markup.lesson.allowance;
+    const otherFactor = PRICING_CONFIG.markup.other.allowance;
+
     const user = await seedUserOutside({ allowance: 1_000 });
     const jobId = new mongoose.Types.ObjectId();
 
     await runWithUsageContext({
-      ctx: { userId: user._id.toString(), source: 'job', jobId: jobId.toString() },
+      ctx: {
+        userId: user._id.toString(),
+        source: 'job',
+        jobId: jobId.toString(),
+        creditBucketAtScope: 'allowance',
+      },
       fn: async () => {
-        recordUsage({ service: 'anthropic', action: 'lesson:content', costMicroCents: 10_000 });
-        recordUsage({ service: 'tavily',    action: 'search:advanced', costMicroCents: 16_000 });
-        recordUsage({ service: 'bfl',       action: 'image:hero',      costMicroCents: 25_000 });
-        recordUsage({ service: 'jina',      action: 'reader:fetch',    costMicroCents: 5_000 });
-        recordUsage({ service: 'judge0',    action: 'code:exec',       costMicroCents: 2_000 });
+        recordUsage({ service: 'anthropic', action: 'lesson:content',    costMicroCents: 10_000 });  // lesson rate
+        recordUsage({ service: 'tavily',    action: 'lesson:links.plan', costMicroCents: 16_000 });  // other rate
+        recordUsage({ service: 'bfl',       action: 'image:hero',        costMicroCents: 25_000 });  // other rate
+        recordUsage({ service: 'jina',      action: 'reader:fetch',      costMicroCents: 5_000  });  // other rate
+        recordUsage({ service: 'judge0',    action: 'code:exec',         costMicroCents: 2_000  });  // other rate
         await debitActualSpend({ userId: user._id, jobId, jobType: 'generate_lesson' });
       },
     });
     // recordUsage's UsageEventModel.create is fire-and-forget (.catch only).
-    // Poll briefly for the rows to materialise instead of betting on a fixed
-    // microtask flush — keeps the test resilient under CI scheduler jitter.
     for (let i = 0; i < 50; i++) {
       const count = await UsageEventModel.countDocuments({ userId: user._id });
       if (count >= 5) break;
       await new Promise((r) => setTimeout(r, 5));
     }
 
-    // Charged total = 10_000 (1×) + 32_000 + 50_000 + 10_000 + 4_000 (all 2×) = 106_000 μ¢.
-    // Credits debited = ceil(106_000 / 5_000) = 22.
+    // Charged = (10_000 × lesson) + (16_000 + 25_000 + 5_000 + 2_000) × other
+    const expectedCharged = 10_000 * lessonFactor + (16_000 + 25_000 + 5_000 + 2_000) * otherFactor;
+    const expectedCredits = Math.ceil(expectedCharged / 5_000);
+
     const after = await UserModel.findById(user._id).lean();
-    expect(after?.credits.allowanceBalance).toBe(1_000 - 22);
+    expect(after?.credits.allowanceBalance).toBe(1_000 - expectedCredits);
 
     const debitRow = await CreditLedgerModel.findOne({ userId: user._id, reason: 'debit_action' }).lean();
-    expect(debitRow?.allowanceDelta).toBe(-22);
+    expect(debitRow?.allowanceDelta).toBe(-expectedCredits);
 
-    // Vendor cost on the analytics ledger remains the raw vendor numbers — no doubling.
+    // Vendor cost on the analytics ledger remains the raw vendor numbers — no markup.
     const usageRows = await UsageEventModel.find({ userId: user._id }).lean();
-    const vendorByService = Object.fromEntries(usageRows.map((r) => [r.service, r.costMicroCents]));
-    expect(vendorByService).toMatchObject({
-      anthropic: 10_000,
-      tavily: 16_000,
-      bfl: 25_000,
-      jina: 5_000,
-      judge0: 2_000,
+    const vendorByAction = Object.fromEntries(usageRows.map((r) => [r.action, r.costMicroCents]));
+    expect(vendorByAction).toMatchObject({
+      'lesson:content': 10_000,
+      'lesson:links.plan': 16_000,
+      'image:hero': 25_000,
+      'reader:fetch': 5_000,
+      'code:exec': 2_000,
     });
-    const chargedByService = Object.fromEntries(
-      usageRows.map((r) => [r.service, (r as { chargedMicroCents?: number }).chargedMicroCents]),
+    const chargedByAction = Object.fromEntries(
+      usageRows.map((r) => [r.action, (r as { chargedMicroCents?: number }).chargedMicroCents]),
     );
-    expect(chargedByService).toMatchObject({
-      anthropic: 10_000,
-      tavily: 32_000,
-      bfl: 50_000,
-      jina: 10_000,
-      judge0: 4_000,
+    // lesson:content is the only one at the lesson rate; everything else is `other`.
+    expect(chargedByAction).toMatchObject({
+      'lesson:content': 10_000 * lessonFactor,
+      'lesson:links.plan': 16_000 * otherFactor,
+      'image:hero': 25_000 * otherFactor,
+      'reader:fetch': 5_000 * otherFactor,
+      'code:exec': 2_000 * otherFactor,
     });
   });
 

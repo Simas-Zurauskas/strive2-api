@@ -1,5 +1,8 @@
 import { writeFile, mkdir } from 'fs/promises';
 import path from 'path';
+import { Types } from 'mongoose';
+import UsageEventModel from '@models/UsageEventModel';
+import { MICROCENTS_PER_CREDIT } from '@lib/creditPricing';
 import type {
   Persona,
   StepResult,
@@ -20,10 +23,60 @@ import type {
   GoalType,
   CostEvent,
   CostSummary,
+  OrchestratorConfig,
 } from './types';
 import type { ApiClient } from './apiClient';
 import type { ClarifyCueAssertion, StructureConformanceAssertion } from './goalTypeAssertions';
 import type { GetRecallQueueResult, RecallStats } from '@services/recallQueueService';
+
+/**
+ * Per-action credit aggregation. Reads UsageEvent rows for `userId` and
+ * rolls them up by `action` label (e.g. "lesson:content", "lesson:recall",
+ * "lesson:image", "lesson:links"). Charged microcents are converted to
+ * credits via MICROCENTS_PER_CREDIT — same conversion the live debit path
+ * uses, so the totals align with what was actually subtracted from the
+ * persona's balance.
+ *
+ * Used by the orchestrator at end-of-run to surface a per-feature cost
+ * breakdown in each persona's markdown report. Falls back to an empty
+ * array on query failure — analytics, not the persona's job contract.
+ */
+export const aggregatePersonaCostByAction = async (
+  userId: string,
+): Promise<{ action: string; credits: number; count: number }[]> => {
+  try {
+    const rows = await UsageEventModel.aggregate<{
+      _id: string;
+      micro: number;
+      count: number;
+    }>([
+      { $match: { userId: new Types.ObjectId(userId) } },
+      {
+        $group: {
+          _id: '$action',
+          // chargedMicroCents falls back to costMicroCents for legacy rows
+          // (pre-markup-feature). Matches the convention in
+          // controlers/usage/getUsageSummary.ts so the orchestrator and
+          // the admin Usage view agree on per-action totals.
+          micro: {
+            $sum: { $ifNull: ['$chargedMicroCents', '$costMicroCents'] },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { micro: -1 } },
+    ]);
+    return rows.map((r) => ({
+      action: r._id,
+      credits: r.micro / MICROCENTS_PER_CREDIT,
+      count: r.count,
+    }));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`[CostTracker] byAction aggregation failed (${reason}) — section will be skipped`);
+    return [];
+  }
+};
 
 /**
  * Per-persona credit-spend tracker. Snapshots `/api/billing/summary` at
@@ -165,6 +218,27 @@ Generated: ${new Date().toISOString()}
 - **Structure review:** ${p.wizardBehavior.structureReview}
 - **Quiz attempt style:** ${p.wizardBehavior.quizAttemptStyle}
 - **Recall review style:** ${p.wizardBehavior.recallReviewStyle}
+`);
+  }
+
+  /**
+   * Run-configuration block. Surfaces the orchestrator flags that were
+   * active for this persona — required by the assessment rubric to
+   * disambiguate "feature disabled by flag" from "feature ran but
+   * produced nothing". For example: `Curated links: 0` on a lesson is
+   * an E24 failure when `links=on`, but is `n/a` when `links=off`.
+   *
+   * Kept compact — one-line list of toggles + lesson cap. No prose.
+   */
+  addRunConfiguration(config: OrchestratorConfig): void {
+    const onOff = (v: boolean) => (v ? 'on' : 'off');
+    this.sections.push(`## Run Configuration
+- **Lessons target:** ${config.maxLessons === 0 ? 'skipped (wizard only)' : String(config.maxLessons)}
+- **Structure-review chat:** ${onOff(config.enableChatReview)}
+- **Module quizzes:** ${onOff(config.enableQuiz)}
+- **Recall queue review:** ${onOff(config.enableRecall)}
+- **Mentor probes (course + lesson):** ${onOff(config.enableMentor)}
+- **Per-lesson features:** hero=${onOff(config.includeHero)}, links=${onOff(config.includeLinks)}, recall-gen=${onOff(config.includeRecall)}
 `);
   }
 
@@ -749,7 +823,36 @@ Snapshots taken at every step boundary against \`/api/billing/summary\`. \`Δ cr
 | # | Step | Balance Before | Balance After | Δ credits |
 |---|------|---------------:|--------------:|----------:|
 ${rows}
-`);
+${this.renderCostBreakdownByAction(costSummary)}`);
+  }
+
+  /**
+   * Per-action (per-feature) cost rollup, rendered as a second table
+   * inside the Cost Breakdown section. Skipped silently when no
+   * byAction data was collected (e.g. UsageEvent query failed). The
+   * breakdown is orthogonal to the per-step view above: lesson:content,
+   * lesson:image, lesson:links, lesson:recall, recall:grade, etc. are
+   * each their own row regardless of which step they fired in.
+   */
+  private renderCostBreakdownByAction(costSummary: CostSummary): string {
+    const rows = costSummary.byAction ?? [];
+    if (rows.length === 0) return '';
+    const tableRows = rows
+      .map(
+        (r) =>
+          `| ${escapeCell(r.action)} | ${r.count} | ${fmtCredits(r.credits)} |`,
+      )
+      .join('\n');
+    return `
+
+### By feature (UsageEvent.action label)
+
+Credits aggregated by per-LLM-call label across the whole persona run. Sums match the per-step \`Δ credits\` total above. Use this to isolate which feature ate the budget (e.g. \`lesson:recall\` vs \`lesson:content\` vs \`lesson:image\`).
+
+| Action | Calls | Credits |
+|--------|------:|--------:|
+${tableRows}
+`;
   }
 
   addFailure({ failedStep, error }: { failedStep: { step: number; name: string } | null; error: string }): void {

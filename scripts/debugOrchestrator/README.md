@@ -23,22 +23,53 @@ yarn debug:orchestrator --concurrency 3 --personas 5 --chat --lessons 2 --recall
 
 # Full end-to-end: wizard + lessons + quizzes + recall review + mentor probes
 yarn debug:orchestrator --concurrency 5 --personas 5 --chat --lessons 4 --quizzes --recall --mentor
+
+# Everything on — hero images + further-reading links + recall cards generated
+# per lesson, structure-review chat, module quizzes, recall queue review, mentor
+# probes. Recall-card generation defaults ON; hero and links default OFF
+# because both cost real $ — opt in with `--with-hero` and `--links`.
+yarn debug:orchestrator \
+  --concurrency 5 \
+  --personas 5 \
+  --lessons 4 \
+  --chat \
+  --quizzes \
+  --recall \
+  --mentor \
+  --with-hero \
+  --links
+
+# Same as above, but pin every persona to a single goal-type bucket
+# (useful when iterating on the classifier or per-bucket prompts).
+yarn debug:orchestrator --concurrency 3 --personas 5 --lessons 2 \
+  --chat --quizzes --recall --mentor --with-hero --links \
+  --goal-type pass
+
+# Or split the population across buckets (sum must equal --personas):
+yarn debug:orchestrator --concurrency 3 --personas 5 --lessons 2 \
+  --chat --quizzes --recall --mentor --with-hero --links \
+  --goal-type-distribution "pass=2,build=2,fluency=1"
 ```
 
 No user credentials are passed — the orchestrator creates and tears down a separate account per persona.
 
 ## Options
 
-| Flag            | Type     | Description                                                     |
-| --------------- | -------- | --------------------------------------------------------------- |
-| `--concurrency` | required | Max personas running simultaneously                             |
-| `--personas`    | required | Number of personas to generate                                  |
-| `--lessons`     | required | Lessons to generate per persona (0 = skip)                      |
-| `--api-url`     | optional | API base URL (default: `http://localhost:4000`)                 |
-| `--chat`        | optional | Include structure review chat step (off by default)             |
-| `--quizzes`     | optional | Generate + submit module quizzes after lessons (off by default) |
-| `--recall`    | optional | Review every recall the queue returns (off by default)         |
-| `--mentor`      | optional | Probe course-design + lesson mentor chats with up to 3 persona-driven turns each (off by default) |
+| Flag                        | Type     | Description                                                                                       |
+| --------------------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `--concurrency`             | required | Max personas running simultaneously                                                               |
+| `--personas`                | required | Number of personas to generate                                                                    |
+| `--lessons`                 | required | Lessons to generate per persona (0 = skip)                                                        |
+| `--api-url`                 | optional | API base URL (default: `http://localhost:4000`)                                                   |
+| `--chat`                    | optional | Include structure review chat step (off by default)                                               |
+| `--quizzes`                 | optional | Generate + submit module quizzes after lessons (off by default)                                   |
+| `--recall`                  | optional | Review every recall card the queue returns (off by default)                                       |
+| `--mentor`                  | optional | Probe course-design + lesson mentor chats with up to 3 persona-driven turns each (off by default) |
+| `--with-hero`               | optional | Generate hero images per lesson (default: off — BFL costs real $)                                 |
+| `--links`                   | optional | Curate "further reading" links per lesson (default: off — opt in when grading link quality)        |
+| `--no-recall-gen`           | optional | Skip recall-card extraction during lesson gen (default: on). Distinct from `--recall`, which reviews the queue. |
+| `--goal-type`               | optional | Force every persona into one bucket: `master`, `monetize`, `pass`, `build`, `fluency`             |
+| `--goal-type-distribution`  | optional | Per-bucket counts, e.g. `"pass=3,build=2"`. Sum must equal `--personas`. Mutually exclusive with `--goal-type` |
 
 `--email` and `--password` are accepted (for shell-history backward compatibility) but ignored — a warning is printed if either is passed.
 
@@ -94,11 +125,13 @@ Reports include:
 - Persona profile (name, background, goal, personality, priorities)
 - Predicted goal type — orchestrator's ground-truth bucket for the classifier (master / monetize / pass / build / fluency) plus a one-sentence rationale. When set, the persona's `goalTypeOverrideTarget` is also surfaced ("would switch to X via the chip if given the chance").
 - Predicted behavior for all five dimensions (survey / depth / structure / quiz / recall review)
-- Run summary (duration, status, course domain, **goal type predicted/final/confidence + match flag**, lesson/quiz/recall counts)
+- **Run configuration** — which flags were active for this run (lessons target, chat, quizzes, recall review, mentor probes, per-lesson `hero` / `links` / `recall-gen`). The assessment rubric uses this to disambiguate "feature disabled by flag" (`n/a`) from "feature ran but produced 0" (failure).
+- Run summary (duration, status, course domain, **goal type predicted/final/confidence + match flag**, lesson/quiz/recall counts, **credits spent**)
 - Each step with timing, API responses, AI reasoning
 - Generated lesson content: block breakdown by type, code, mermaid diagrams, exercises (collapsible)
 - Module quiz: per-module score, mastery tier, next-review interval, and every question with selected vs correct option + explanation (collapsible)
 - Recall queue snapshot + per-card review log: mode, user answer (typed-recall), grade score + verdict, final rating, new Leitner box, next due date
+- **Cost Breakdown** — per-step `Δ credits` table (snapshots taken at every step boundary against `/api/billing/summary`, including each per-lesson/per-quiz/per-recall sub-step) plus a per-feature rollup by `UsageEvent.action` label (`lesson:content`, `lesson:recall`, `lesson:image`, `lesson:links`, `recall:grade`, etc.). Analytics only — the assessment rubric ignores it. Cohort total is also printed to stdout at end of run.
 
 ## Concurrency Notes
 
