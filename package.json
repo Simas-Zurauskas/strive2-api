@@ -1,6 +1,6 @@
 {
   "name": "strive.api",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "",
   "private": true,
   "main": "index.js",
@@ -9,7 +9,7 @@
     "dev": "nodemon --watch src --ext ts,tsx,scss --exec \"ts-node --files -r tsconfig-paths/register src/index.ts\"",
     "build": "rm -rf build && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
     "tsc": "tsc --noEmit",
-    "stripe:webhook": "stripe listen --forward-to http://localhost:4000/api/stripe/webhook",
+    "stripe:webhook": "stripe listen --forward-to http://localhost:4000/api/billing/stripe/webhook",
     "test": "vitest run",
     "debug:orchestrator": "ts-node --files -r tsconfig-paths/register scripts/debugOrchestrator/index.ts",
     "kb:index": "ts-node --files -r tsconfig-paths/register scripts/indexProductKb/index.ts",

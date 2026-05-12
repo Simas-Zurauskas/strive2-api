@@ -14,10 +14,11 @@ import {
   priceFlatUnit,
   LLM_PRICING,
   SERVICE_PRICING,
-  applyStaticMarkup,
-  STATIC_MARKUP_FACTOR,
-  STATIC_MARKUP_SERVICES,
+  applyMarkup,
+  markupFor,
+  type CreditBucket,
 } from './pricing';
+import { PRICING_CONFIG } from './pricingConfig';
 
 
 const zeroTokens = { cacheRead: 0, cacheCreation5m: 0, cacheCreation1h: 0, uncached: 0, output: 0 };
@@ -192,42 +193,94 @@ test('Judge0 RapidAPI priced at $0.002/exec = 2,000 μ¢', () => {
   assert.equal(priceFlatUnit({ sku: 'judge0_rapidapi' }), 2_000);
 });
 
-// ── applyStaticMarkup ─────────────────────────────────────
+// ── applyMarkup (action-driven) ────────────────────────────
 
-test('applyStaticMarkup doubles cost for every marked service', () => {
-  for (const service of STATIC_MARKUP_SERVICES) {
+// Markup is resolved per call from the action label, NOT from a scope-level
+// category. Only actions listed in LESSON_PREMIUM_ACTIONS bill at the lesson
+// row of MARKUP; everything else bills at the `other` row. The bucket
+// (allowance vs bonus) is supplied by the caller; the category is derived.
+const BUCKETS = ['allowance', 'bonus'] as const satisfies readonly CreditBucket[];
+
+const LESSON_ACTION = 'lesson:content';
+const OTHER_ACTION = 'mentor:chat';
+
+test('markupFor: lesson:content resolves to MARKUP.lesson', () => {
+  for (const bucket of BUCKETS) {
     assert.equal(
-      applyStaticMarkup({ service, costMicroCents: 1_000 }),
-      1_000 * STATIC_MARKUP_FACTOR,
-      `${service} should be charged at ${STATIC_MARKUP_FACTOR}× vendor cost`,
+      markupFor({ action: LESSON_ACTION, creditBucket: bucket }),
+      PRICING_CONFIG.markup.lesson[bucket],
+      `lesson:content / ${bucket} must read MARKUP.lesson.${bucket}`,
     );
   }
 });
 
-test('applyStaticMarkup covers exactly the expected services', () => {
-  // Pin the list — adding a service to the markup set is a deliberate billing
-  // change and should require updating this assertion.
-  assert.deepEqual(
-    [...STATIC_MARKUP_SERVICES].sort(),
-    ['bfl', 'jina', 'judge0', 'openai', 'pinecone', 'tavily', 'tts'],
-  );
-});
-
-test('applyStaticMarkup leaves anthropic untouched', () => {
-  assert.equal(applyStaticMarkup({ service: 'anthropic', costMicroCents: 1_234 }), 1_234);
-});
-
-test('applyStaticMarkup of a zero cost is zero (no surprise charge on dedup-hit rows)', () => {
-  for (const service of STATIC_MARKUP_SERVICES) {
-    assert.equal(applyStaticMarkup({ service, costMicroCents: 0 }), 0);
+test('markupFor: every non-premium action resolves to MARKUP.other', () => {
+  // Supporting calls INSIDE lesson generation also fall through to `other`.
+  for (const action of ['mentor:chat', 'image:hero', 'lesson:recall', 'lesson:links.plan', 'search:basic', 'structure:generate', 'utility', 'embedding:index', 'upsert', 'reader:fetch']) {
+    for (const bucket of BUCKETS) {
+      assert.equal(
+        markupFor({ action, creditBucket: bucket }),
+        PRICING_CONFIG.markup.other[bucket],
+        `${action} / ${bucket} must read MARKUP.other.${bucket}`,
+      );
+    }
   }
 });
 
-test('applyStaticMarkup returns an integer for fractional inputs', () => {
-  // Math.round inside applyStaticMarkup keeps the ledger field integer-clean.
-  const charged = applyStaticMarkup({ service: 'tavily', costMicroCents: 1.5 });
+test('applyMarkup multiplies vendor cost by the per-action factor', () => {
+  for (const bucket of BUCKETS) {
+    const lessonFactor = PRICING_CONFIG.markup.lesson[bucket];
+    const otherFactor = PRICING_CONFIG.markup.other[bucket];
+    assert.equal(
+      applyMarkup({ action: LESSON_ACTION, creditBucket: bucket, costMicroCents: 1_000 }),
+      1_000 * lessonFactor,
+    );
+    assert.equal(
+      applyMarkup({ action: OTHER_ACTION, creditBucket: bucket, costMicroCents: 1_000 }),
+      1_000 * otherFactor,
+    );
+  }
+});
+
+test('applyMarkup of a zero cost is zero (no surprise charge on dedup-hit rows)', () => {
+  for (const action of [LESSON_ACTION, OTHER_ACTION]) {
+    for (const bucket of BUCKETS) {
+      assert.equal(applyMarkup({ action, creditBucket: bucket, costMicroCents: 0 }), 0);
+    }
+  }
+});
+
+test('applyMarkup of a negative or NaN cost is zero (defensive)', () => {
+  assert.equal(applyMarkup({ action: LESSON_ACTION, creditBucket: 'allowance', costMicroCents: -1 }), 0);
+  assert.equal(applyMarkup({ action: LESSON_ACTION, creditBucket: 'allowance', costMicroCents: NaN }), 0);
+});
+
+test('applyMarkup returns an integer for fractional inputs', () => {
+  // Math.round inside applyMarkup keeps the ledger field integer-clean.
+  const factor = PRICING_CONFIG.markup.lesson.allowance;
+  const charged = applyMarkup({ action: LESSON_ACTION, creditBucket: 'allowance', costMicroCents: 1.5 });
   assert.equal(Number.isInteger(charged), true);
-  assert.equal(charged, 3);
+  assert.equal(charged, Math.round(1.5 * factor));
+});
+
+test('top-up lesson markup is strictly greater than allowance lesson markup (subscribe-to-save)', () => {
+  // The "subscribe to save" promise lives in this gap. If they're ever equal,
+  // we've stopped charging the top-up tax that's supposed to push subscriptions.
+  assert.ok(
+    markupFor({ action: LESSON_ACTION, creditBucket: 'bonus' }) >
+      markupFor({ action: LESSON_ACTION, creditBucket: 'allowance' }),
+    'lesson bonus markup must be > lesson allowance markup',
+  );
+});
+
+test('lesson:content markup is strictly greater than non-lesson markup (lesson is the premium product)', () => {
+  for (const bucket of BUCKETS) {
+    assert.ok(
+      markupFor({ action: LESSON_ACTION, creditBucket: bucket }) >
+        markupFor({ action: OTHER_ACTION, creditBucket: bucket }),
+      `lesson:content markup (${bucket}) must exceed mentor:chat markup`,
+    );
+  }
 });
 
 // ── Done ──────────────────────────────────────────────────

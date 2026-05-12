@@ -71,7 +71,7 @@ app.use(
 // `express.json()` would consume + re-serialize them first, breaking
 // verification. Mount the route here with its own `express.raw()` parser
 // BEFORE the global JSON parser below.
-app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookController);
+app.post('/api/billing/stripe/webhook', express.raw({ type: 'application/json' }), stripeWebhookController);
 
 app.use(express.json({ limit: '1mb' }));
 

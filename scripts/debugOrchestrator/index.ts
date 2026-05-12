@@ -26,7 +26,23 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
   // a value for these, otherwise `--recall --chat` would parse `--chat` as
   // the value of `--recall`. Listed explicitly so typos in value flags
   // surface as missing-required errors instead of silent bool coercions.
-  const knownBoolFlags = new Set(['chat', 'quizzes', 'recall', 'mentor']);
+  const knownBoolFlags = new Set([
+    'chat',
+    'quizzes',
+    'recall',
+    'mentor',
+    // Per-feature lesson-gen toggles. Orchestrator defaults differ
+    // from the typical client path because BFL (image gen) and link
+    // curation cost real money and are irrelevant to most assessment
+    // runs — so hero AND links default OFF in orchestrator. Recall
+    // defaults ON to mirror the typical user.
+    // `--no-recall-gen` is named to avoid conflict with the existing
+    // `--recall` flag, which means "review the recall queue" not
+    // "generate recall cards".
+    'with-hero',
+    'links',
+    'no-recall-gen',
+  ]);
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -77,6 +93,9 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     console.error('  --quizzes                      Generate + submit module quizzes after lessons');
     console.error('  --recall                       Review every recall card the queue returns (off by default)');
     console.error('  --mentor                       Probe course-design + lesson mentor chats (1 turn each)');
+    console.error('  --with-hero                    Generate hero images (default: off — BFL costs real $)');
+    console.error('  --links                        Curate "further reading" links per lesson (default: off)');
+    console.error('  --no-recall-gen                Skip recall card extraction (default: on). Distinct from --recall.');
     console.error('  --goal-type <bucket>           Force every persona into a single bucket');
     console.error('                                 (master | monetize | pass | build | fluency).');
     console.error('  --goal-type-distribution <s>   Per-bucket counts, comma-separated.');
@@ -104,6 +123,15 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     enableQuiz: boolFlags.has('quizzes'),
     enableRecall: boolFlags.has('recall'),
     enableMentor: boolFlags.has('mentor'),
+    // Orchestrator defaults (not the same as client defaults):
+    //   - hero: OFF (BFL costs real $; irrelevant to assessment quality)
+    //   - links: OFF (paid step; opt-in via `--links` when grading curation)
+    //   - recall: ON (mirror the typical-user pedagogical path)
+    // Operator flips each with `--with-hero`, `--links`, `--no-recall-gen`
+    // to isolate per-feature cost contribution.
+    includeHero: boolFlags.has('with-hero'),
+    includeLinks: boolFlags.has('links'),
+    includeRecall: !boolFlags.has('no-recall-gen'),
     goalTypeDistribution,
   };
 }

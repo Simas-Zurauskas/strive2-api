@@ -167,6 +167,7 @@ export const getUsageHistoryController = asyncHandler(async (req, res) => {
           chargedMicroCents: eventCharged,
           creditsCharged,
           planAtTime: r.planAtTime ?? null,
+          pricingVersion: r.pricingVersion ?? null,
           source: attribution.source,
           userPaidUsd: attribution.userPaidUsd,
           metadata: r.metadata ?? {},

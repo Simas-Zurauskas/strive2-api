@@ -12,7 +12,19 @@ import { readFileSync, readdirSync, statSync } from 'fs';
 import matter from 'gray-matter';
 import mongoose from 'mongoose';
 import { MONGO_URI } from '@conf/env';
+import {
+  buildKbPricingReplacements,
+  substitutePricingPlaceholders,
+} from '@lib/kbPricingReplacements';
 import { deleteProductKbArticle, indexProductKbArticle, listIndexedArticles } from '@services/productKbRagService';
+
+// Pricing placeholder map. Built once at start — PRICING_CONFIG is static
+// across a single indexer run. Any change to pricingConfig.ts produces a
+// different replacement value, which changes the substituted body, which
+// changes the content hash, which triggers re-indexing of every affected
+// article. That's exactly the contract we want — pricing knob moves keep
+// Pinecone in sync.
+const KB_PRICING_REPLACEMENTS = buildKbPricingReplacements();
 
 // ── Resolve the on-disk article corpus ──────────────────────
 //
@@ -83,7 +95,11 @@ const loadArticles = (): ArticleSpec[] => {
         console.error(`[error] ${filePath}: frontmatter.topic=${fmTopic} ≠ folder=${topic}`.red);
         process.exit(1);
       }
-      const body = content.trim();
+      // Substitute pricing placeholders BEFORE hashing so the hash
+      // (and the embedded text) reflect current PRICING_CONFIG. Mirror
+      // of what the client's KB loader does at build time — both sides
+      // must produce identical post-substitution text for every article.
+      const body = substitutePricingPlaceholders(content.trim(), KB_PRICING_REPLACEMENTS);
       articles.push({
         topic,
         articleSlug: slug,

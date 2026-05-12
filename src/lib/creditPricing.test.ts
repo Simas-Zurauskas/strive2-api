@@ -108,32 +108,39 @@ test('top-up bounds are sane (min < max, both positive integers)', () => {
   assert.ok(TOPUP_MIN_USD >= 1);
 });
 
-test('top-up per-credit rate exceeds Starter per-credit rate (subs stay cheaper)', () => {
-  // Starter is the cheapest paid plan on a per-credit basis; top-ups price
-  // above it so recurring subscriptions remain the cheaper lane for
-  // anyone using the product consistently.
-  const starterPerCredit = 12.99 / PLANS.starter.monthlyAllowance;
+test('top-up per-credit rate equals or undercuts subscription per-credit rates', () => {
+  // Under the single-layer markup model, top-up credits cost the same per
+  // credit as the underlying denomination (the "subscribe to save" lever
+  // moved into the markup table — 4× allowance vs 5× bonus on lesson scope).
+  // The historical invariant (top-up > Starter) inverts: top-up purchases at
+  // base $0.005/cr while subscriptions land slightly above base after
+  // dividing Stripe price by integer allowance.
   const topupPerCredit = 1 / TOPUP_CREDITS_PER_USD;
-  assert.ok(
-    topupPerCredit > starterPerCredit,
-    `top-up $${topupPerCredit.toFixed(4)}/cr must be > Starter's $${starterPerCredit.toFixed(4)}/cr`,
-  );
+  const baseUsdPerCredit = MICROCENTS_PER_CREDIT / 1_000_000;
+  assert.equal(topupPerCredit, baseUsdPerCredit);
 });
 
 // ── Central-constant economics (margin sanity) ─────────────
 
-test('per-plan gross margin ladder is sane (Free loss leader, paid > 40%)', () => {
-  // Each plan's real-cost budget at the central rate. Margin = (userUsd -
-  // realCostUsd) / userUsd. Free is a loss leader (no user $); paid tiers
-  // must clear 40% to be financially viable after provider overhead.
-  const realCostUsd = (credits: number) => credits * (MICROCENTS_PER_CREDIT / 1_000_000) * 100 / 100;
+test('per-plan gross margin ladder is sane (paid plans >40% under typical lesson-mix)', () => {
+  // Under the new markup model the previous "credits worth their face value
+  // at MICROCENTS_PER_CREDIT" calculation is no longer the right margin
+  // proxy — that ratio is the credit denomination, not the platform's
+  // vendor cost. Vendor cost per credit is now `chargedValue / markup`,
+  // i.e. 1/4 of charged for sub lessons and 1/2 for non-lesson. A
+  // lesson-heavy month (75% lesson at 4×, 25% non-lesson at 2×) gives:
+  //   vendor_per_credit = 0.75 × (denom/4) + 0.25 × (denom/2)
+  //                     = (0.75/4 + 0.25/2) × denom = 0.3125 × denom
+  // So margin = (userUsd - 0.3125 × denom × credits) / userUsd.
+  const denom = MICROCENTS_PER_CREDIT / 1_000_000;
   const margin = (userUsd: number, credits: number) => {
-    const cost = realCostUsd(credits);
-    return userUsd === 0 ? 0 : (userUsd - cost) / userUsd;
+    const vendorCost = 0.3125 * denom * credits;
+    return userUsd === 0 ? 0 : (userUsd - vendorCost) / userUsd;
   };
-  assert.ok(margin(PLANS.starter.monthlyUsd, PLANS.starter.monthlyAllowance) >= 0.4);
-  assert.ok(margin(PLANS.pro.monthlyUsd, PLANS.pro.monthlyAllowance) >= 0.4);
-  assert.ok(margin(PLANS.studio.monthlyUsd, PLANS.studio.monthlyAllowance) >= 0.4);
+  for (const key of ['starter', 'pro', 'studio'] as const) {
+    const m = margin(PLANS[key].monthlyUsd, PLANS[key].monthlyAllowance);
+    assert.ok(m >= 0.4, `${key} margin ${m.toFixed(2)} must be >= 40%`);
+  }
 });
 
 // ── Per-credit USD rates (used by engineer billing view) ───
@@ -161,9 +168,11 @@ test('rates ladder: Studio cheaper per credit than Pro, Pro cheaper than Starter
   assert.ok(PLAN_USD_PER_CREDIT.pro < PLAN_USD_PER_CREDIT.starter);
 });
 
-test('TOPUP_USD_PER_CREDIT == 1 / TOPUP_CREDITS_PER_USD', () => {
+test('TOPUP_USD_PER_CREDIT == 1 / TOPUP_CREDITS_PER_USD == base denomination', () => {
+  // Under single-layer pricing, top-up purchases credits at the base
+  // denomination (no Layer 3 premium).
   assert.equal(TOPUP_USD_PER_CREDIT, 1 / TOPUP_CREDITS_PER_USD);
-  assert.equal(TOPUP_USD_PER_CREDIT, 0.025);
+  assert.equal(TOPUP_USD_PER_CREDIT, MICROCENTS_PER_CREDIT / 1_000_000);
 });
 
 // ── Done ──────────────────────────────────────────────────

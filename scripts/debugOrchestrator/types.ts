@@ -102,6 +102,17 @@ export interface OrchestratorConfig {
    * (Step 9b). Off by default — adds ~3-5 s + a Haiku call per lesson.
    */
   enableMentor: boolean;
+  /**
+   * Per-feature lesson generation toggles, mirroring the client-side
+   * options on the lesson-gen UI. Off-by-default for `recall` so cohort
+   * runs include spaced-retrieval extraction (the typical user path);
+   * the inverse `--no-*` flags let the operator strip features to
+   * isolate cost contribution per node (e.g. "lessons with no recall vs
+   * with recall, compare credit totals").
+   */
+  includeHero: boolean;
+  includeLinks: boolean;
+  includeRecall: boolean;
   maxLessons: number;
   /**
    * Optional cohort bias. When set, the persona generator is constrained
@@ -206,6 +217,14 @@ export interface CostSummary {
   totalSpent: number;
   /** Per-step events in chronological order. */
   events: CostEvent[];
+  /**
+   * Per-feature credit cost rolled up by UsageEvent.action label. Populated
+   * at end-of-run by querying UsageEventModel directly (the orchestrator
+   * already has a Mongo connection). Lets reports answer "of this persona's
+   * 268 credits, how much went to lesson:recall vs lesson:image vs
+   * lesson:content?" — orthogonal to the per-step balance-delta view above.
+   */
+  byAction?: { action: string; credits: number; count: number }[];
 }
 
 // ── Re-exported from real models ─────────────────────────

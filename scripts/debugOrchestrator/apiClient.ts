@@ -173,17 +173,19 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
       lessonIndex,
       includeImage,
       includeLinks,
+      includeRecallCards,
     }: {
       courseId: string;
       moduleIndex: number;
       lessonIndex: number;
       includeImage?: boolean;
       includeLinks?: boolean;
+      includeRecallCards?: boolean;
     }): Promise<string> {
       const { data } = await request<{ jobId: string }>({
         method: 'POST',
         path: `/api/course/${courseId}/generate-lesson`,
-        body: { moduleIndex, lessonIndex, includeImage, includeLinks },
+        body: { moduleIndex, lessonIndex, includeImage, includeLinks, includeRecallCards },
       });
       return data.jobId;
     },

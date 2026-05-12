@@ -14,6 +14,7 @@ import {
   generateLessonController,
   regenerateHeroController,
   regenerateLinksController,
+  regenerateRecallController,
   getLessonContentController,
   getLessonContentStatsController,
   executeCodeController,
@@ -165,6 +166,11 @@ router.post(
   '/:courseId/lesson/:moduleIndex/:lessonIndex/regenerate-links',
   requireCredits(),
   regenerateLinksController,
+);
+router.post(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/regenerate-recall',
+  requireCredits(),
+  regenerateRecallController,
 );
 router.post(
   '/:courseId/lesson/:moduleIndex/:lessonIndex/narration',

@@ -305,7 +305,10 @@ export const createTopupCheckout = async ({
           currency: 'usd',
           product_data: {
             name: 'Allowance top-up',
-            description: `${credits.toLocaleString()} credits of pay-as-you-go allowance (never expires)`,
+            // User-visible on the Stripe Checkout page. Phrased around dollars
+            // + behavior (never expires, spent before subscription allowance);
+            // never mentions the internal "credits" unit.
+            description: `$${amountUsd} of pay-as-you-go allowance — never expires, used first when generating courses and lessons.`,
           },
           unit_amount: unitAmountCents,
         },

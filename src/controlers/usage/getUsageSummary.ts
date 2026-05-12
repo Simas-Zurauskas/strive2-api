@@ -76,6 +76,13 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
         allTimeCharged: number;
       }[];
       byService: { _id: UsageService; cost: number; charged: number }[];
+      // Granular per-feature breakdown. `action` is the LLM call-site
+      // label ("lesson:content", "lesson:recall", "lesson:image",
+      // "lesson:links", "recall:grade", etc.) so the admin Usage view
+      // can answer "how much of this lesson's spend went to recall card
+      // extraction vs content vs image". Top 20 keeps the row count
+      // bounded on power users.
+      byAction: { _id: string; cost: number; charged: number; count: number }[];
     }>([
       { $match: { userId: userObjId } },
       {
@@ -109,6 +116,18 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
                 charged: { $sum: chargedExpr },
               },
             },
+          ],
+          byAction: [
+            {
+              $group: {
+                _id: '$action',
+                cost: { $sum: '$costMicroCents' },
+                charged: { $sum: chargedExpr },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { charged: -1 } },
+            { $limit: 20 },
           ],
         },
       },
@@ -185,6 +204,13 @@ export const getUsageSummaryController = asyncHandler(async (req, res) => {
         creditsDebited: credits.allTimeCredits,
       },
       byService,
+      // Granular per-action breakdown — ordered by cost descending, top 20.
+      byAction: (costAgg[0]?.byAction ?? []).map((r) => ({
+        action: r._id,
+        costMicroCents: r.cost,
+        chargedMicroCents: r.charged,
+        count: r.count,
+      })),
     },
   });
 });

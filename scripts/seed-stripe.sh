@@ -10,6 +10,15 @@
 # Not idempotent — running twice against the same account creates duplicate
 # products. Intended to run ONCE per Stripe account at bootstrap time.
 #
+# ⚠️  Plan prices and descriptions below MUST stay in sync with
+#    api/src/lib/pricingConfig.ts (PLAN_PRICING) and api/src/lib/creditPricing.ts
+#    (PLAN_DESCRIPTIONS). If you bump a knob in pricingConfig.ts, you also
+#    need to (a) update the cents amounts and descriptions here, (b) create
+#    new Stripe Prices in the dashboard (Stripe Prices are immutable — old
+#    ones get deprecated, new ones get the new amounts), and (c) decide
+#    whether existing subscribers grandfather or migrate. See
+#    wiki/working/pricing-scaling.md for the full operator SOP.
+#
 # Prerequisites: `stripe` CLI in PATH, `jq` in PATH, `stripe login` already done.
 set -euo pipefail
 

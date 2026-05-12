@@ -2,6 +2,7 @@ import asyncHandler from 'express-async-handler';
 import { getUserCourseLean } from '@services/courseDbService';
 import { resolveImageUrl } from '@services/s3Service';
 import LessonContentModel from '@models/LessonContentModel';
+import RecallCardModel from '@models/RecallCardModel';
 import { parseIndexParam } from './validation';
 
 /**
@@ -56,12 +57,29 @@ export const getLessonContentController = asyncHandler(async (req, res) => {
     return;
   }
 
-  const data = content.toJSON();
   // resolveImageUrl is a misleading name — the helper just turns S3 keys
   // into 7-day presigned URLs. Reusing it here for audio so we don't
   // duplicate the S3 plumbing.
-  data.heroImageUrl = await resolveImageUrl(content.heroImageUrl);
-  data.audioUrl = await resolveImageUrl(content.audioUrl);
+  const heroImageUrl = await resolveImageUrl(content.heroImageUrl);
+  const audioUrl = await resolveImageUrl(content.audioUrl);
+
+  // Surface recall-card count so the client can render
+  //   - a small "N recall cards generated" status indicator
+  //   - the "Generate recall cards" CTA when count === 0 (user opted out
+  //     at lesson-gen time or the lesson predates recall)
+  // Indexed on (courseId, moduleIndex, lessonIndex) so this is a cheap
+  // count, not a doc fetch.
+  const recallCardCount = await RecallCardModel.countDocuments({
+    courseId,
+    moduleIndex,
+    lessonIndex,
+  });
+
+  // Build the response with the derived fields layered on top of the
+  // persisted document. Spreading content.toJSON() then assigning
+  // overrides keeps the existing API shape AND adds `recallCardCount`
+  // without TS complaining about the model type missing the field.
+  const data = { ...content.toJSON(), heroImageUrl, audioUrl, recallCardCount };
 
   res.status(200).json({ data });
 });

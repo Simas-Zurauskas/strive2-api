@@ -11,6 +11,7 @@ export { getJobStatusController } from './getJobStatus';
 export { generateLessonController } from './generateLesson';
 export { regenerateHeroController } from './regenerateHero';
 export { regenerateLinksController } from './regenerateLinks';
+export { regenerateRecallController } from './regenerateRecall';
 export { executeCodeController } from './executeCode';
 export { getLessonContentController } from './getLessonContent';
 export { getLessonContentStatsController } from './getLessonContentStats';

@@ -30,6 +30,14 @@ export interface IUsageEvent {
   planAtTime?: PlanKey;
   subscriptionStatusAtTime?: SubscriptionStatus;
   /**
+   * Stamp of the pricing config in force when this row was charged
+   * (see `PRICING_VERSION` in `lib/pricingConfig.ts`). Lets historical
+   * audits, refunds, and billing-dispute lookups know which markup table
+   * the row was billed under. Absent for rows recorded before the stamp
+   * was introduced (those are pre-2026-05-12 multi-layer pricing).
+   */
+  pricingVersion?: string;
+  /**
    * Free-form per-service payload: model id + token breakdown for LLM rows,
    * url/hostname for fetch/search rows, jobId/courseId/moduleIndex/lessonIndex
    * stamped from the usage-context ALS. Mongoose.Mixed so new services don't
@@ -54,6 +62,7 @@ const schema = new Schema<IUsageEvent>(
     chargedMicroCents: { type: Number, min: 0 },
     planAtTime: { type: String, enum: [...PLAN_KEYS] },
     subscriptionStatusAtTime: { type: String, enum: [...SUBSCRIPTION_STATUSES] },
+    pricingVersion: { type: String },
     metadata: { type: Schema.Types.Mixed },
   },
   {
