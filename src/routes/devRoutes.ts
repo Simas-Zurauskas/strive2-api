@@ -4,6 +4,7 @@ import {
   buildPasswordResetEmail,
   buildSecurityActionCodeEmail,
   buildOldUserRelaunchEmail,
+  buildOldPayingUserThanksEmail,
   type EmailPayload,
 } from '@lib/email/templates';
 
@@ -71,6 +72,10 @@ const SAMPLE_GROUPS: Array<{ title: string; samples: Record<string, Sample> }> =
       'old-user-relaunch': {
         label: 'Old user relaunch',
         build: () => buildOldUserRelaunchEmail(),
+      },
+      'old-paying-user-thanks': {
+        label: 'Old paying user — thanks + apology',
+        build: () => buildOldPayingUserThanksEmail(),
       },
     },
   },

@@ -368,11 +368,11 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
     },
 
     // ── Auth (account teardown) ─────────────────────────
-    async deleteAccount({ password }: { password: string }): Promise<void> {
+    async deleteAccount({ code }: { code: string }): Promise<void> {
       await request({
         method: 'DELETE',
         path: '/api/auth/delete-account',
-        body: { password },
+        body: { code },
       });
     },
   };

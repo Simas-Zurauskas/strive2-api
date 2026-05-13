@@ -1,5 +1,13 @@
 import { Router } from 'express';
-import { sendPromotionalTestEmailController } from '@controlers/admin';
+import {
+  sendPromotionalTestEmailController,
+  listRelaunchRecipientsController,
+  sendRelaunchBatchController,
+  addRelaunchRecipientController,
+  deleteRelaunchRecipientController,
+  updateRelaunchRecipientGrantController,
+  updateRelaunchRecipientPayingController,
+} from '@controlers/admin';
 import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
 
 const router = Router();
@@ -16,5 +24,13 @@ router.use(protect, requireVerified, requireAdmin);
 
 // ── Email ────────────────────────────────────────────────
 router.post('/email/send-promotional-test', sendPromotionalTestEmailController);
+
+// ── Old-user relaunch campaign ──────────────────────────
+router.get('/relaunch/recipients', listRelaunchRecipientsController);
+router.post('/relaunch/recipients', addRelaunchRecipientController);
+router.delete('/relaunch/recipients', deleteRelaunchRecipientController);
+router.post('/relaunch/send', sendRelaunchBatchController);
+router.patch('/relaunch/recipients/grant', updateRelaunchRecipientGrantController);
+router.patch('/relaunch/recipients/paying', updateRelaunchRecipientPayingController);
 
 export { router as adminRoutes };

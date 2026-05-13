@@ -6,6 +6,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { generateAuthToken } from '@lib/auth';
 import { FREE_PERIOD_DAYS } from '@lib/creditPricing';
 import { resolveSignupAllowance } from '@services/abuseLogService';
+import { awardSignupGrantIfAny } from '@services/signupCreditGrantService';
 import { analytics } from '@lib/analytics';
 import { googleAuthSchema } from './validation';
 
@@ -153,9 +154,15 @@ export const googleAuthController = asyncHandler(async (req, res) => {
 
   const userId = user._id.toString();
   // `existing` was the pre-upsert lookup — if it was null this user was
-  // freshly created in the upsert above. Fire `signup_completed` for new
-  // users and `signin_succeeded` for returning ones so the funnel split
-  // (acquisition vs reactivation) stays clean.
+  // freshly created in the upsert above. Apply pre-provisioned signup grant
+  // (old-user relaunch list) before analytics so the topline `signup_completed`
+  // event reflects the bonus that's already on their balance.
+  if (!existing) {
+    await awardSignupGrantIfAny({ userId, email });
+  }
+
+  // Fire `signup_completed` for new users and `signin_succeeded` for returning
+  // ones so the funnel split (acquisition vs reactivation) stays clean.
   if (!existing) {
     analytics.setUserProps(userId, {
       $email: email,

@@ -186,3 +186,86 @@ test('cloze: lower-case "and" between proper nouns in answer rejected via disjun
   assert.equal(r.valid, false);
 });
 
+// ── Curriculum-meta rejection (2026-05-13 follow-up) ──────────
+
+test('cloze: curriculum-meta stem ("this course") rejected', () => {
+  const r = validateRecallCardCandidate(
+    cloze('The three practice tables in this course are {{blank}}, products, and orders.', 'customers'),
+  );
+  assert.equal(r.valid, false);
+  assert.equal(r.reason, 'curriculum-meta');
+});
+
+test('qa: curriculum-meta stem ("in this lesson") rejected', () => {
+  const r = validateRecallCardCandidate(
+    qa('What modules are in this course?', 'Module 1, 2, and 3'),
+  );
+  assert.equal(r.valid, false);
+  assert.equal(r.reason, 'curriculum-meta');
+});
+
+test('cloze: domain-prose containing "this" but not "this course" allowed', () => {
+  // Guard against the curriculum-meta regex over-firing on generic "this".
+  const r = validateRecallCardCandidate(
+    cloze('A {{blank}} structure organizes records by a key.', 'hash'),
+  );
+  assert.equal(r.valid, true);
+});
+
+// ── Numeric-range cloze rejection ─────────────────────────────
+
+test('cloze: dollar-range answer ($150-$250) rejected', () => {
+  const r = validateRecallCardCandidate(
+    cloze('Mid-tier mini sessions cluster around {{blank}}.', '$150–$250'),
+  );
+  assert.equal(r.valid, false);
+  assert.equal(r.reason, 'cloze:numeric-range');
+});
+
+test('cloze: numeric range with unit (30-60 seconds) rejected', () => {
+  const r = validateRecallCardCandidate(
+    cloze('Garlic transitions raw-to-golden in {{blank}}.', '30–60 seconds'),
+  );
+  assert.equal(r.valid, false);
+  assert.equal(r.reason, 'cloze:numeric-range');
+});
+
+test('cloze: single number (not a range) still accepted', () => {
+  const r = validateRecallCardCandidate(
+    cloze('A list has {{blank}} elements when empty.', 'zero'),
+  );
+  assert.equal(r.valid, true);
+});
+
+// ── Stem-telegraphs-answer rejection ──────────────────────────
+
+test('cloze: stem containing the canonical answer verbatim rejected', () => {
+  // "double-bracket" telegraphed by "outer brackets...inner brackets" was the
+  // motivating case; we test the simpler verbatim form here, since regex
+  // can't detect the paraphrased version reliably (the model prompt handles
+  // that). Belt-and-braces is fine.
+  const r = validateRecallCardCandidate(
+    cloze('Use the {{blank}} syntax — double-bracket indexing returns a DataFrame.', 'double-bracket'),
+  );
+  assert.equal(r.valid, false);
+  assert.equal(r.reason, 'cloze:stem-telegraphs-answer');
+});
+
+test('cloze: stem without the canonical answer accepted', () => {
+  const r = validateRecallCardCandidate(
+    cloze('Pass a list of column names to get a DataFrame back: df[{{blank}}].', "['x', 'y']"),
+  );
+  // Different rejection path (code-expr); just confirms we don't over-trigger telegraph.
+  assert.equal(r.valid, false);
+  assert.notEqual(r.reason, 'cloze:stem-telegraphs-answer');
+});
+
+test('cloze: short canonical (< 4 chars) does not trigger telegraph check', () => {
+  // "key" is only 3 chars — common stop word risk. Telegraph rule skips
+  // canonicals under 4 chars to avoid false positives. This card is fine.
+  const r = validateRecallCardCandidate(
+    cloze('A dict lookup uses the {{blank}} to find the value, even when "key" appears elsewhere.', 'key'),
+  );
+  assert.equal(r.valid, true);
+});
+

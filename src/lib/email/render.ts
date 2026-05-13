@@ -12,6 +12,7 @@ export type EmailBlock =
   | { type: 'cta'; url: string; label: string }
   | { type: 'code'; value: string }
   | { type: 'divider' }
+  | { type: 'signoff'; text: string }
   | { type: 'fineprint'; text: string };
 
 // Two distinct shell treatments — they signal stream identity to the reader
@@ -97,6 +98,11 @@ const renderHtmlBlock = (block: EmailBlock, variant: EmailVariant): string => {
         return `<div style="margin:32px 0;line-height:0;font-size:0;"><span style="display:inline-block;width:56px;height:1px;background:${c.border};">&nbsp;</span></div>`;
       }
       return `<div style="margin:24px 0;border-top:1px solid ${c.border};line-height:1;font-size:0;">&nbsp;</div>`;
+    case 'signoff':
+      // Italic-serif signature line — visually distinct from body paragraphs
+      // so the founder voice reads as a sign-off, not another sentence. Sits
+      // close above the fineprint with generous breathing room from the CTA.
+      return `<p style="margin:32px 0 0;font-family:${brand.fonts.serif};font-style:italic;font-size:16px;line-height:1.55;color:${c.foreground};">${escapeHtml(block.text)}</p>`;
     case 'fineprint':
       return `<p style="margin:24px 0 0;font-family:${brand.fonts.body};font-size:13px;line-height:1.65;color:${c.fineprint};">${escapeHtml(block.text)}</p>`;
   }
@@ -115,6 +121,7 @@ const renderTextBlock = (block: EmailBlock): string => {
       return block.value;
     case 'divider':
       return '——';
+    case 'signoff':
     case 'fineprint':
       return block.text;
   }
@@ -143,8 +150,6 @@ const renderTransactionalShell = (params: {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="x-apple-disable-message-reformatting">
-<meta name="color-scheme" content="light only">
-<meta name="supported-color-schemes" content="light only">
 <title>${escapeHtml(title)}</title>
 </head>
 <body style="margin:0;padding:0;background:${c.background};color:${c.foreground};">
@@ -201,8 +206,6 @@ const renderPromotionalShell = (params: {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="x-apple-disable-message-reformatting">
-<meta name="color-scheme" content="light only">
-<meta name="supported-color-schemes" content="light only">
 <title>${escapeHtml(title)}</title>
 </head>
 <body style="margin:0;padding:0;background:${c.background};color:${c.foreground};">

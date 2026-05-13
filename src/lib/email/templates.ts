@@ -15,7 +15,7 @@ export type SecurityActionKind = 'set_password' | 'change_password' | 'delete_ac
 // directly off this type. Transactional templates (verification, reset,
 // security codes) are NOT listed here — they're not user-targetable from
 // the admin surface.
-export type PromotionalTemplateKey = 'old_user_relaunch';
+export type PromotionalTemplateKey = 'old_user_relaunch' | 'old_paying_user_thanks';
 
 const SECURITY_ACTION_COPY: Record<
   SecurityActionKind,
@@ -138,31 +138,88 @@ export const buildOldUserRelaunchEmail = (): EmailPayload => {
     // separately so subject + headline don't duplicate inbox real estate.
     subject: "It's been a while. We rebuilt Strive.",
     ...renderEmail({
-      preheader: 'A real generation pipeline, real spaced review, an AI mentor on every lesson.',
+      // Preheader is the only pre-open real estate. Three short
+      // reader-facing sentences (not engineering bullets) so the snippet
+      // reads as benefit, not spec-sheet.
+      preheader: "Personalized courses. An AI mentor on every lesson. Daily review that catches what you're about to forget.",
       title: 'The new Strive is here',
       body: [
         { type: 'eyebrow', text: 'Reintroducing Strive' },
         {
           type: 'lede',
-          text: 'A course should fit your goal — and stick in your head. We took the time to learn from the original and rebuilt every part of Strive around that.',
+          text: "We won't pretend the first Strive was the product we wanted to ship. We took it down, rebuilt every part, and waited until it actually worked before reaching back out.",
         },
         { type: 'divider' },
         {
           type: 'paragraph',
-          text: 'Tell Strive a specific goal — "speak conversational Italian in three months," "understand transformer attention well enough to read the papers" — and where you\'re starting from. It writes the course around that. Not a syllabus — a personalized path from your level to your goal.',
+          text: 'Tell Strive a specific goal — "speak conversational Italian in three months," or "understand transformer attention well enough to read the papers" — and where you\'re starting from. It writes the course for that, starting from your level.',
         },
         {
           type: 'paragraph',
-          text: "Lessons aren't dead pages. Code runs in place, math and diagrams render properly, and an AI mentor on every lesson already knows what you're reading. Ask anything — answers come in context.",
+          text: "Lessons aren't dead pages. Code runs in place, math and diagrams render properly, and an AI mentor sits next to every one of them, already up to speed on what you're reading. Ask anything.",
         },
         {
           type: 'paragraph',
-          text: "And what you learn doesn't leak. A daily recall queue catches what you're about to forget. Spaced review, baked in — not bolted on.",
+          text: "What you learn doesn't leak. A daily review queue resurfaces what's slipping before you forget it.",
         },
-        { type: 'cta', url: FRONTEND_URL, label: 'Try the new Strive' },
+        {
+          type: 'paragraph',
+          text: "We've put some starter credit on your account so you can see for yourself — generate a course, work through a few lessons, ask the mentor anything.",
+        },
+        // Hardcoded to the production domain — this campaign is sent against
+        // real inboxes and the CTA must land on production regardless of which
+        // environment the send was triggered from (dev/staging operator UI).
+        // Transactional templates above still use FRONTEND_URL so they remain
+        // env-correct for verification + password-reset flows.
+        { type: 'cta', url: 'https://www.strive-learning.com/', label: 'Try the new Strive' },
+        { type: 'signoff', text: '— Simas, founder of Strive' },
         {
           type: 'fineprint',
           text: "You're getting this email because you signed up for the original Strive.",
+        },
+      ],
+      showUnsubscribe: true,
+      variant: 'promotional',
+    }),
+  };
+};
+
+// Sent to the small subset who paid for the original Strive. Plainer, more
+// personal, founder-voiced. Subject inverts the expected order ("Thank you"
+// before "an apology") so the open behaviour is gratitude-first, not
+// guilt-first — better received and a more honest framing of the
+// relationship. Grant amount is intentionally NOT mentioned by number; the
+// import script controls that and the user sees the bonus on login.
+export const buildOldPayingUserThanksEmail = (): EmailPayload => {
+  return {
+    subject: 'Thank you. And an apology.',
+    ...renderEmail({
+      preheader: 'A note from Simas about the old Strive, and why we rebuilt it.',
+      title: 'Thank you. And an apology.',
+      body: [
+        { type: 'eyebrow', text: 'From the founder' },
+        {
+          type: 'lede',
+          text: "You paid for the original Strive. That's stuck with me for a long time — we knew it wasn't ready, and we shipped it anyway.",
+        },
+        { type: 'divider' },
+        {
+          type: 'paragraph',
+          text: "We took it offline, rebuilt every part, and only got back in touch when it actually worked. It's a different product now: courses written for your specific goal, code that runs inside the lesson, an AI mentor on every page, and a daily review queue that catches what's slipping.",
+        },
+        {
+          type: 'paragraph',
+          text: "You already supported us once. There's extra starter credit on your account — more than everyone else is getting — enough to generate a course and actually work through it. See whether it lives up to what we promised the first time.",
+        },
+        { type: 'cta', url: 'https://www.strive-learning.com/', label: 'Try the new Strive' },
+        {
+          type: 'paragraph',
+          text: "If something feels off — or even if it doesn't — reply to this email. It lands directly in my inbox.",
+        },
+        { type: 'signoff', text: '— Simas, founder of Strive' },
+        {
+          type: 'fineprint',
+          text: "You're getting this email because you supported the original Strive.",
         },
       ],
       showUnsubscribe: true,

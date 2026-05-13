@@ -73,7 +73,7 @@ export async function runAll({
             userId: testUser.userId,
           });
         } finally {
-          await deleteTestUser({ client, password: testUser.password, email: testUser.email });
+          await deleteTestUser({ client, userId: testUser.userId, email: testUser.email });
           console.log(`[${label}]`.cyan + ` Cleaned up test user ${testUser.email}`.gray);
         }
       }),

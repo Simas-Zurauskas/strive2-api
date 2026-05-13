@@ -286,3 +286,89 @@ test('repair: degenerate input (out-of-bounds correctIndex) is a no-op', () => {
   assert.deepEqual(r.appliedRepairs, []);
 });
 
+// ── Code-context skip (regression: --all-namespaces, header=None) ─
+
+test('lint: CLI flag --all-namespaces does not trip absolute-qualifier rule', () => {
+  const r = lintDistractors({
+    options: [
+      'Run kubectl get pods --all-namespaces to list across namespaces',
+      'Run kubectl get pods -n default for the default namespace',
+      'Run kubectl describe pods --namespace=kube-system',
+      'Run kubectl logs --container=app to stream container logs',
+    ],
+    correctIndex: 0,
+  });
+  assert.equal(r.absoluteQualifierOk, true, `reasons=${r.reasons.join(',')}`);
+});
+
+test('repair: --all-namespaces in a distractor is preserved verbatim', () => {
+  const input = {
+    options: [
+      'Use kubectl get pods to list pods in the current namespace',
+      'Use kubectl get pods --all-namespaces in a distractor that fires the lint',
+      'Use kubectl get pods always to skip namespace filter on a wide cluster',
+      'Use kubectl get pods quietly',
+    ],
+    correctIndex: 0,
+  };
+  // Distractor at idx 2 has "always" (prose) → lint fires → hedge runs.
+  // Distractor at idx 1 has "all" inside --all-namespaces → must NOT be hedged.
+  const r = repairDistractors(input);
+  assert.ok(r.appliedRepairs.includes('absolute-qualifier'));
+  assert.match(r.options[1], /--all-namespaces/, 'CLI flag must survive hedging');
+  assert.match(r.options[2], /typically to skip namespace/);
+});
+
+test('repair: header=None kwarg literal is preserved', () => {
+  const input = {
+    options: [
+      'pd.read_csv(path, header=0) treats the first row as the header',
+      'pd.read_csv(path, header=None) reads the file without a header row',
+      'pd.read_csv(path, header=1) always skips the first row before parsing',
+      'pd.read_csv(path, header="auto") infers the header position from content',
+    ],
+    correctIndex: 0,
+  };
+  // idx 2 has prose "always" → triggers lint. Repair must hedge idx 2 but
+  // leave the `header=None` literal at idx 1 alone.
+  const r = repairDistractors(input);
+  assert.ok(r.appliedRepairs.includes('absolute-qualifier'));
+  assert.match(r.options[1], /header=None/, 'kwarg literal must survive hedging');
+  assert.match(r.options[2], /typically skips/);
+});
+
+test('repair: backticked `all` inside an inline-code span is preserved', () => {
+  const input = {
+    options: [
+      'Pass the flag normally to opt in',
+      'Pass `--all` to scan every directory',
+      'Pass `--quiet` to always suppress logs',
+      'Pass `--verbose` to stream every event',
+    ],
+    correctIndex: 0,
+  };
+  const r = repairDistractors(input);
+  // idx 2 has prose "always" outside the backticks; idx 1 has `--all` inside.
+  assert.ok(r.appliedRepairs.includes('absolute-qualifier'));
+  assert.match(r.options[1], /`--all`/, 'backticked CLI flag must survive');
+});
+
+test('repair: prose "all Pods" without a CLI prefix is still hedged', () => {
+  // Sanity check: the code-context guard must only skip TECHNICAL adjacency,
+  // not regular prose containing "all". This is a distractor where "all"
+  // is a real absolute qualifier, no `--`/`=`/etc. nearby.
+  const input = {
+    options: [
+      'The controller reconciles one Pod at a time during the watch loop',
+      'The controller reconciles all Pods on every tick of the scheduler',
+      'The controller reconciles Pods only when the readiness probe fires',
+      'The controller reconciles new Pods opportunistically with backoff',
+    ],
+    correctIndex: 0,
+  };
+  const r = repairDistractors(input);
+  assert.ok(r.appliedRepairs.includes('absolute-qualifier'));
+  assert.match(r.options[1], /most Pods/);
+  assert.match(r.options[2], /mainly when/);
+});
+

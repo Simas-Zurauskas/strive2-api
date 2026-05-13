@@ -7,6 +7,7 @@ import {
   buildPasswordResetEmail,
   buildSecurityActionCodeEmail,
   buildOldUserRelaunchEmail,
+  buildOldPayingUserThanksEmail,
   type EmailPayload,
   type SecurityActionKind,
 } from '@lib/email/templates';
@@ -207,6 +208,15 @@ export const sendOldUserRelaunchEmail = async (params: { to: string }): Promise<
     // Promotional sends rely on Mailjet's `[[UNSUB_LINK_EN]]` substitution
     // for the unsubscribe footer — enabling the template language is what
     // turns the raw `[[…]]` placeholder into a real per-recipient URL.
+    templateLanguage: true,
+  });
+};
+
+export const sendOldPayingUserThanksEmail = async (params: { to: string }): Promise<void> => {
+  await send({
+    to: params.to,
+    payload: buildOldPayingUserThanksEmail(),
+    from: SENDER_EMAIL_PROMOTIONAL,
     templateLanguage: true,
   });
 };

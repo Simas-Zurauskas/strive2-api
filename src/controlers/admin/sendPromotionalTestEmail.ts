@@ -1,18 +1,21 @@
 import asyncHandler from 'express-async-handler';
 import { z } from 'zod';
-import { sendOldUserRelaunchEmail } from '@services/emailService';
+import { sendOldUserRelaunchEmail, sendOldPayingUserThanksEmail } from '@services/emailService';
 import { integrationLog } from '@lib/loggers';
 
 // One entry per `PromotionalTemplateKey` in lib/email/templates.ts. Kept
 // as an inline switch (not a Record) so adding a template forces a
 // type-checked match arm — easy to grep, hard to forget.
 const sendByTemplate = async (params: {
-  template: 'old_user_relaunch';
+  template: 'old_user_relaunch' | 'old_paying_user_thanks';
   to: string;
 }): Promise<void> => {
   switch (params.template) {
     case 'old_user_relaunch':
       await sendOldUserRelaunchEmail({ to: params.to });
+      return;
+    case 'old_paying_user_thanks':
+      await sendOldPayingUserThanksEmail({ to: params.to });
       return;
   }
 };
@@ -21,7 +24,7 @@ const bodySchema = z.object({
   to: z.string().email(),
   // Mirror the union from `PromotionalTemplateKey`. Kept as a literal here
   // instead of imported so the OpenAPI generator can see the enum list.
-  template: z.enum(['old_user_relaunch']),
+  template: z.enum(['old_user_relaunch', 'old_paying_user_thanks']),
 });
 
 /**
@@ -54,7 +57,7 @@ const bodySchema = z.object({
  *                 format: email
  *               template:
  *                 type: string
- *                 enum: [old_user_relaunch]
+ *                 enum: [old_user_relaunch, old_paying_user_thanks]
  *     responses:
  *       200:
  *         content:
