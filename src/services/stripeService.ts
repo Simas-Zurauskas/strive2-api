@@ -457,6 +457,14 @@ export const scheduleSubscriptionDowngrade = async ({
     proration_behavior: 'none',
   });
 
+  // Write-through to our DB so the next /billing/summary read reflects the
+  // scheduled downgrade immediately. The `customer.subscription.updated`
+  // webhook will re-affirm the same field later; that $set is idempotent.
+  await UserModel.updateOne(
+    { _id: userId },
+    { $set: { 'subscription.pendingPlan': plan } },
+  );
+
   monetizationLog.info(
     `Downgrade requested: user=${userId} ${currentPlan}→${plan}/${cadence} applies at ${periodEnd?.toISOString() ?? '(unknown)'}`,
   );
@@ -502,6 +510,14 @@ export const scheduleSubscriptionCancellation = async ({
 
   const periodEndSeconds = updated.items.data[0]?.current_period_end;
   const periodEnd = typeof periodEndSeconds === 'number' ? new Date(periodEndSeconds * 1000) : null;
+
+  // Write-through to our DB so the next /billing/summary read reflects the
+  // cancel immediately. The `customer.subscription.updated` webhook will
+  // re-affirm the same field later; that $set is idempotent.
+  await UserModel.updateOne(
+    { _id: userId },
+    { $set: { 'subscription.cancelAtPeriodEnd': true } },
+  );
 
   monetizationLog.info(
     `Cancellation requested: user=${userId} subscription=${subId} ends=${periodEnd?.toISOString() ?? '(unknown)'}`,

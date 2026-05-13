@@ -11,6 +11,21 @@ import { getStripe, mapPriceIdToPlan } from './stripeService';
 import Stripe from 'stripe';
 
 /**
+ * Stripe encodes "subscription will end at a future date" in two equivalent
+ * ways depending on how the cancel was triggered:
+ *   - boolean `cancel_at_period_end: true` — set when our API calls
+ *     `stripe.subscriptions.update(..., { cancel_at_period_end: true })`
+ *   - timestamp `cancel_at: <unix>` — set when the user cancels through the
+ *     Stripe-hosted billing portal (timestamp = period end)
+ * Either truthy value means the subscription is in the "canceling" state from
+ * our DB and UI perspective. Reading only one of them caused portal cancels
+ * to be silently dropped.
+ */
+const isSubscriptionCancelling = (
+  sub: Pick<Stripe.Subscription, 'cancel_at_period_end' | 'cancel_at'>,
+): boolean => sub.cancel_at_period_end === true || sub.cancel_at != null;
+
+/**
  * Throw this from a handler when an error is transient — a Mongo replica-set
  * blip, an outbound vendor 503, etc. The webhook controller treats it as
  * "ask Stripe to retry us" (5xx response). Anything else thrown from a
@@ -159,7 +174,7 @@ const onSubscriptionCheckoutCompleted = async ({
         'subscription.stripePriceId': priceId,
         'subscription.currentPeriodStart': period.start,
         'subscription.currentPeriodEnd': period.end,
-        'subscription.cancelAtPeriodEnd': subscription.cancel_at_period_end,
+        'subscription.cancelAtPeriodEnd': isSubscriptionCancelling(subscription),
         'subscription.pendingPlan': null,
         'credits.allowanceBalance': plan.monthlyAllowance,
         'credits.allowanceGranted': plan.monthlyAllowance,
@@ -403,7 +418,7 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
     'subscription.stripePriceId': newPriceId,
     'subscription.currentPeriodStart': period.start,
     'subscription.currentPeriodEnd': period.end,
-    'subscription.cancelAtPeriodEnd': subscription.cancel_at_period_end,
+    'subscription.cancelAtPeriodEnd': isSubscriptionCancelling(subscription),
   };
 
   if (directionChange === 'upgrade' && planInfo) {
@@ -497,17 +512,19 @@ const handleSubscriptionUpdated = async (event: Stripe.Event): Promise<void> => 
     });
   }
 
-  // Detect a fresh `cancel_at_period_end` transition via Stripe's
-  // `previous_attributes` envelope. Without the previous-value compare
-  // we'd fire `plan_cancelled` on every status update for an
-  // already-cancelling subscription.
+  // Detect a fresh transition into the "canceling" state via Stripe's
+  // `previous_attributes` envelope. Without the previous-value compare we'd
+  // fire `plan_cancelled` on every status update for an already-cancelling
+  // subscription. Reads both `cancel_at_period_end` (programmatic cancel)
+  // and `cancel_at` (portal cancel) — see isSubscriptionCancelling for why.
   const previousAttrs = (event.data as { previous_attributes?: Partial<Stripe.Subscription> })
     .previous_attributes;
-  const wasCancellingBefore =
-    previousAttrs && 'cancel_at_period_end' in previousAttrs
-      ? previousAttrs.cancel_at_period_end === true
-      : subscription.cancel_at_period_end;
-  const becameCancelling = subscription.cancel_at_period_end && !wasCancellingBefore;
+  const cancelFieldChanged =
+    previousAttrs && ('cancel_at_period_end' in previousAttrs || 'cancel_at' in previousAttrs);
+  const wasCancellingBefore = cancelFieldChanged
+    ? previousAttrs!.cancel_at_period_end === true || previousAttrs!.cancel_at != null
+    : isSubscriptionCancelling(subscription);
+  const becameCancelling = isSubscriptionCancelling(subscription) && !wasCancellingBefore;
   if (becameCancelling) {
     const tenureDays = (() => {
       const created = subscription.start_date ? new Date(subscription.start_date * 1000) : null;
@@ -632,7 +649,7 @@ const handleInvoicePaid = async (event: Stripe.Event): Promise<void> => {
           'subscription.stripePriceId': newPriceId,
           'subscription.currentPeriodStart': period.start,
           'subscription.currentPeriodEnd': period.end,
-          'subscription.cancelAtPeriodEnd': subscription.cancel_at_period_end,
+          'subscription.cancelAtPeriodEnd': isSubscriptionCancelling(subscription),
           'subscription.pendingPlan': null,
           'credits.allowanceBalance': plan.monthlyAllowance,
           'credits.allowanceGranted': plan.monthlyAllowance,
