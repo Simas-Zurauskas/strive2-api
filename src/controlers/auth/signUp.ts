@@ -5,6 +5,7 @@ import { generateAuthToken, hashPassword, generateVerificationToken, VERIFICATIO
 import { FREE_PERIOD_DAYS } from '@lib/creditPricing';
 import { sendVerificationEmailAsync } from '@services/emailService';
 import { resolveSignupAllowance } from '@services/abuseLogService';
+import { awardSignupGrantIfAny } from '@services/signupCreditGrantService';
 import { analytics } from '@lib/analytics';
 import { signUpSchema } from './validation';
 
@@ -77,6 +78,11 @@ export const signUpController = asyncHandler(async (req, res) => {
       bonusBalance: 0,
     },
   });
+
+  // Apply any pre-provisioned signup grant (e.g. old-user relaunch list).
+  // Awaited so the user lands with the bonus already on their account —
+  // the next /me / balance lookup includes it.
+  await awardSignupGrantIfAny({ userId: user._id, email });
 
   // Fire-and-forget: signup returns to the client before the Mailjet round
   // trip. Retries + Sentry capture happen inside `sendVerificationEmailAsync`.

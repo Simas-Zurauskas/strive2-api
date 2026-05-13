@@ -35,6 +35,59 @@ const ABSOLUTE_QUALIFIER_PATTERN = 'always|never|only|all|none|every|any';
 const ABSOLUTE_QUALIFIER_RX = new RegExp(`\\b(${ABSOLUTE_QUALIFIER_PATTERN})\\b`, 'i');
 const ABSOLUTE_QUALIFIER_RX_G = new RegExp(`\\b(${ABSOLUTE_QUALIFIER_PATTERN})\\b`, 'gi');
 
+/**
+ * Return true when a regex match at [start, end) is sitting inside a
+ * code-like context — backticked span, CLI flag (`--all-namespaces`),
+ * kwarg/assignment (`header=None`), namespaced or hyphenated identifier
+ * (`foo.all`, `flag-all-foo`).
+ *
+ * The absolute-qualifier rule exists to keep prose distractors from
+ * shipping skim-gameable tells. It is NOT meant for technical literals:
+ * hedging `all → most` inside `--all-namespaces` produces
+ * `--most-namespaces` (a kubectl flag that doesn't exist), and hedging
+ * `None → Few` inside `header=None` produces `header=Few` (which the
+ * persona explicitly used to eliminate the option). Skipping these
+ * matches at both lint and repair time keeps technical strings intact.
+ */
+const isCodeContextMatch = ({ text, start, end }: { text: string; start: number; end: number }): boolean => {
+  // Inside an open backtick span.
+  const before = text.slice(0, start);
+  const backticksBefore = (before.match(/`/g) ?? []).length;
+  if (backticksBefore % 2 === 1) return true;
+
+  // Adjacent to a code-syntactic character. `\b` already guarantees the
+  // immediate neighbor is a non-word char; we look specifically for the
+  // ones that signal "this is an identifier, not prose": `=`, `-`, `_`,
+  // `/`, `\`. Sentence punctuation (. , ! ? ; :) and quotes/parens
+  // intentionally excluded — those are prose boundaries.
+  const prevCh = start > 0 ? text[start - 1] : '';
+  const nextCh = end < text.length ? text[end] : '';
+  const CODE_CHARS = /[=_/\\-]/;
+  if (CODE_CHARS.test(prevCh) || CODE_CHARS.test(nextCh)) return true;
+
+  // Namespaced identifier — `.all` or `all.` where the dot is mid-token
+  // (word char on the other side), not a sentence-ending period.
+  if (prevCh === '.' && start >= 2 && /\w/.test(text[start - 2])) return true;
+  if (nextCh === '.' && end + 1 < text.length && /\w/.test(text[end + 1])) return true;
+
+  return false;
+};
+
+/**
+ * `text.matchAll` filtered through the code-context guard. Used by both
+ * the lint check and the repair hedge so they stay in lockstep — a match
+ * that doesn't trigger the lint must not be silently rewritten by the
+ * repair, and vice versa.
+ */
+const hasProseAbsoluteQualifier = (text: string): boolean => {
+  for (const m of text.matchAll(ABSOLUTE_QUALIFIER_RX_G)) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    if (!isCodeContextMatch({ text, start, end })) return true;
+  }
+  return false;
+};
+
 // ±35% of median. Bumped from ±30% after production logs showed the
 // feedback loop seesawing: fixing `correct-is-longest` often shortens the
 // correct answer past the band, tripping length-uniformity. Widening the
@@ -82,10 +135,13 @@ export const lintDistractors = (input: DistractorLintInput): DistractorLintResul
   const correctNotLongest = correctLen < longestLen || numAtLongest > 1;
   if (!correctNotLongest) reasons.push('correct-is-longest');
 
-  // Absolute qualifier discipline.
-  const correctHasAbs = ABSOLUTE_QUALIFIER_RX.test(options[correctIndex]);
+  // Absolute qualifier discipline. Code-context matches (CLI flags,
+  // kwargs, namespaced identifiers — see `isCodeContextMatch`) are
+  // excluded: hedging `--all-namespaces` to `--most-namespaces` corrupts
+  // the technical string without removing a real skim-gaming tell.
+  const correctHasAbs = hasProseAbsoluteQualifier(options[correctIndex]);
   const distractorsHaveAbs = options.some(
-    (o, i) => i !== correctIndex && ABSOLUTE_QUALIFIER_RX.test(o),
+    (o, i) => i !== correctIndex && hasProseAbsoluteQualifier(o),
   );
   const absoluteQualifierOk = correctHasAbs || !distractorsHaveAbs;
   if (!absoluteQualifierOk) reasons.push('distractor-absolute-qualifier');
@@ -142,7 +198,12 @@ const preserveLeadingCase = ({ original, replacement }: { original: string; repl
 };
 
 const hedgeAbsoluteQualifiers = (text: string): string => {
-  return text.replace(ABSOLUTE_QUALIFIER_RX_G, (match) => {
+  return text.replace(ABSOLUTE_QUALIFIER_RX_G, (match, _group, offset: number) => {
+    // Skip code-context matches (CLI flags like `--all-namespaces`,
+    // kwargs like `header=None`, namespaced identifiers). The hedge is
+    // meant for prose distractors; substituting `all → most` inside a
+    // technical literal produces invalid commands and confuses learners.
+    if (isCodeContextMatch({ text, start: offset, end: offset + match.length })) return match;
     const hedge = ABSOLUTE_HEDGE[match.toLowerCase()];
     if (!hedge) return match;
     return preserveLeadingCase({ original: match, replacement: hedge });

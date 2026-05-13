@@ -1,6 +1,7 @@
 import 'colors';
 import crypto from 'crypto';
 import UserModel from '@models/UserModel';
+import SecurityActionTokenModel from '@models/SecurityActionTokenModel';
 import { decodeAuthToken } from '@lib/auth';
 import { TOPUP_CREDITS_PER_USD } from '@lib/creditPricing';
 import { signup, type ApiClient } from './apiClient';
@@ -72,18 +73,35 @@ export const createVerifiedTestUser = async ({
  * courses, lessons, progress, recall cards, chat, gamification, and S3 assets
  * (see `services/courseCleanupService.ts`). We swallow failures with a
  * warning so one flaky teardown doesn't mask another persona's result.
+ *
+ * The endpoint now requires a 6-digit email OTP (see
+ * `controlers/auth/deleteAccount.ts` — Mailjet-delivered code keyed on a
+ * `SecurityActionToken` row). We don't have access to the inbox in this
+ * harness, so we mint a token row directly in Mongo with a hash matching
+ * the same `sha256(`${code}:${userId}`)` pepper the service uses, then
+ * submit the plaintext code to the API.
  */
 export const deleteTestUser = async ({
   client,
-  password,
+  userId,
   email,
 }: {
   client: ApiClient;
-  password: string;
+  userId: string;
   email: string;
 }): Promise<void> => {
   try {
-    await client.deleteAccount({ password });
+    const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+    const codeHash = crypto.createHash('sha256').update(`${code}:${userId}`).digest('hex');
+    await SecurityActionTokenModel.create({
+      userId,
+      action: 'delete_account',
+      codeHash,
+      attempts: 0,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      usedAt: null,
+    });
+    await client.deleteAccount({ code });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[testUser] failed to delete ${email}: ${message}`.yellow);
