@@ -8,7 +8,7 @@ import RecallCardModel from '@models/RecallCardModel';
 import { JobType, CourseDepth } from '@lib/constants';
 import { analytics } from '@lib/analytics';
 import { lessonGenerationAgent } from '@lib/ai/agents/lessonGeneration';
-import { contextLoad, imageGeneration, linksGeneration, recallCardGeneration } from '@lib/ai/agents/lessonGeneration/nodes';
+import { contextLoad, imageGeneration, linksGeneration, minSummaryCharsForDepth, recallCardGeneration } from '@lib/ai/agents/lessonGeneration/nodes';
 import type { LessonState } from '@lib/ai/agents/lessonGeneration/state';
 import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
@@ -499,9 +499,13 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         await savePromise;
 
         // Persistence gate — same contract as the old SSE path.
+        // Floor is depth-tiered (mirrors the same helper used inside the
+        // contentGeneration node) so overview lessons aren't held to a 60-char
+        // bar that's only sensible for comprehensive / deep_dive.
         const persistableReasons: string[] = [];
         const summaryText = capturedSummary.trim();
-        if (summaryText.length < 60) persistableReasons.push(`summary too short (${summaryText.length} chars)`);
+        const minSummaryChars = minSummaryCharsForDepth(course.depth ?? 'comprehensive');
+        if (summaryText.length < minSummaryChars) persistableReasons.push(`summary too short (${summaryText.length} chars, need ≥${minSummaryChars})`);
         if (summaryText.length > 800) persistableReasons.push(`summary too long (${summaryText.length} chars)`);
         const introCount = allBlocks.filter((b) => b.type === 'intro').length;
         const summaryBlockCount = allBlocks.filter((b) => b.type === 'summary').length;

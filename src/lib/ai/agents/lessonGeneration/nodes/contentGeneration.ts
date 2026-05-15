@@ -1,5 +1,5 @@
 import { RunnableConfig } from '@langchain/core/runnables';
-import { streamObject, NoObjectGeneratedError } from 'ai';
+import { streamObject, generateText, NoObjectGeneratedError } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { MODEL_IDS } from '@lib/langchain';
 import { logCacheUsage, usageFromVercelAi } from '@lib/ai/cacheLogger';
@@ -26,8 +26,31 @@ const minBlocksForDepth = (depth: string): number =>
 // stream doesn't surface as `NoObjectGeneratedError` — we throw a targeted
 // error that piggybacks on the existing runStream try/catch to trigger the
 // recovery retry, and we truncate on the upper end rather than reject.
-const SUMMARY_MIN_CHARS = 60;
+//
+// The floor is depth-tiered (mirrors `minBlocksForDepth` above). Overview
+// lessons are intentionally tight and may legitimately summarize in ~30
+// chars ("Print is the simplest Python tool."); comprehensive and deep_dive
+// lessons should produce richer summaries because they feed quiz-generation
+// and other downstream nodes that need real context. The same helper is
+// re-used by the jobRunner persistence gate so both layers agree.
+//
+// Sentry issue API-D fired twice for a single user (47 and 0 char summaries)
+// under the previous one-size-fits-all floor of 60 — tiering plus the Haiku
+// salvage path below should turn the 47-char case into a successful lesson.
+export const minSummaryCharsForDepth = (depth: string): number =>
+  depth === 'comprehensive' || depth === 'deep_dive' ? 60 : 30;
 const SUMMARY_MAX_CHARS = 800;
+// Wall-clock cap on the Haiku summary-salvage call. The salvage path runs
+// only after the streaming retry has already returned blocks but a too-short
+// summary — at that point we've already spent ~2 min on Sonnet, so capping
+// Haiku at 20 s keeps the overall lesson under the 600 s job timeout with
+// margin. Haiku at temp 0.3 typically returns 100-150 char summaries in
+// <2 s, so 20 s is roomy for the p99.
+const SALVAGE_TIMEOUT_MS = 20_000;
+// Lower bound below which we don't bother running the Haiku salvage — if
+// there are essentially no blocks, there's nothing to summarize from, and
+// the persistence gate will fail on block-count grounds regardless.
+const SALVAGE_MIN_BLOCKS = 3;
 
 // Wall-clock cap for a single content-generation stream. Healthy lessons
 // finish in 100-160 s; the cap is set wide enough to cover slow Sonnet
@@ -48,6 +71,73 @@ const STREAM_TIMEOUT_MS = 240_000; // 4 minutes
 // `error.message`, so without logging the cause here the Job record's "response
 // did not match schema" is unactionable. Log the cause, the error name, and the
 // tail of the raw response so next failure is diagnosable from stdout alone.
+// Synthesize a summary from already-generated blocks via Haiku. Runs only
+// when the Sonnet streaming pass plus its retry both returned a too-short
+// summary string but blocks themselves are usable — i.e. the model wrote
+// the lesson body fine and just punted on the closing summary field.
+// Returns the synthesized summary or `null` if the call fails / blocks are
+// too sparse to summarize from. Failure here is a non-event: we fall back
+// to the original short summary and let the jobRunner persistence gate
+// make the final call. Cost: ~$0.0002 per call (Haiku input + ~150 output
+// tokens) — strictly cheaper than retrying lesson generation end-to-end,
+// which is the alternative when this returns null.
+const salvageSummaryFromBlocks = async (
+  blocks: ILessonBlock[],
+  domain: string | null,
+): Promise<string | null> => {
+  // Only feed blocks the learner will actually see in the rendered lesson —
+  // skip placeholders, exercises, quizzes, recall cards. We're approximating
+  // the same filter the mentor-prompts generator uses in jobRunner.ts:574.
+  const usableBlocks = blocks
+    .filter((b) => ['intro', 'section', 'callout', 'summary'].includes(b.type))
+    .sort((a, b) => a.order - b.order);
+  if (usableBlocks.length < SALVAGE_MIN_BLOCKS) return null;
+  const blockText = usableBlocks
+    .map((b) => b.content)
+    .join('\n\n')
+    // Trim aggressively — Haiku has plenty of context window but every
+    // token we save shaves a few ms off latency. A 4000-char excerpt is
+    // more than enough context for a 100-150 char summary.
+    .slice(0, 4000);
+  const abortController = new AbortController();
+  const abortTimer = setTimeout(() => {
+    genLog.warn(`lesson:content salvage-timeout (${SALVAGE_TIMEOUT_MS}ms) — aborting`);
+    abortController.abort();
+  }, SALVAGE_TIMEOUT_MS);
+  try {
+    const domainHint = domain ? ` (subject area: ${domain})` : '';
+    const result = await generateText({
+      model: anthropic(MODEL_IDS.HAIKU),
+      temperature: 0.3,
+      abortSignal: abortController.signal,
+      maxOutputTokens: 250,
+      messages: [
+        {
+          role: 'system' as const,
+          content: `You write concise lesson summaries${domainHint}. Given the lesson body below, produce ONE paragraph of 80–150 characters that captures the key takeaway in the learner's own future-recall framing ("you learned…", "this lesson covered…"). Plain text, no markdown, no quotes, no preamble.`,
+        },
+        { role: 'user' as const, content: blockText },
+      ],
+    });
+    logCacheUsage({
+      label: 'lesson:content-summary-salvage',
+      usage: usageFromVercelAi({
+        providerMetadata: result.providerMetadata,
+        usage: result.usage,
+      }),
+      model: MODEL_IDS.HAIKU,
+    });
+    const text = result.text.trim();
+    return text.length > 0 ? text : null;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    genLog.warn(`lesson:content salvage-fail reason=${reason}`);
+    return null;
+  } finally {
+    clearTimeout(abortTimer);
+  }
+};
+
 const logNoObjectDetails = (label: string, err: unknown): void => {
   if (!NoObjectGeneratedError.isInstance(err)) return;
   const cause = err.cause;
@@ -65,9 +155,10 @@ const logNoObjectDetails = (label: string, err: unknown): void => {
 export const contentGeneration = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
   const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
   const MIN_BLOCKS_ACCEPTABLE = minBlocksForDepth(state.depth);
+  const MIN_SUMMARY_CHARS = minSummaryCharsForDepth(state.depth);
 
   const contentStart = Date.now();
-  genLog.info(`lesson:content start depth=${state.depth} minBlocks=${MIN_BLOCKS_ACCEPTABLE}`);
+  genLog.info(`lesson:content start depth=${state.depth} minBlocks=${MIN_BLOCKS_ACCEPTABLE} minSummary=${MIN_SUMMARY_CHARS}`);
 
   // Tracks every id emitted across the first pass AND the (optional) retry so the
   // retry never replays a block the client has already seen and the repetition
@@ -179,8 +270,8 @@ export const contentGeneration = async (state: LessonState, config?: RunnableCon
     // Summary is the lesson's condensed context feed for quiz-generation and
     // other downstream nodes; shipping an empty or placeholder summary
     // silently degrades those paths. A throw here hits the retry below.
-    if (firstPass.summary.trim().length < SUMMARY_MIN_CHARS) {
-      throw new Error(`[contentGeneration] summary too short (${firstPass.summary.trim().length} chars) — model likely truncated`);
+    if (firstPass.summary.trim().length < MIN_SUMMARY_CHARS) {
+      throw new Error(`[contentGeneration] summary too short (${firstPass.summary.trim().length} chars, need ≥${MIN_SUMMARY_CHARS}) — model likely truncated`);
     }
     genLog.info(`lesson:content pass1-ok blocks=${firstPass.blocks.length} ms=${Date.now() - contentStart}`);
   } catch (e) {
@@ -238,9 +329,35 @@ export const contentGeneration = async (state: LessonState, config?: RunnableCon
   // rather than reject. Runaway prose hurts layout but not correctness; a
   // truncated-with-ellipsis summary is strictly better than a failed lesson.
   const trimmed = final.summary.trim();
-  const boundedSummary = trimmed.length > SUMMARY_MAX_CHARS
+  let boundedSummary = trimmed.length > SUMMARY_MAX_CHARS
     ? `${trimmed.slice(0, SUMMARY_MAX_CHARS - 1)}…`
     : trimmed;
+
+  // Last-chance salvage: both the streaming pass AND the non-streaming retry
+  // returned blocks but a too-short summary. Rather than letting the
+  // jobRunner persistence gate kill the entire lesson (and discard ~2 min of
+  // Sonnet work + recall cards + hero image), synthesize a summary from the
+  // blocks themselves via Haiku. This is a third try with the bar lowered:
+  // we already have lesson content, we just need a usable summary string.
+  if (boundedSummary.length < MIN_SUMMARY_CHARS) {
+    genLog.warn(`lesson:content summary-still-short len=${boundedSummary.length} need=${MIN_SUMMARY_CHARS} — running Haiku salvage`);
+    const salvaged = await salvageSummaryFromBlocks(final.blocks, state.domain);
+    if (salvaged && salvaged.length >= MIN_SUMMARY_CHARS) {
+      const salvageBounded = salvaged.length > SUMMARY_MAX_CHARS
+        ? `${salvaged.slice(0, SUMMARY_MAX_CHARS - 1)}…`
+        : salvaged;
+      genLog.info(`lesson:content salvage-ok len=${salvageBounded.length}`);
+      boundedSummary = salvageBounded;
+    } else {
+      // Salvage failed or returned too-short text. Let the jobRunner
+      // persistence gate decide — it will fail the lesson with the same
+      // "summary too short" error as before, preserving today's behavior
+      // for the worst case. No silent shipping of broken summaries.
+      genLog.warn(
+        `lesson:content salvage-skipped reason=${salvaged ? `len=${salvaged.length}` : 'null'} — letting persistence gate handle`,
+      );
+    }
+  }
 
   return {
     contentBlocks: final.blocks,
