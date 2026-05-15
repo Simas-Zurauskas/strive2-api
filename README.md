@@ -103,7 +103,7 @@ Variables marked **required** are validated at boot — missing values trigger `
 
 ### Text-to-speech
 
-- `GOOGLE_TTS_PRIVATE_KEY` — Only the `private_key` field of the Google service-account JSON. Newlines must be literal `\n` in the env value; they are restored at read time. The matching `client_email` and `project_id` are hardcoded in [services/googleTtsService.ts](src/services/googleTtsService.ts). This split keeps the value under Elastic Beanstalk's 4096-char CloudFormation parameter ceiling. (required)
+Google Cloud TTS credentials — `client_email`, `project_id`, and `private_key` — are all hardcoded in [services/googleTtsService.ts](src/services/googleTtsService.ts). The previous env-var split for `private_key` caused chronic encoding bugs at the EB Console boundary (literal `\n` vs real newlines vs double-escaping). See the rotation procedure in that file's header comment.
 
 ### Billing (Stripe)
 
