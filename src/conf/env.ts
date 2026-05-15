@@ -1,4 +1,3 @@
-import { createPrivateKey, createSign } from 'node:crypto';
 import { lifecycleLog } from '@lib/loggers';
 
 const getEnv = (key: string): string => {
@@ -10,66 +9,6 @@ const getEnv = (key: string): string => {
   }
 
   return value;
-};
-
-// Validate the runtime PEM is well-formed at boot, so a misconfigured EB env
-// var fails loud at startup rather than per-request inside the gRPC stack
-// (where it surfaces as the opaque `DECODER routines::unsupported`, see
-// Sentry issue API-E). Production-only — dev/test stubs use a literal
-// 'test-key' placeholder that wouldn't parse and shouldn't.
-//
-// We deliberately do NOT log the key or any subset of its bytes — only its
-// length and the BEGIN/END markers, which are non-sensitive. The check itself
-// uses `createPrivateKey` (parses the PEM) and discards the result.
-const validateGoogleTtsPrivateKey = (pem: string, envName: string): void => {
-  if (envName !== 'production') return;
-  const len = pem.length;
-  const begin = pem.slice(0, 35);
-  const endTrim = pem.trimEnd();
-  const trailingWs = pem.length - endTrim.length;
-  const containsLiteralBackslashN = pem.includes('\\n');
-  // After the env.ts replace, the runtime value should contain real newlines,
-  // not literal `\n` sequences. If it still does, the env var was probably
-  // stored with double-escaping (e.g. JSON-encoded twice) and the replace
-  // missed it.
-  if (containsLiteralBackslashN) {
-    lifecycleLog.error(
-      `env:invalid key=GOOGLE_TTS_PRIVATE_KEY shape=literal-\\n-still-present len=${len} — the env var is double-escaped; re-store with single \\n sequences`,
-    );
-    process.exit(1);
-  }
-  let parsed;
-  try {
-    parsed = createPrivateKey({ key: pem, format: 'pem' });
-  } catch (e) {
-    const reason = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    lifecycleLog.error(
-      `env:invalid key=GOOGLE_TTS_PRIVATE_KEY parse-failed reason="${reason}" len=${len} trailingWs=${trailingWs} beginMarker="${begin}"`,
-    );
-    process.exit(1);
-  }
-  // Exercise the same OpenSSL signing path the Google Cloud auth library hits
-  // when it signs the JWT for service-account authentication. A PEM can pass
-  // `createPrivateKey` (structurally valid) but still fail to SIGN under
-  // Node's bundled OpenSSL — that's exactly the failure mode behind Sentry
-  // API-E (`error:1E08010C:DECODER routines::unsupported` raised from inside
-  // gRPC-js when it tries to attach signed credentials to the request
-  // metadata). Signing a 32-byte buffer with RSA-SHA256 takes <1ms and
-  // produces no network traffic, so this is cheap defence at boot.
-  try {
-    const signer = createSign('RSA-SHA256');
-    signer.update(Buffer.from('strive-tts-key-bootcheck'));
-    signer.sign(parsed);
-  } catch (e) {
-    const reason = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    lifecycleLog.error(
-      `env:invalid key=GOOGLE_TTS_PRIVATE_KEY sign-failed reason="${reason}" len=${len} keyType="${parsed.asymmetricKeyType ?? 'unknown'}" — key parses but cannot sign; Google auth handshake will fail`,
-    );
-    process.exit(1);
-  }
-  lifecycleLog.info(
-    `env:tts-key-ok len=${len} trailingWs=${trailingWs} beginsWithMarker=${begin.startsWith('-----BEGIN ')} keyType=${parsed.asymmetricKeyType ?? 'unknown'}`,
-  );
 };
 
 export const ENVIRONMENT = getEnv('ENVIRONMENT'); // development|production
@@ -88,14 +27,6 @@ export const JUDGE0_API_URL = getEnv('JUDGE0_API_URL');
 export const OPENAI_API_KEY = getEnv('OPENAI_API_KEY');
 export const PINECONE_API_KEY = getEnv('PINECONE_API_KEY');
 export const PINECONE_INDEX_NAME = getEnv('PINECONE_INDEX_NAME');
-// Only the private_key field of the Google service-account JSON. The rest of
-// the credentials object (client_email, project_id) is non-secret metadata
-// hardcoded in googleTtsService.ts. Splitting it this way keeps the env var
-// under EB's 4096-char CloudFormation parameter ceiling. Newlines must be
-// literal `\n` in the env value; we restore them here.
-export const GOOGLE_TTS_PRIVATE_KEY = getEnv('GOOGLE_TTS_PRIVATE_KEY').replace(/\\n/g, '\n');
-validateGoogleTtsPrivateKey(GOOGLE_TTS_PRIVATE_KEY, process.env.ENVIRONMENT ?? '');
-
 export const AWS_S3_BUCKET = getEnv('AWS_S3_BUCKET');
 export const AWS_S3_REGION = getEnv('AWS_S3_REGION');
 export const AWS_ACCESS_KEY_ID = getEnv('AWS_ACCESS_KEY_ID');
