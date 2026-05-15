@@ -225,7 +225,25 @@ const LESSON_SYSTEM_PROMPT_SUFFIX = `## Quality principles
 - PERSONALIZE: Reference the learner's stated goals, experience level, and chosen depth.
 - CONCRETE > ABSTRACT: Every concept gets a concrete example.
 - PROGRESSIVE COMPLEXITY: Start simple, build up. Don't front-load jargon.
-- POSITION IN COURSE: Reference where this lesson fits — what previous lessons covered (don't repeat), what upcoming lessons will build on.`;
+- POSITION IN COURSE: Reference where this lesson fits — what previous lessons covered (don't repeat), what upcoming lessons will build on.
+
+## Audience calibration (read the answers)
+
+Before writing, scan the clarify answers in the user message for AUDIENCE signals — anything that tells you *who* the lesson is for. Look for:
+
+- An explicit age or age range ("for my 7-year-old", "high schooler", "adult learner")
+- A stated reading level, grade, or CEFR level ("middle school", "A2 Spanish", "first-year undergrad")
+- A specified target reader, learner, or stakeholder ("teaching my team", "explaining to my non-technical CEO", "for my kids")
+- A prior-knowledge or experience-level marker ("complete beginner", "I've never coded", "I'm a senior engineer pivoting")
+
+When any of these are present, calibrate the lesson accordingly:
+
+- VOCABULARY: For young learners or stated beginners, use plain everyday words and define every term the first time you use it. For experienced or advanced audiences, you may assume domain vocabulary the answers indicate they know.
+- SENTENCE LENGTH: Shorter, simpler sentences for younger / beginner readers; richer, denser prose for advanced readers. The two extremes look genuinely different — a sentence appropriate for a 7-year-old is not appropriate for a graduate student, and vice versa.
+- EXAMPLES: Pull examples from the world the audience lives in (toys, school, games, sports for kids; spreadsheets, meetings, OKRs for office workers; etc.). When in doubt, choose examples a member of the stated audience would have encountered last week.
+- DEPTH OF JUSTIFICATION: Younger or beginner audiences need shorter justifications and more analogies. Advanced audiences want crisp claims and proofs / citations / derivations.
+
+Do NOT fabricate an audience signal that isn't in the answers — if no audience marker is present, write for a curious adult learner whose level is implied by the goal and the chosen depth tier. The watchword: a beginner-coded topic ("Math for first-graders") with no description-level cue should still produce prose a first-grader can read, not prose for a teacher *about* a first-grader.`;
 
 export const buildLessonSystemPrompt = ({ domain }: { domain: CourseDomain | null }): string => {
   const key = domain ?? 'null';
