@@ -244,10 +244,22 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
   },
 );
 
-// Phase 3 webhook handlers look up users by Stripe IDs; sparse unique index
+// Phase 3 webhook handlers look up users by Stripe IDs; a unique index
 // rejects accidental duplicates (one Stripe customer = one Strive user).
-schema.index({ 'subscription.stripeCustomerId': 1 }, { unique: true, sparse: true });
-schema.index({ 'subscription.stripeSubscriptionId': 1 }, { unique: true, sparse: true });
+//
+// Partial — NOT sparse. A sparse unique index still indexes documents whose
+// field is explicitly `null`, so two free/cancelled users (both holding
+// `null`) collide with E11000 on subscription cancellation. Filtering on
+// `$type: 'string'` indexes only real Stripe IDs; both `null` and absent are
+// excluded, so any number of users can have "no subscription".
+schema.index(
+  { 'subscription.stripeCustomerId': 1 },
+  { unique: true, partialFilterExpression: { 'subscription.stripeCustomerId': { $type: 'string' } } },
+);
+schema.index(
+  { 'subscription.stripeSubscriptionId': 1 },
+  { unique: true, partialFilterExpression: { 'subscription.stripeSubscriptionId': { $type: 'string' } } },
+);
 
 // ── Methods ────────────────────────────────────────────────
 

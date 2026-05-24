@@ -561,8 +561,6 @@ const handleSubscriptionDeleted = async (event: Stripe.Event): Promise<void> => 
       $set: {
         'subscription.plan': 'free',
         'subscription.status': 'canceled',
-        'subscription.stripeSubscriptionId': null,
-        'subscription.stripePriceId': null,
         'subscription.currentPeriodStart': null,
         'subscription.currentPeriodEnd': null,
         'subscription.cancelAtPeriodEnd': false,
@@ -571,6 +569,15 @@ const handleSubscriptionDeleted = async (event: Stripe.Event): Promise<void> => 
         'credits.allowanceGranted': freeAllowance,
         'credits.periodStart': now,
         'credits.periodEnd': periodEnd,
+      },
+      // Remove the Stripe identity fields rather than writing `null`: the
+      // unique index is partial on `$type:'string'`, so an explicit null is
+      // already excluded — but keeping these absent makes "no subscription"
+      // unambiguous and prevents the historical null-collision from ever
+      // returning if the index is later rebuilt without the partial filter.
+      $unset: {
+        'subscription.stripeSubscriptionId': '',
+        'subscription.stripePriceId': '',
       },
     },
   );
