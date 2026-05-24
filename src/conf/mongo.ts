@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import CourseModel from '@models/CourseModel';
+import UserModel from '@models/UserModel';
 import JobModel from '@models/JobModel';
 import LessonContentModel from '@models/LessonContentModel';
 import { deleteByPrefix } from '@services/s3Service';
@@ -82,16 +83,18 @@ const connectDB = async () => {
     // Reconcile indexes whose spec has changed since last boot (Mongoose's
     // autoIndex only *adds* missing indexes; it won't drop an existing index
     // whose options have diverged, e.g. `sparse: true` → `partialFilterExpression`).
-    try {
-      await CourseModel.syncIndexes();
-      lifecycleLog.info('mongo:indexes-synced model=Course');
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      lifecycleLog.error(`mongo:indexes-sync-fail model=Course msg=${message}`);
-      captureError(error, {
-        tags: { area: 'mongo.boot', phase: 'index_sync', model: 'Course' },
-        fingerprint: ['mongo.boot', 'index_sync', 'Course'],
-      });
+    for (const model of [CourseModel, UserModel]) {
+      try {
+        await model.syncIndexes();
+        lifecycleLog.info(`mongo:indexes-synced model=${model.modelName}`);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        lifecycleLog.error(`mongo:indexes-sync-fail model=${model.modelName} msg=${message}`);
+        captureError(error, {
+          tags: { area: 'mongo.boot', phase: 'index_sync', model: model.modelName },
+          fingerprint: ['mongo.boot', 'index_sync', model.modelName],
+        });
+      }
     }
 
     await cleanupOrphanedJobs();

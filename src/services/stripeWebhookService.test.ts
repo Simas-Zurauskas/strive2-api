@@ -590,6 +590,35 @@ describe('customer.subscription.deleted', () => {
     const event = makeSubDeletedEvent({ subscriptionId: 'sub_unknown_del' });
     await expect(handleStripeEvent(event)).resolves.toBeUndefined();
   });
+
+  // Regression for E11000 on subscription.stripeSubscriptionId. The index
+  // was unique+sparse, but sparse still indexes explicit `null`, so the
+  // SECOND cancellation (clearing the id) collided with the first user's
+  // cleared id. The fix makes the index partial ($type:'string') and clears
+  // via $unset. syncIndexes() here forces the real index to exist — the test
+  // DB helper otherwise leaves index builds lazy, which is why this slipped.
+  test('two different users cancelling do not collide on cleared stripeSubscriptionId', async () => {
+    await UserModel.syncIndexes();
+
+    const userA = await makeUser();
+    await subscribeUser({ userId: userA._id, plan: 'pro', stripeSubscriptionId: 'sub_collide_a' });
+    const userB = await makeUser();
+    await subscribeUser({ userId: userB._id, plan: 'pro', stripeSubscriptionId: 'sub_collide_b' });
+
+    await handleStripeEvent(makeSubDeletedEvent({ subscriptionId: 'sub_collide_a' }));
+    // Pre-fix this throws E11000 (both users now hold null at the indexed key).
+    await expect(
+      handleStripeEvent(makeSubDeletedEvent({ subscriptionId: 'sub_collide_b' })),
+    ).resolves.toBeUndefined();
+
+    for (const id of [userA._id, userB._id]) {
+      const after = await UserModel.findById(id).lean();
+      assert(after);
+      expect(after.subscription.plan).toBe('free');
+      expect(after.subscription.status).toBe('canceled');
+      expect(after.subscription.stripeSubscriptionId).toBeUndefined();
+    }
+  });
 });
 
 // ── invoice.paid ─────────────────────────────────────────
