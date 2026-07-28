@@ -35,10 +35,18 @@ const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
  *           application/json:
  *             schema:
  *               type: object
- *               required: [data]
+ *               required: [data, isNewUser]
  *               properties:
  *                 data:
  *                   type: string
+ *                   description: Bearer JWT for the authenticated session.
+ *                 isNewUser:
+ *                   type: boolean
+ *                   description: >-
+ *                     True when this request created the account, false when an
+ *                     existing account signed in. Google sign-in and sign-up share
+ *                     one endpoint, so this is the only way a caller can tell the
+ *                     two apart.
  */
 export const googleAuthController = asyncHandler(async (req, res) => {
   const { idToken } = googleAuthSchema.parse(req.body);
@@ -180,5 +188,8 @@ export const googleAuthController = asyncHandler(async (req, res) => {
     analytics.track(userId, 'signin_succeeded', { auth_method: 'google' });
   }
 
-  res.status(200).json({ data: generateAuthToken({ id: userId, tokenVersion: user.tokenVersion }) });
+  res.status(200).json({
+    data: generateAuthToken({ id: userId, tokenVersion: user.tokenVersion }),
+    isNewUser: !existing,
+  });
 });

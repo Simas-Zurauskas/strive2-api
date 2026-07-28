@@ -74,8 +74,48 @@ export interface IUserPreferences {
   narrationRate: number;
 }
 
+/**
+ * First-touch marketing attribution, captured in the browser on the visitor's
+ * first landing and written once at sign-up. **First-write-wins and immutable
+ * thereafter** — the point is to answer "which campaign produced this account",
+ * which a last-touch overwrite would destroy.
+ *
+ * Every field originates in a URL query parameter or `document.referrer`, so
+ * all of them are attacker-controlled strings. They are length-capped by the
+ * Zod schema at the route boundary (`attributionSchema`) and are never
+ * interpolated into a query, a template, or an outbound URL — they exist only
+ * to be read back in analytics.
+ *
+ * Lives on the user document, so account deletion removes it with no separate
+ * cascade step.
+ */
+export interface IUserAttribution {
+  /** `utm_source` — e.g. "google", "meta", "newsletter". */
+  source?: string;
+  /** `utm_medium` — e.g. "cpc", "organic", "email". */
+  medium?: string;
+  /** `utm_campaign`. */
+  campaign?: string;
+  /** `utm_term` — the matched keyword on Search campaigns. */
+  term?: string;
+  /** `utm_content` — the creative/variant within a campaign. */
+  content?: string;
+  /** Google Ads click id, present on any ad click regardless of UTMs. */
+  gclid?: string;
+  /** Meta click id, the equivalent for Facebook/Instagram traffic. */
+  fbclid?: string;
+  /** `document.referrer` at first landing — the organic/AI-assistant signal. */
+  referrer?: string;
+  /** Path (never the full URL) of the first page seen, e.g. "/learn/meta-ads". */
+  landingPath?: string;
+  /** When the browser first captured this, not when the row was written. */
+  capturedAt?: Date;
+}
+
 /** Persisted user fields (includes system-managed state). */
 export interface IUser extends UserInput {
+  /** See `IUserAttribution`. Absent for users who signed up before this shipped. */
+  attribution?: IUserAttribution;
   emailVerified: boolean;
   emailVerificationToken?: string;
   emailVerificationExpiry?: Date;
@@ -216,6 +256,27 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
       required: true,
       default: () => ({ narrationVoice: '', narrationRate: 1.0 }),
     },
+    // No `default` — absence is meaningful here. An unset `attribution` means
+    // "we never captured one" (pre-existing user, or consent declined), which
+    // the write path relies on: it only sets the subdoc when the field does
+    // not exist, so the first touch can never be overwritten by a later one.
+    attribution: {
+      type: new Schema<IUserAttribution>(
+        {
+          source: { type: String },
+          medium: { type: String },
+          campaign: { type: String },
+          term: { type: String },
+          content: { type: String },
+          gclid: { type: String },
+          fbclid: { type: String },
+          referrer: { type: String },
+          landingPath: { type: String },
+          capturedAt: { type: Date },
+        },
+        { _id: false },
+      ),
+    },
   },
   {
     timestamps: true,
@@ -237,6 +298,11 @@ const schema = new Schema<IUser, UserModel, IUserMethods>(
           delete sub.stripeSubscriptionId;
           delete sub.stripePriceId;
         }
+        // Marketing attribution is write-only from the client's perspective:
+        // the browser supplies it once at sign-up and never reads it back, so
+        // it stays out of `/me` and therefore out of the OpenAPI User schema.
+        // Analytics reads it directly from Mongo.
+        delete ret.attribution;
         delete ret.__v;
         return ret;
       },

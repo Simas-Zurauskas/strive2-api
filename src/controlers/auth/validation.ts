@@ -86,3 +86,35 @@ export const changePasswordSchema = z.object({
     .string()
     .regex(/^\d{6}$/, 'Confirmation code must be 6 digits'),
 });
+
+/**
+ * First-touch marketing attribution (see `IUserAttribution`). Every value here
+ * comes from a URL query parameter or `document.referrer`, so all of it is
+ * attacker-controlled: an arbitrary visitor can put arbitrary text in any
+ * field simply by crafting a link.
+ *
+ * The caps below are the boundary guard. They are sized to real-world campaign
+ * tags rather than to the protocol maximum — a 200-character `utm_campaign` is
+ * already far beyond anything an ad platform generates, and referrer URLs are
+ * the only field that legitimately runs long. Values are stored verbatim and
+ * only ever read back by analytics; nothing downstream interpolates them into
+ * a query, a template, or an outbound URL.
+ *
+ * Every field is optional because campaign parameters are, by nature, partial:
+ * organic traffic has a referrer and nothing else, a Google Ads click has a
+ * `gclid` and possibly no UTMs at all.
+ */
+const attributionField = z.string().trim().max(200).optional();
+
+export const attributionSchema = z.object({
+  source: attributionField,
+  medium: attributionField,
+  campaign: attributionField,
+  term: attributionField,
+  content: attributionField,
+  gclid: attributionField,
+  fbclid: attributionField,
+  referrer: z.string().trim().max(500).optional(),
+  landingPath: attributionField,
+  capturedAt: z.coerce.date().optional(),
+});

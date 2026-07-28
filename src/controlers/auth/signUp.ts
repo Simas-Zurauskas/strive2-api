@@ -37,10 +37,17 @@ import { signUpSchema } from './validation';
  *           application/json:
  *             schema:
  *               type: object
- *               required: [data]
+ *               required: [data, isNewUser]
  *               properties:
  *                 data:
  *                   type: string
+ *                   description: Bearer JWT for the newly created session.
+ *                 isNewUser:
+ *                   type: boolean
+ *                   description: >-
+ *                     Always true — this endpoint only ever creates accounts, and
+ *                     409s when the email is already registered. Present so the
+ *                     credential and Google sign-up paths carry the same field.
  */
 export const signUpController = asyncHandler(async (req, res) => {
   const { email, password } = signUpSchema.parse(req.body);
@@ -111,5 +118,8 @@ export const signUpController = asyncHandler(async (req, res) => {
   // client to handle a signup response that has no session (stay on
   // check-email) rather than an immediate session start. Deferred until
   // the client change can be coordinated.
-  res.status(201).json({ data: generateAuthToken({ id: user._id.toString(), tokenVersion: user.tokenVersion }) });
+  res.status(201).json({
+    data: generateAuthToken({ id: user._id.toString(), tokenVersion: user.tokenVersion }),
+    isNewUser: true,
+  });
 });
