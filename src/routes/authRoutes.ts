@@ -20,6 +20,7 @@ import {
   getMarketingPreferenceController,
   updateMarketingPreferenceController,
   recordConsentController,
+  recordAttributionController,
 } from '@controlers/auth';
 import { protect, optionalProtect } from '@middleware/authMiddleware';
 import { perEmailRateLimit } from '@middleware/perEmailRateLimit';
@@ -74,6 +75,12 @@ router.get('/me', protect, getMeController);
 router.patch('/me/preferences', protect, updatePreferencesController);
 router.get('/me/marketing-preference', protect, getMarketingPreferenceController);
 router.patch('/me/marketing-preference', protect, updateMarketingPreferenceController);
+// First-touch campaign attribution, posted once by the browser just after
+// sign-up. Deliberately NOT behind `authLimiter`: that bucket is the
+// credential-endpoint budget, and spending it on an authenticated one-shot
+// write would let a burst of sign-ups throttle sign-in from the same IP. The
+// global per-user limiter covers it, and the write is idempotent regardless.
+router.post('/me/attribution', protect, recordAttributionController);
 router.post('/logout', protect, logoutController);
 // Sliding-refresh: issues a fresh 7-day access token to a still-valid
 // session. Re-checks `tokenVersion` against the DB so revoked tokens
