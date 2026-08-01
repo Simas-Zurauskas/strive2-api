@@ -4,6 +4,7 @@ import { bumpLinksFetchFailure } from '@lib/metrics';
 import { priceLlmUsage } from '@lib/pricing';
 import { recordUsage } from '@services/usageService';
 import { genLog } from '@lib/loggers';
+import { checkUrlReservation } from '@services/urlReservationCheck';
 import { FetchedCandidate, SearchCandidate } from './schemas';
 
 const JINA_READER_BASE = 'https://r.jina.ai/';
@@ -41,6 +42,21 @@ const isSafeHttpsUrl = (raw: string): boolean => {
 const fetchOne = async (candidate: SearchCandidate): Promise<FetchedCandidate | null> => {
   if (!isSafeHttpsUrl(candidate.url)) {
     bumpLinksFetchFailure('ssrf_reject');
+    return null;
+  }
+
+  // Rights-reservation gate (robots.txt RFC 9309 + TDM reservation). Our
+  // published Terms §6.3 / Privacy §12 promise this runs before EVERY
+  // outbound page fetch, and this batch path talks to Jina directly rather
+  // than through `jinaReader.readUrl`, so it is wired at the call site.
+  // A refusal is the same graceful drop as any other fetch failure: the
+  // candidate is discarded and the judge stage simply scores one fewer.
+  // The gate caches per host, so a batch of candidates from one domain
+  // costs one reservation read.
+  const reservation = await checkUrlReservation(candidate.url);
+  if (!reservation.allowed) {
+    bumpLinksFetchFailure('reserved');
+    genLog.info(`links:fetch reserved host=${candidate.hostname} signal=${reservation.signal}`);
     return null;
   }
 
@@ -129,8 +145,9 @@ const fetchOne = async (candidate: SearchCandidate): Promise<FetchedCandidate | 
  * Concurrency is bounded to 5 per lesson so one lesson can't exhaust the
  * free-tier rate limit (~20 req/min/IP). A per-URL 6-second timeout keeps
  * the total stage duration bounded even when a tail of candidates hangs.
- * Dropped candidates (timeout, 4xx, 5xx, empty body, SSRF reject) never fail
- * the pipeline — the judge stage simply has fewer to score.
+ * Dropped candidates (timeout, 4xx, 5xx, empty body, SSRF reject, rights
+ * reservation) never fail the pipeline — the judge stage simply has fewer
+ * to score.
  */
 export const fetchCandidateContent = async ({
   candidates,

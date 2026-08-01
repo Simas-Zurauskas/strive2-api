@@ -25,11 +25,15 @@ const mailjet = new Mailjet({
 // The list name as it appears in the Mailjet dashboard. Resolved to a
 // numeric ID at runtime (cached) so a rename in Mailjet that doesn't
 // preserve the ID would break loudly here rather than silently misroute.
-const PROMOTIONAL_LIST_NAME = 'promotional';
+export const PROMOTIONAL_LIST_NAME = 'promotional';
 
 let cachedListId: number | null = null;
 
-const resolvePromotionalListId = async (): Promise<number> => {
+// Exported so `mailjetSuppressionSync` can page the same list without
+// duplicating the exact-name-match rule below — two copies of "which list
+// is the promotional list" is exactly how a bulk read ends up reconciling
+// the wrong audience.
+export const resolvePromotionalListId = async (): Promise<number> => {
   if (cachedListId !== null) return cachedListId;
 
   type ListsResp = { Data: { ID: number; Name: string }[] };
@@ -144,6 +148,33 @@ export const setPromotionalSubscribed = async (params: {
       fingerprint: ['mailjet_contact', 'set_subscribed'],
     });
     throw err;
+  }
+};
+
+// Pushes a LOCAL opt-out out to Mailjet so the delivery-side suppression
+// list agrees with our ledger.
+//
+// Deliberately fail-soft, unlike `setPromotionalSubscribed`: the only
+// caller is the public unsubscribe route, where `MarketingContact` has
+// already recorded the opt-out and is the authority on who gets mailed. An
+// opt-out request must never fail because a vendor was briefly unavailable,
+// and this is self-healing — every subsequent click on the same link
+// retries the push, and the pre-campaign bulk suppression read reconciles
+// the other direction.
+//
+// One-way by construction: `subscribed: false` is hardcoded. There is no
+// local→Mailjet path that can re-subscribe anyone (PLAN A2b).
+export const syncSuppression = async (email: string): Promise<void> => {
+  try {
+    await setPromotionalSubscribed({ email, subscribed: false });
+  } catch (err) {
+    // No address in this line. The unsubscribe route that calls it is
+    // public and unauthenticated, so its log volume is attacker-influenced
+    // — and an address in a log is personal data with a retention policy
+    // (data-protection.md §6.3). The wrapped call still logs its own
+    // address-bearing line, which is pre-existing behaviour across this
+    // service and out of scope to change here.
+    integrationLog.warn(`mailjet:contact:sync-suppression fail reason=${(err as Error).message}`);
   }
 };
 

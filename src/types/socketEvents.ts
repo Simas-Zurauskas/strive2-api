@@ -1,5 +1,5 @@
 import type { ILessonBlock } from '@models/LessonContentModel';
-import type { JobType } from '@lib/constants';
+import type { JobType, SourceDocumentStatus } from '@lib/constants';
 import type { GeneratedRecallCard } from '@services/recallContentService';
 import type { CreditLedgerReason } from '@models/CreditLedgerModel';
 
@@ -62,7 +62,8 @@ export type LessonProgressEvent =
   | { type: 'recall_card'; card: GeneratedRecallCard }
   | { type: 'recall_cards_saved'; count: number }
   | { type: 'narration_started' }
-  | { type: 'narration_ready'; cached: boolean; voiceId: string };
+  | { type: 'narration_ready'; cached: boolean; voiceId: string }
+  | { type: 'document_status'; documentId: string; status: SourceDocumentStatus; warnings?: string[] };
 
 // ── job:progress (outer envelope) ─────────────────────────
 

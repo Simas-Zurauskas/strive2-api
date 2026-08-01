@@ -2,7 +2,7 @@ import asyncHandler from 'express-async-handler';
 import CourseModel from '@models/CourseModel';
 import JobModel from '@models/JobModel';
 import UserModel from '@models/UserModel';
-import { cleanupCourseContent } from '@services/courseCleanupService';
+import { cleanupCourseContent, cleanupCourseSources } from '@services/courseCleanupService';
 import { getUserCourseLean } from '@services/courseDbService';
 
 /**
@@ -45,6 +45,13 @@ export const deleteCourseController = asyncHandler(async (req, res) => {
     // course, so we don't double up here. It also covers lesson content,
     // progress, quizzes, recall cards, recall-progress, and S3 assets.
     cleanupCourseContent(course._id.toString()),
+    // DELETION runs both halves of the cleanup split: content (above) AND
+    // sources — SourceDocument rows, chunk rows + user-doc vectors, and the
+    // whole `uploads/{userId}/{courseId}/` prefix. This is the only
+    // course-deletion call site and (unlike deleteAccount) has no
+    // user-scoped backstop, so skipping it here orphans docs/chunks/
+    // vectors/S3 permanently.
+    cleanupCourseSources({ courseId: course._id.toString(), userId }),
     // Pull this course from every user's favoriteCourseIds. Without this,
     // deleted courses leave dangling ObjectIds in users' favorites arrays
     // that show up as 404s when the home screen tries to hydrate them.

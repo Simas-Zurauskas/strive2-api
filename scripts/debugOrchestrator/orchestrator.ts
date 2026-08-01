@@ -5,6 +5,7 @@ import { MarkdownRecorder } from './markdownRecorder';
 import { createVerifiedTestUser, deleteTestUser } from './testUser';
 import { GOAL_TYPES } from '@lib/constants';
 import type { GoalType } from '@lib/constants';
+import type { LoadedDocumentSet } from './documentSets';
 import type { Persona, PersonaRun, OrchestratorConfig } from './types';
 
 const slugifyPersonaName = (name: string): string =>
@@ -17,9 +18,12 @@ const slugifyPersonaName = (name: string): string =>
 export async function runAll({
   personas,
   config,
+  personaSets = null,
 }: {
   personas: Persona[];
   config: OrchestratorConfig;
+  /** Docs mode only: personaSets[i] is persona i's document set. */
+  personaSets?: LoadedDocumentSet[] | null;
 }): Promise<PersonaRun[]> {
   const limit = pLimit(config.concurrency);
 
@@ -31,6 +35,10 @@ export async function runAll({
   console.log(`Starting ${personas.length} persona flows (concurrency: ${config.concurrency})`.cyan);
   console.log(`API: ${config.apiUrl}`.gray);
   console.log(`Run ID: ${runId}`.gray);
+  if (config.documentsMode) {
+    const setList = [...new Set(config.documentSetNames ?? [])].join(', ');
+    console.log(`Mode: ${'documents'.green} (set${(config.documentSetNames?.length ?? 0) > 1 ? 's' : ''}: ${setList})`.gray);
+  }
   console.log(`Chat review: ${config.enableChatReview ? 'enabled'.green : 'disabled'.yellow}`.gray);
   console.log(`Lessons: ${config.maxLessons === 0 ? 'skipped'.yellow : String(config.maxLessons)}`.gray);
   console.log(`Quizzes: ${config.enableQuiz ? 'enabled'.green : 'disabled'.yellow}`.gray);
@@ -71,6 +79,7 @@ export async function runAll({
             runId,
             personaSlug,
             userId: testUser.userId,
+            documentSet: personaSets?.[index] ?? null,
           });
         } finally {
           await deleteTestUser({ client, userId: testUser.userId, email: testUser.email });

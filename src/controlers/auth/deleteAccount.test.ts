@@ -25,12 +25,14 @@ import { AuthProvider } from '@lib/constants';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import { AppError } from '@middleware/errorMiddleware';
 
-// Mock Stripe + abuse-log + cleanupCourseContent + securityActionService.
-const { fakeCancelAllSubs, fakeRecordDeletion, fakeCleanupCourse, fakeConsumeCode } = vi.hoisted(() => ({
+// Mock Stripe + abuse-log + cleanupCourseContent/Sources + securityActionService.
+const { fakeCancelAllSubs, fakeRecordDeletion, fakeCleanupCourse, fakeCleanupSources, fakeConsumeCode, fakeDeleteByPrefix } = vi.hoisted(() => ({
   fakeCancelAllSubs: vi.fn(() => Promise.resolve()),
   fakeRecordDeletion: vi.fn(() => Promise.resolve()),
   fakeCleanupCourse: vi.fn(() => Promise.resolve({})),
+  fakeCleanupSources: vi.fn(() => Promise.resolve({ documentsDeleted: 0, chunksDeleted: 0, vectorsDeleted: 0, s3ObjectsDeleted: 0 })),
   fakeConsumeCode: vi.fn(() => Promise.resolve()),
+  fakeDeleteByPrefix: vi.fn(() => Promise.resolve(0)),
 }));
 
 vi.mock('@services/stripeService', async (importOriginal) => {
@@ -48,6 +50,7 @@ vi.mock('@services/abuseLogService', () => ({
 
 vi.mock('@services/courseCleanupService', () => ({
   cleanupCourseContent: fakeCleanupCourse,
+  cleanupCourseSources: fakeCleanupSources,
   getEditImpact: vi.fn(),
 }));
 
@@ -55,7 +58,49 @@ vi.mock('@services/securityActionService', () => ({
   consumeSecurityActionCode: fakeConsumeCode,
 }));
 
+// Mailjet erasure is a real HTTP call in the un-mocked module; stub the whole
+// contact service so the cascade tests stay offline.
+vi.mock('@services/mailjetContactService', () => ({
+  deletePromotionalContact: vi.fn(() => Promise.resolve()),
+  setPromotionalSubscribed: vi.fn(),
+  getPromotionalSubscribed: vi.fn(),
+  resolvePromotionalListId: vi.fn(),
+  syncSuppression: vi.fn(),
+  PROMOTIONAL_LIST_NAME: 'promotional',
+}));
+
+vi.mock('@services/s3Service', () => ({
+  deleteByPrefix: fakeDeleteByPrefix,
+  uploadBuffer: vi.fn(),
+  getPresignedUrl: vi.fn(),
+  objectExists: vi.fn(),
+  copyObject: vi.fn(),
+  deleteObject: vi.fn(),
+  getObjectBuffer: vi.fn(),
+  listKeysByPrefix: vi.fn(() => Promise.resolve([])),
+  resolveImageUrl: vi.fn(),
+}));
+
+// The user-scoped chunk backstop (sourceDocRagService.deleteSourceChunksForUser)
+// runs for real against the memory server; only Pinecone is stubbed.
+vi.mock('@lib/pinecone', () => ({
+  upsertChunkVectors: vi.fn(() => Promise.resolve(true)),
+  deleteChunkVectorsByIds: vi.fn(() => Promise.resolve(true)),
+  queryChunks: vi.fn(() => Promise.resolve([])),
+  upsertVectors: vi.fn(() => Promise.resolve(true)),
+  queryVectors: vi.fn(() => Promise.resolve([])),
+  deleteVectorsByIds: vi.fn(() => Promise.resolve(true)),
+  fetchVectorIds: vi.fn(() => Promise.resolve([])),
+  isPineconeEnabled: () => true,
+}));
+
 import { deleteAccountController } from '@controlers/auth/deleteAccount';
+import MarketingContactModel from '@models/MarketingContactModel';
+import { MARKETING_EVIDENCE } from '@lib/constants';
+import SourceDocumentModel from '@models/SourceDocumentModel';
+import SourceDocumentChunkModel from '@models/SourceDocumentChunkModel';
+import ContentFlagModel from '@models/ContentFlagModel';
+import mongoose from 'mongoose';
 
 setupTestDb();
 
@@ -68,8 +113,154 @@ beforeEach(() => {
   fakeRecordDeletion.mockResolvedValue(undefined);
   fakeCleanupCourse.mockReset();
   fakeCleanupCourse.mockResolvedValue({});
+  fakeCleanupSources.mockReset();
+  fakeCleanupSources.mockResolvedValue({ documentsDeleted: 0, chunksDeleted: 0, vectorsDeleted: 0, s3ObjectsDeleted: 0 });
   fakeConsumeCode.mockReset();
   fakeConsumeCode.mockResolvedValue(undefined);
+  fakeDeleteByPrefix.mockReset();
+  fakeDeleteByPrefix.mockResolvedValue(0);
+});
+
+// ── Source-document erasure (Phase 4) ────────────────────
+
+describe('deleteAccountController — source-document erasure', () => {
+  test('wipes uploads/{userId}/ prefix + SourceDocument/chunk rows; ContentFlag survives (REPORT Act exception)', async () => {
+    const user = await makeUser({ email: 'src-del@example.com' });
+    const course = await makeCourse({ userId: user._id });
+
+    const documentId = new mongoose.Types.ObjectId();
+    await SourceDocumentModel.create({
+      _id: documentId,
+      userId: user._id,
+      courseId: course._id,
+      kind: 'file',
+      filename: 'a.pdf',
+      mimeType: 'application/pdf',
+      byteSize: 10,
+      sha256: 'a'.repeat(64),
+      s3Key: `uploads/${user._id.toString()}/${course._id.toString()}/${documentId.toString()}`,
+      status: 'parsed',
+    });
+    // FK-drift row: a chunk whose courseId points at a long-gone course —
+    // the per-course path can't see it; the user-scoped backstop must.
+    await SourceDocumentChunkModel.create({
+      userId: user._id,
+      courseId: new mongoose.Types.ObjectId(),
+      documentId,
+      chunkIndex: 0,
+      chunkType: 'text',
+      text: 'chunk',
+      headingPath: [],
+      pageRange: null,
+      vectorId: `doc:x:${documentId.toString()}:0`,
+    });
+    await ContentFlagModel.create({
+      userId: user._id,
+      courseId: course._id,
+      documentId,
+      provider: 'photodna',
+      matchMeta: {},
+      s3QuarantineKey: `quarantine/${user._id.toString()}/${documentId.toString()}`,
+      retentionUntil: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+    });
+
+    const { req, res, status } = buildReqRes({
+      userId: user._id.toString(),
+      body: { code: VALID_CODE },
+    });
+    await invokeController(deleteAccountController, req, res);
+    expect(status).toHaveBeenCalledWith(200);
+
+    // Per-course source cleanup ran alongside content cleanup.
+    expect(fakeCleanupSources).toHaveBeenCalledWith({
+      courseId: course._id.toString(),
+      userId: user._id.toString(),
+    });
+    // User-scoped backstops: rows + chunks gone even without a course pointer.
+    expect(await SourceDocumentModel.countDocuments({ userId: user._id })).toBe(0);
+    expect(await SourceDocumentChunkModel.countDocuments({ userId: user._id })).toBe(0);
+    // The whole user upload prefix is wiped.
+    expect(fakeDeleteByPrefix).toHaveBeenCalledWith(`uploads/${user._id.toString()}/`);
+    // ContentFlag is deliberately retained (REPORT Act evidence window).
+    expect(await ContentFlagModel.countDocuments({ userId: user._id })).toBe(1);
+  });
+});
+
+// ── Marketing-ledger erasure (Phase 3 / F13) ─────────────
+
+describe('deleteAccountController — marketing ledger erasure', () => {
+  test('deletes the MarketingContact row so the address does not survive inside the send audience', async () => {
+    const user = await makeUser({ email: 'mkt-del@example.com' });
+    await MarketingContactModel.create({
+      userId: user._id,
+      email: 'mkt-del@example.com',
+      basis: 'soft_opt_in',
+      source: 'registration',
+      evidence: MARKETING_EVIDENCE.SEEDED_COHORT,
+      optedOut: false,
+    });
+    // A peer's row must survive — the cascade is owner-scoped.
+    await MarketingContactModel.create({
+      email: 'peer-keep@example.com',
+      basis: 'soft_opt_in',
+      source: 'registration',
+      evidence: MARKETING_EVIDENCE.SEEDED_COHORT,
+      optedOut: false,
+    });
+
+    const { req, res, status } = buildReqRes({
+      userId: user._id.toString(),
+      body: { code: VALID_CODE },
+    });
+    await invokeController(deleteAccountController, req, res);
+    expect(status).toHaveBeenCalledWith(200);
+
+    expect(await MarketingContactModel.countDocuments({ email: 'mkt-del@example.com' })).toBe(0);
+    expect(await MarketingContactModel.countDocuments({ email: 'peer-keep@example.com' })).toBe(1);
+  });
+
+  test('deletes a contact row that predates the userId link (matched on email)', async () => {
+    const user = await makeUser({ email: 'orphan-link@example.com' });
+    await MarketingContactModel.create({
+      email: 'orphan-link@example.com', // no userId — seeded before linkage
+      basis: 'soft_opt_in',
+      source: 'registration',
+      evidence: MARKETING_EVIDENCE.SEEDED_COHORT,
+      optedOut: true,
+      optedOutAt: new Date(),
+    });
+
+    const { req, res } = buildReqRes({ userId: user._id.toString(), body: { code: VALID_CODE } });
+    await invokeController(deleteAccountController, req, res);
+
+    expect(await MarketingContactModel.countDocuments({ email: 'orphan-link@example.com' })).toBe(0);
+  });
+
+  test('sweeps MarketingSend rows when that collection exists, and is a no-op when it does not (Phase 4 forward guard)', async () => {
+    const user = await makeUser({ email: 'send-log@example.com' });
+    const db = mongoose.connection.db!;
+    await db.collection('MarketingSend').insertMany([
+      { campaignKey: 'documents-feature-2026-08', email: 'send-log@example.com', status: 'sent' },
+      { campaignKey: 'documents-feature-2026-08', email: 'someone-else@example.com', status: 'sent' },
+    ]);
+
+    const { req, res, status } = buildReqRes({
+      userId: user._id.toString(),
+      body: { code: VALID_CODE },
+    });
+    await invokeController(deleteAccountController, req, res);
+    expect(status).toHaveBeenCalledWith(200);
+
+    expect(await db.collection('MarketingSend').countDocuments({ email: 'send-log@example.com' })).toBe(0);
+    expect(await db.collection('MarketingSend').countDocuments({})).toBe(1);
+
+    // Second user, collection now dropped: the cascade must not throw.
+    await db.collection('MarketingSend').drop();
+    const other = await makeUser({ email: 'no-send-log@example.com' });
+    const second = buildReqRes({ userId: other._id.toString(), body: { code: VALID_CODE } });
+    await invokeController(deleteAccountController, second.req, second.res);
+    expect(second.status).toHaveBeenCalledWith(200);
+  });
 });
 
 // ── Happy paths ─────────────────────────────────────────

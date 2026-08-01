@@ -11,7 +11,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import type { Request, Response, NextFunction } from 'express';
 import { z, ZodError } from 'zod';
-import { errorHandler, AppError, type IError } from '@middleware/errorMiddleware';
+import { errorHandler, AppError, ERROR_CODES, type IError } from '@middleware/errorMiddleware';
 
 const buildReqRes = ({
   preStatus,
@@ -165,5 +165,18 @@ describe('errorHandler', () => {
     await errorHandler(err as unknown as IError, req, res, vi.fn() as NextFunction);
     const body = json.mock.calls[0][0];
     expect(body).not.toHaveProperty('meta');
+  });
+});
+
+describe('ERROR_CODES registry', () => {
+  test('carries the course-from-documents codes', () => {
+    for (const code of [
+      'CONTENT_REJECTED',
+      'UNSUPPORTED_FILE_TYPE',
+      'DOCUMENT_LIMIT_EXCEEDED',
+      'DOCUMENT_EXTRACTION_FAILED',
+    ]) {
+      expect(ERROR_CODES).toContain(code);
+    }
   });
 });

@@ -6,6 +6,7 @@ import { logCacheUsage, usageFromVercelAi } from '@lib/ai/cacheLogger';
 import type { LessonProgressWriter } from '@src/types/socketEvents';
 import type { ILessonBlock } from '@models/LessonContentModel';
 import { genLog } from '@lib/loggers';
+import { DEFAULT_SOURCE_FIDELITY } from '../../shared/sourceFidelity';
 import { LessonState } from '../state';
 import { contentOutputSchema, buildLessonSystemPrompt } from '../prompts';
 
@@ -182,12 +183,28 @@ export const contentGeneration = async (state: LessonState, config?: RunnableCon
       const result = streamObject({
         model: anthropic(MODEL_IDS.SONNET),
         schema: contentOutputSchema,
-        temperature: 0.7,
+        // Sonnet 5: `temperature` is rejected (400) — must not be set here.
+        // Explicit cap (don't trust the SDK's per-model default — an unknown
+        // model id falls back to 4096): Sonnet-5 tokenizer needs ~1.4×
+        // headroom over the old 16384-equivalent lesson budget.
+        maxOutputTokens: 24000,
+        // Omitted `thinking` means adaptive-ON for Sonnet 5; disabled keeps
+        // 4.6 cost/latency parity. Requires @ai-sdk/anthropic ≥3.0.104 —
+        // older versions silently DROP `{type:'disabled'}` from the body.
+        providerOptions: { anthropic: { thinking: { type: 'disabled' } } },
         abortSignal: abortController.signal,
         messages: [
           {
             role: 'system' as const,
-            content: buildLessonSystemPrompt({ domain: state.domain }),
+            // Documents courses with retrieved source material get the
+            // per-fidelity grounding section; null (goal courses, or empty
+            // retrieval) yields the exact pre-feature prompt. Static per
+            // (domain, fidelity) so the 1h cache below still hits across
+            // every lesson of the same course.
+            content: buildLessonSystemPrompt({
+              domain: state.domain,
+              sourceGrounding: state.hasSourceMaterial ? (state.sourceFidelity ?? DEFAULT_SOURCE_FIDELITY) : null,
+            }),
             // 1h TTL: a single course-generation burst fires `lesson:content`
             // once per lesson — often 15-50 calls spread across 10-45 minutes.
             // 5m ephemeral would expire mid-course and force the tail of the

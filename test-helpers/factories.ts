@@ -39,6 +39,11 @@ export const makeUser = async (
     emailVerified: overrides.emailVerified ?? true,
     authProviders: overrides.authProviders ?? [{ provider: AuthProvider.CREDENTIALS }],
     tokenVersion: overrides.tokenVersion ?? 0,
+    // Forwarded explicitly (schema default is `false`) so `requireAdmin`
+    // tests can mint a real admin row rather than patching one in with a
+    // follow-up updateOne. Keep the default at `false`: a factory that
+    // handed out admins by accident would make every gate test pass.
+    isAdmin: overrides.isAdmin ?? false,
     favoriteCourseIds: overrides.favoriteCourseIds ?? [],
     ...(overrides.subscription ? { subscription: overrides.subscription } : {}),
     ...(overrides.credits ? { credits: overrides.credits } : {}),

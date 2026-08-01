@@ -308,6 +308,33 @@ export const deleteVectorsByIds = async (
 };
 
 /**
+ * Fetch-by-id existence probe: returns the subset of `ids` that exist in
+ * the index. Read-only, used by verification harnesses (debug:ingest's
+ * zero-orphan proof) — not a retrieval surface, so no cost recording
+ * (Pinecone fetches are billed like queries but this only ever runs from
+ * operator scripts outside a usage scope).
+ */
+export const fetchVectorIds = async (ids: string[]): Promise<string[]> => {
+  if (ids.length === 0) return [];
+  const idx = getIndex();
+  if (!idx) return [];
+
+  try {
+    const found: string[] = [];
+    // Pinecone caps fetch at ~1000 ids per call; slice defensively.
+    for (let i = 0; i < ids.length; i += 500) {
+      const res = await idx.fetch({ ids: ids.slice(i, i + 500) });
+      found.push(...Object.keys(res.records ?? {}));
+    }
+    return found;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ragLog.error(`pinecone:fetch fail ids=${ids.length} msg=${message}`);
+    return [];
+  }
+};
+
+/**
  * Query the index for the top-K most similar chunks within a course
  * (and optionally a single module). Returns vector ids + scores; the
  * caller hydrates chunk text via LessonChunkModel.

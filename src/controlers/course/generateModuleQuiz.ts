@@ -51,12 +51,18 @@ export const generateModuleQuizController = asyncHandler(async (req, res) => {
     return;
   }
 
-  // Validate all lessons are generated
+  // Gate: at least 2 generated lessons in the module (or every lesson, for
+  // modules smaller than that). The original all-lessons gate meant no quiz
+  // was ever generated in production — real usage runs 1-2 lessons per
+  // module, so the bar sat permanently out of reach. Two lessons is the
+  // floor at which cross-lesson synthesis questions are possible; the quiz
+  // covers the generated subset (contextLoad feeds only generated lessons).
   const lessonCount = mod.lessons?.length ?? 0;
+  const requiredCount = Math.min(2, lessonCount);
   const generatedCount = await LessonContentModel.countDocuments({ courseId, moduleIndex });
-  if (generatedCount < lessonCount) {
+  if (lessonCount === 0 || generatedCount < requiredCount) {
     res.status(400).json({
-      message: `Not all lessons generated for this module (${generatedCount}/${lessonCount})`,
+      message: `Generate at least ${requiredCount || 1} lesson${requiredCount === 1 ? '' : 's'} in this module to unlock its quiz (${generatedCount}/${lessonCount} generated)`,
       errorCode: 'LESSONS_NOT_GENERATED',
     });
     return;

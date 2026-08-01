@@ -21,6 +21,8 @@ import {
   updateMarketingPreferenceController,
   recordConsentController,
   recordAttributionController,
+  unsubscribeMarketingController,
+  unsubscribeMarketingConfirmController,
 } from '@controlers/auth';
 import { protect, optionalProtect } from '@middleware/authMiddleware';
 import { perEmailRateLimit } from '@middleware/perEmailRateLimit';
@@ -60,7 +62,37 @@ const emailDeliveryPerEmail = perEmailRateLimit({
   errorMessage: 'Too many email requests for this address — try again in 15 minutes.',
 });
 
+// Unsubscribe budget — deliberately its OWN bucket, not `authLimiter`.
+// Two reasons: this is not a credential endpoint (security.md §8 says keep
+// non-credential traffic out of the credential budget), and 429-ing an
+// opt-out is a compliance failure, not a mild inconvenience. The limit is
+// therefore generous enough that a shared corporate egress IP clicking
+// through one campaign cannot exhaust it, while still bounding a script
+// that tries to brute-force contact ids (which the HMAC already makes
+// infeasible — this is depth, not the primary control).
+const marketingUnsubLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 60,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { message: 'Too many requests, please try again later' },
+  validate: { keyGeneratorIpFallback: false },
+});
+
 const router = Router();
+
+// ── Public marketing unsubscribe ──────────────────────────
+//
+// Registered WITHOUT `protect` on purpose. This router gates per route (it
+// has no `router.use(protect)`), so "public" means "omit the gate", and the
+// recipient of a marketing email has no session by definition. A `protect`
+// here would return 401 to a legitimate opt-out click AND trip the client's
+// auto-sign-out interceptor. Pinned by `authRoutes.marketing.test.ts`.
+//
+// POST = RFC 8058 one-click (the `List-Unsubscribe-Post` target).
+// GET  = the human-visible link, redirecting to /unsubscribed.
+router.post('/marketing/unsubscribe', marketingUnsubLimiter, unsubscribeMarketingController);
+router.get('/marketing/unsubscribe', marketingUnsubLimiter, unsubscribeMarketingConfirmController);
 
 router.post('/signin', authLimiter, signinPerEmail, signInController);
 router.post('/signup', authLimiter, signUpController);

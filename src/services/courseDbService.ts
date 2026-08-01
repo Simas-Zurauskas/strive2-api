@@ -1,5 +1,6 @@
 import CourseModel from '@models/CourseModel';
 import { CourseDocument, ICourse } from '@models/CourseModel';
+import { CourseSource } from '@lib/constants';
 import { Types } from 'mongoose';
 
 /**
@@ -14,7 +15,7 @@ export type LeanCourse = ICourse & { _id: Types.ObjectId };
  * but `.lean()` bypasses that transform — so any controller responding with
  * a lean Course (or array of them) must call this before `res.json()`.
  */
-const SERVER_ONLY_COURSE_FIELDS = ['suggestedDesignPrompts'] as const;
+const SERVER_ONLY_COURSE_FIELDS = ['suggestedDesignPrompts', 'sourceDigest'] as const;
 
 export const omitServerOnlyCourseFields = <T extends Partial<ICourse>>(course: T): T => {
   const out = { ...course };
@@ -26,10 +27,16 @@ export const omitServerOnlyCourseFields = <T extends Partial<ICourse>>(course: T
 
 // ── Create ─────────────────────────────────────────────────
 
-export const createCourse = async (params: { userId: string; goal: string }): Promise<CourseDocument> => {
+export const createCourse = async (params: {
+  userId: string;
+  goal: string;
+  /** Course origin — `'documents'` for course-from-documents; omitted for the classic goal flow (persists null). */
+  source?: CourseSource;
+}): Promise<CourseDocument> => {
   const course = await CourseModel.create({
     userId: params.userId,
     goal: params.goal,
+    ...(params.source ? { source: params.source } : {}),
   });
 
   return course;

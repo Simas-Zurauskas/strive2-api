@@ -1,3 +1,4 @@
+import { readFile } from 'fs/promises';
 import { ChatAnthropic } from '@langchain/anthropic';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
@@ -5,10 +6,12 @@ import type { ApiClient } from './apiClient';
 import { LESSON_POLL_TIMEOUT_MS, WITH_RETRY_POLL_TIMEOUT_MS } from './apiClient';
 import { MarkdownRecorder, CostTracker, aggregatePersonaCostByAction } from './markdownRecorder';
 import { withRetry } from '@lib/retry';
-import { MODEL_IDS } from '@lib/langchain';
 import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
 import { ANTHROPIC_API_KEY } from '@conf/env';
-import { COURSE_DEPTHS, type CourseDepth } from '@lib/constants';
+import { COURSE_DEPTHS, SOURCE_FIDELITIES, type CourseDepth } from '@lib/constants';
+import type { TierScope } from '@services/courseService';
+import type { ClientSourceDocument } from '@services/sourceDocumentService';
+import { documentNeedsPreparation, describePreparationNeed, type LoadedDocumentSet } from './documentSets';
 import type {
   Persona,
   PersonaRun,
@@ -30,6 +33,11 @@ import type {
   MentorTurn,
   GoalTypeClassificationSnapshot,
   GoalTypeOverrideRecord,
+  DocumentUploadRecord,
+  SourceAnalysisView,
+  GoalFidelityRecord,
+  CorpusPreparationRecord,
+  BandAdherenceRecord,
 } from './types';
 import type { GetRecallQueueResult, QueueRecallCardItem, RecallStats } from '@services/recallQueueService';
 import type { RecallMode, RecallRating } from '@lib/recallConstants';
@@ -47,16 +55,22 @@ import {
 // Not the shared `utilityModel` (Haiku, temp 0) because the orchestrator
 // simulates realistic users — cheap/cold Haiku flattens the behavioral
 // variance the prompts are calibrated to elicit.
+//
+// Pinned to sonnet-4-6, NOT MODEL_IDS.SONNET: the app moved to
+// claude-sonnet-5 (2026-08), which rejects `temperature` — but behavioral
+// variance is the point of this dev-only call, so it stays on the last
+// temperature-capable Sonnet. Revisit if/when 4.6 retires.
+const ORCHESTRATOR_MODEL = 'claude-sonnet-4-6';
 let _model: ChatAnthropic | null = null;
 function getOrchestratorModel(): ChatAnthropic {
   if (!_model) {
     _model = new ChatAnthropic({
-      model: MODEL_IDS.SONNET,
+      model: ORCHESTRATOR_MODEL,
       temperature: 0.7,
       anthropicApiKey: ANTHROPIC_API_KEY,
       maxTokens: 8192,
       clientOptions: { timeout: 120000 },
-      callbacks: [makeLlmCacheCallback({ defaultLabel: 'orchestrator:flow', model: MODEL_IDS.SONNET })],
+      callbacks: [makeLlmCacheCallback({ defaultLabel: 'orchestrator:flow', model: ORCHESTRATOR_MODEL })],
     });
   }
   return _model;
@@ -272,6 +286,93 @@ Return JSON:
   });
 
   return result;
+}
+
+// ── Documents mode: analysis-screen decision (D4) ────────
+
+const goalFidelityOutputSchema = z.object({
+  acceptSuggestedGoal: z.boolean(),
+  finalGoal: z.string().min(1).max(500),
+  fidelity: z.enum(SOURCE_FIDELITIES),
+  reasoning: z.string(),
+});
+
+/**
+ * AI-as-persona review of the ingest analysis (docs-mode Step 1d). The
+ * persona sees what the live analysis screen shows — topics, size band,
+ * per-doc statuses/warnings, the editable suggested goal, and the
+ * fidelity control — and decides what to PATCH. Same Sonnet idiom as the
+ * other persona decisions (aiJsonCall + withRetry).
+ */
+async function decideGoalAndFidelityAsPersona({
+  persona,
+  analysis,
+  documents,
+}: {
+  persona: Persona;
+  analysis: SourceAnalysisView;
+  documents: ClientSourceDocument[];
+}): Promise<{ acceptedSuggestedGoal: boolean; finalGoal: string; fidelity: (typeof SOURCE_FIDELITIES)[number]; reasoning: string }> {
+  const profile = persona.documentsProfile;
+  if (!profile) {
+    throw new Error(
+      `Persona "${persona.name}" has no documentsProfile — the docs-mode persona generator should have set it.`,
+    );
+  }
+
+  const systemPrompt = `${personaContext(persona)}
+
+YOUR DOCUMENTS:
+${profile.ownershipStory}
+
+YOUR PREDICTED ANALYSIS-SCREEN BEHAVIOR:
+- Fidelity preference: ${profile.predictedFidelity} — ${profile.predictedFidelityReasoning}
+- Suggested-goal stance: ${profile.suggestedGoalStance} — ${profile.suggestedGoalStanceReasoning}
+
+You just uploaded your documents and the platform analyzed them. You are looking at the analysis screen: detected topics, an estimated course size, per-file statuses/warnings, a SUGGESTED course goal (an editable text field), and a fidelity control ("How closely to follow your materials": strict / guided / enrich).
+
+Decide as this persona:
+1. Keep the suggested goal verbatim, or edit it. Follow your predicted stance above UNLESS the suggestion is clearly off from what you actually want ("${persona.goal}") — real users deviate from habit when the text is plainly wrong. If you edit, write the goal the way YOU would type it (your voice, your effort level, 1-500 chars) — not polished product copy.
+2. Pick the fidelity that matches your intent: "strict" = only my materials; "guided" = follow them, fill small gaps; "enrich" = use them as a seed and add outside context. Follow your predicted preference unless the analysis gives you a concrete reason to switch (e.g. warnings that the material is thin while you want a full course → enrich).
+
+Return JSON:
+- "acceptSuggestedGoal": boolean (true = you kept the suggestion verbatim)
+- "finalGoal": the goal you submit (the suggestion VERBATIM when accepting; your edited text otherwise)
+- "fidelity": "strict" | "guided" | "enrich"
+- "reasoning": 1-2 sentences of your REAL thought process (not a rationalization)`;
+
+  const userPrompt = JSON.stringify(
+    {
+      suggestedGoal: analysis.suggestedGoal,
+      topics: analysis.topics,
+      sizeBand: analysis.sizeBand,
+      teachableDensity: analysis.teachableDensity,
+      analysisWarnings: analysis.warnings,
+      documents: documents.map((d) => ({ filename: d.filename, status: d.status, warnings: d.warnings })),
+    },
+    null,
+    2,
+  );
+
+  const { result } = await withRetry(() =>
+    aiJsonCall({
+      systemPrompt,
+      userPrompt,
+      schema: goalFidelityOutputSchema,
+      label: 'orchestrator:goal-fidelity',
+    }),
+  );
+
+  // Derive acceptance from text equality rather than trusting the LLM's
+  // flag — "accepted but rephrased" must count as an edit, because the
+  // PATCH sends the rephrased text.
+  const acceptedSuggestedGoal = result.finalGoal.trim() === analysis.suggestedGoal.trim();
+  return {
+    acceptedSuggestedGoal,
+    finalGoal: result.finalGoal.trim(),
+    fidelity: result.fidelity,
+    reasoning: result.reasoning,
+  };
 }
 
 /**
@@ -1031,6 +1132,7 @@ export async function runPersonaFlow({
   runId,
   personaSlug,
   userId,
+  documentSet = null,
 }: {
   persona: Persona;
   client: ApiClient;
@@ -1042,6 +1144,8 @@ export async function runPersonaFlow({
   /** Persona's auto-provisioned test-user id, used for byAction
    *  aggregation against UsageEventModel at end-of-run. */
   userId: string;
+  /** Docs mode only: this persona's document set (loaded in index.ts). */
+  documentSet?: LoadedDocumentSet | null;
 }): Promise<PersonaRun> {
   const log = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`);
   const logDone = (msg: string) => console.log(`[${label}]`.cyan + ` ${msg}`.green);
@@ -1050,6 +1154,49 @@ export async function runPersonaFlow({
   const steps: StepResult[] = [];
   let courseId = '';
   let course: CourseData | null = null;
+  // Docs-mode run state (null in goal mode / before the producing step).
+  // Held at function scope so the failure tail can still build the docs
+  // rows of the Run Summary from whatever completed before the error.
+  const documentsMode = config.documentsMode && documentSet !== null;
+  let sourceAnalysis: SourceAnalysisView | null = null;
+  let goalFidelity: GoalFidelityRecord | null = null;
+  let bandAdherence: BandAdherenceRecord | null = null;
+  // Upload records + ingest start, hoisted to function scope so the
+  // failure tail can still render the Upload & Ingest section when the
+  // ingest job itself dies (job timeout, CONTENT_REJECTED, assessment
+  // failure, all-uploads-rejected). Without this, an ingest-failed report
+  // loses exactly the per-upload outcomes + per-doc rows needed to
+  // diagnose it (and the rubric's rejected-upload-silence check reads
+  // that section).
+  let docUploads: DocumentUploadRecord[] | null = null;
+  let docUploadIngestRecorded = false;
+  let docIngestStartedAt: number | null = null;
+  // Docs rows for the Run Summary table — reads the holders at call time
+  // so the failure tail reports whatever the run got to. Undefined in
+  // goal mode (keeps those reports byte-identical).
+  const buildDocsSummary = () =>
+    documentsMode
+      ? {
+          setName: documentSet!.name,
+          fidelity: goalFidelity?.fidelity ?? course?.sourceFidelity ?? null,
+          // `?.sizeBand` (not just `sourceAnalysis ?`): the holder is
+          // assigned from `course.sourceAssessment` BEFORE the ingest
+          // guard validates it, so on the guard's own failure path this
+          // builder runs with a non-null holder whose sizeBand may be
+          // missing — dereferencing it here would throw inside the
+          // failure tail and lose the report.
+          band: sourceAnalysis?.sizeBand
+            ? `${sourceAnalysis.sizeBand.minLessons}-${sourceAnalysis.sizeBand.maxLessons} (${sourceAnalysis.sizeBand.mode})`
+            : 'N/A',
+          lessonsInBand: bandAdherence
+            ? bandAdherence.verdict === 'in-band' || bandAdherence.verdict === 'tolerated'
+              ? `yes — ${bandAdherence.totalLessons} vs displayed ${bandAdherence.tierRange![0]}-${bandAdherence.tierRange![1]}${bandAdherence.verdict === 'tolerated' ? ' (tolerated min−1)' : ''}`
+              : bandAdherence.verdict === 'out-of-band'
+                ? `NO — ${bandAdherence.totalLessons} vs displayed ${bandAdherence.tierRange![0]}-${bandAdherence.tierRange![1]}`
+                : 'n/a (no tier range displayed)'
+            : 'N/A',
+        }
+      : undefined;
   // Tracks the step currently in-flight (cleared on its successful finish) so
   // the failure branch knows *where* things died even when `steps[]` only
   // contains completed steps.
@@ -1093,18 +1240,173 @@ export async function runPersonaFlow({
 
   recorder.setPersona(persona);
   recorder.addHeader();
-  recorder.addRunConfiguration(config);
+  recorder.addRunConfiguration(config, documentSet?.name);
+  if (documentsMode) recorder.addDocumentSet(documentSet!);
 
   try {
-    // ── Step 1: Create Course ────────────────────────────
-    log('Step 1: Creating course...');
-    const s1 = beginStep({ step: 1, name: 'Create Course' });
-    courseId = await client.createCourse(persona.goal);
-    const r1 = s1.finish();
-    steps.push(r1);
-    recorder.setCourseId(courseId);
-    recorder.addStep1_CreateCourse({ result: r1, courseId });
-    logDone(`Step 1 done → courseId: ${courseId}`);
+    if (documentsMode) {
+      // ── Docs mode Steps 1–1d: shell → upload → ingest → confirm ──
+      // Replaces the goal-mode Step 1 (goal submission); the flow rejoins
+      // the standard pipeline at Step 2 (clarify) below, which is
+      // doc-aware server-side (the clarify prompt sees the source digest).
+      const set = documentSet!;
+
+      // ── Step 1 (D1): Create Course shell ──
+      log('Step 1: Creating documents-course shell...');
+      const s1 = beginStep({ step: 1, name: 'Create Course (documents)' });
+      courseId = await client.createDocumentsCourse();
+      const r1 = s1.finish();
+      steps.push(r1);
+      recorder.setCourseId(courseId);
+      recorder.addStep1_CreateDocumentsCourse({ result: r1, courseId });
+      logDone(`Step 1 done → courseId: ${courseId} (documents shell)`);
+
+      // ── Step 1b (D2): Upload files + manifest URLs ──
+      const urlCount = set.manifest?.urls.length ?? 0;
+      log(`Step 1b: Uploading ${set.files.length} file(s)${urlCount > 0 ? ` + ${urlCount} URL(s)` : ''}...`);
+      const s1b = beginStep({ step: 1, name: 'Upload Documents' });
+      const uploads: DocumentUploadRecord[] = [];
+      docUploads = uploads;
+      for (const file of set.files) {
+        const buffer = await readFile(file.absolutePath);
+        const upStart = Date.now();
+        try {
+          const doc = await client.uploadDocument({ courseId, buffer, filename: file.filename });
+          uploads.push({
+            kind: 'file',
+            name: file.filename,
+            byteSize: file.byteSize,
+            outcome: 'accepted',
+            document: doc,
+            durationMs: Date.now() - upStart,
+          });
+          logDetail(`  uploaded ${file.filename} → ${doc.status}`);
+        } catch (e) {
+          // A rejected file is a legitimate outcome (allowlist, caps,
+          // sniff mismatch) — record it and continue with the rest.
+          const msg = e instanceof Error ? e.message : String(e);
+          uploads.push({
+            kind: 'file',
+            name: file.filename,
+            byteSize: file.byteSize,
+            outcome: 'rejected',
+            error: msg,
+            durationMs: Date.now() - upStart,
+          });
+          logDetail(`  REJECTED ${file.filename}: ${msg.slice(0, 160)}`);
+        }
+      }
+      for (const url of set.manifest?.urls ?? []) {
+        const upStart = Date.now();
+        try {
+          const doc = await client.addUrlDocument({ courseId, url });
+          uploads.push({ kind: 'url', name: url, outcome: 'accepted', document: doc, durationMs: Date.now() - upStart });
+          logDetail(`  added URL ${url} → ${doc.status}`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          uploads.push({ kind: 'url', name: url, outcome: 'rejected', error: msg, durationMs: Date.now() - upStart });
+          logDetail(`  REJECTED URL ${url}: ${msg.slice(0, 160)}`);
+        }
+      }
+      const acceptedCount = uploads.filter((u) => u.outcome === 'accepted').length;
+      if (acceptedCount === 0) {
+        throw new Error(
+          `All ${uploads.length} upload(s) were rejected — nothing to ingest. First error: ${uploads[0]?.error ?? 'unknown'}`,
+        );
+      }
+      steps.push(s1b.finish(`${acceptedCount}/${uploads.length} accepted`));
+      logDone(`Step 1b done → ${acceptedCount}/${uploads.length} source(s) accepted`);
+
+      // ── Step 1c (D3): Ingest (free) + analysis capture ──
+      log('Step 1c: Running ingest-and-assess job (free)...');
+      const s1c = beginStep({ step: 1, name: 'Ingest Documents' });
+      const ingestStart = Date.now();
+      docIngestStartedAt = ingestStart;
+      const ingestJobId = await client.ingestDocuments(courseId);
+      // Ingest fans out extraction + moderation + assessment + embedding
+      // per document; give it the long poll budget, same as structure.
+      await client.pollJob({ jobId: ingestJobId, timeoutMs: WITH_RETRY_POLL_TIMEOUT_MS });
+      const ingestJobMs = Date.now() - ingestStart;
+      const documentsAfterIngest = await client.listDocuments(courseId);
+      course = await client.getCourse(courseId);
+      sourceAnalysis = (course.sourceAssessment ?? null) as SourceAnalysisView | null;
+      if (!sourceAnalysis?.sizeBand || !sourceAnalysis.suggestedGoal) {
+        // Contract guard — the ingest job persists the coarse
+        // SourceAnalysis on completion; a missing/incomplete blob means a
+        // server-side regression, not a persona problem. Fail loudly.
+        throw new Error(
+          `Ingest guard: course.sourceAssessment missing or incomplete after ingest ` +
+            `(sizeBand=${JSON.stringify(sourceAnalysis?.sizeBand ?? null)}, suggestedGoal=${JSON.stringify(
+              sourceAnalysis?.suggestedGoal ?? null,
+            )}). Verify the ingest_documents persistence path.`,
+        );
+      }
+      const parsedCount = documentsAfterIngest.filter((d) => d.status === 'parsed').length;
+      steps.push(
+        s1c.finish(
+          `${parsedCount}/${documentsAfterIngest.length} parsed; band ${sourceAnalysis.sizeBand.minLessons}-${sourceAnalysis.sizeBand.maxLessons} (${sourceAnalysis.sizeBand.mode})`,
+        ),
+      );
+      recorder.addUploadIngest({ uploads, ingestJobMs, documents: documentsAfterIngest });
+      docUploadIngestRecorded = true;
+      recorder.addSourceAnalysis({ analysis: sourceAnalysis });
+      logDone(
+        `Step 1c done → ${parsedCount}/${documentsAfterIngest.length} parsed, ` +
+          `band ${sourceAnalysis.sizeBand.minLessons}-${sourceAnalysis.sizeBand.maxLessons} (${sourceAnalysis.sizeBand.mode}), ` +
+          `suggested goal: "${sourceAnalysis.suggestedGoal.slice(0, 80)}"`,
+      );
+
+      // ── Step 1d (D4): Persona confirms goal + fidelity ──
+      log('Step 1d: Reviewing analysis as persona (goal + fidelity)...');
+      const s1d = beginStep({ step: 1, name: 'Confirm Goal & Fidelity' });
+      const d4Start = Date.now();
+      const decision = await decideGoalAndFidelityAsPersona({
+        persona,
+        analysis: sourceAnalysis,
+        documents: documentsAfterIngest,
+      });
+      await client.confirmGoalAndFidelity({
+        courseId,
+        goal: decision.finalGoal,
+        sourceFidelity: decision.fidelity,
+      });
+      const profile = persona.documentsProfile!;
+      goalFidelity = {
+        suggestedGoal: sourceAnalysis.suggestedGoal,
+        acceptedSuggestedGoal: decision.acceptedSuggestedGoal,
+        finalGoal: decision.finalGoal,
+        fidelity: decision.fidelity,
+        aiReasoning: decision.reasoning,
+        predictedStance: profile.suggestedGoalStance,
+        stanceMatchedPrediction:
+          (decision.acceptedSuggestedGoal ? 'accept' : 'edit') === profile.suggestedGoalStance,
+        predictedFidelity: profile.predictedFidelity,
+        fidelityMatchedPrediction: decision.fidelity === profile.predictedFidelity,
+        durationMs: Date.now() - d4Start,
+      };
+      recorder.addGoalFidelity(goalFidelity);
+      steps.push(
+        s1d.finish(`goal ${decision.acceptedSuggestedGoal ? 'accepted' : 'edited'}; fidelity ${decision.fidelity}`),
+      );
+      // From here on the confirmed goal IS the course goal — downstream
+      // persona prompts (mentor openers reference persona.goal) should
+      // speak about what was actually submitted, not the pre-upload
+      // intent. The report header (already written) keeps the original.
+      persona.goal = decision.finalGoal;
+      logDone(
+        `Step 1d done → goal ${decision.acceptedSuggestedGoal ? 'accepted as-is' : 'EDITED'}, fidelity ${decision.fidelity}`,
+      );
+    } else {
+      // ── Step 1: Create Course ────────────────────────────
+      log('Step 1: Creating course...');
+      const s1 = beginStep({ step: 1, name: 'Create Course' });
+      courseId = await client.createCourse(persona.goal);
+      const r1 = s1.finish();
+      steps.push(r1);
+      recorder.setCourseId(courseId);
+      recorder.addStep1_CreateCourse({ result: r1, courseId });
+      logDone(`Step 1 done → courseId: ${courseId}`);
+    }
 
     // ── Step 2: Clarify (Question Generation) ───────────
     log('Step 2: Generating clarify questions...');
@@ -1353,6 +1655,45 @@ export async function runPersonaFlow({
           : ` (recommended: ${depthPreviews.recommended})`),
     );
 
+    // ── Step 5b (docs, D6): Corpus preparation ──────────
+    //
+    // The live client submits a debited `prepare_corpus` job before
+    // generate-structure whenever GET /documents shows deferred work
+    // (unescalated scanned pages / untranscribed audio tail). Mirror
+    // that: compute the same predicate over the documents list; when it
+    // fires, run + poll the job; either way the decision is recorded as
+    // its own step so the report shows WHY it did or didn't fire.
+    if (documentsMode) {
+      log('Step 5b: Checking corpus preparation predicate...');
+      const docsBeforeStructure = await client.listDocuments(courseId);
+      const perDocument = docsBeforeStructure.map((d) => ({
+        name: d.filename,
+        needsPreparation: documentNeedsPreparation(d),
+        reason: describePreparationNeed(d),
+      }));
+      const needed = perDocument.some((d) => d.needsPreparation);
+      let corpusPreparation: CorpusPreparationRecord;
+      if (needed) {
+        const s5b = beginStep({ step: 5, name: 'Prepare Corpus' });
+        const prepStart = Date.now();
+        const prepJobId = await client.prepareCorpus(courseId);
+        // Vision escalation + audio transcription + moderation + digest
+        // refresh — same long-poll budget as the other heavy jobs.
+        await client.pollJob({ jobId: prepJobId, timeoutMs: WITH_RETRY_POLL_TIMEOUT_MS });
+        corpusPreparation = { needed: true, perDocument, jobMs: Date.now() - prepStart };
+        steps.push(s5b.finish(`prepare_corpus completed in ${((corpusPreparation.jobMs ?? 0) / 1000).toFixed(1)}s`));
+        logDone(
+          `Step 5b done → prepare_corpus ran (${perDocument.filter((d) => d.needsPreparation).length} doc(s) needed it, ${((corpusPreparation.jobMs ?? 0) / 1000).toFixed(1)}s)`,
+        );
+      } else {
+        const s5b = beginStep({ step: 5, name: 'Prepare Corpus (not needed)' });
+        corpusPreparation = { needed: false, perDocument };
+        steps.push(s5b.finish('no preparation needed'));
+        logDetail('Step 5b: no preparation needed — corpus fully extracted during ingest');
+      }
+      recorder.addCorpusPreparation(corpusPreparation);
+    }
+
     // ── Step 6: Generate Structure ──────────────────────
     log('Step 6: Generating course structure...');
     const s6 = beginStep({ step: 6, name: 'Generate Structure' });
@@ -1361,7 +1702,8 @@ export async function runPersonaFlow({
     // Structure generation runs `withRetry` once for the base attempt and
     // then, under Phase 4's cap validation, may run a full second
     // generation to trim an over-cap result. Worst case ≈ 2×120s per call
-    // within each retry cycle. 300s default is tight; 10 min gives headroom.
+    // within each retry cycle. The 660s budget sits above the server's
+    // 600s job timeout so a server-side failure surfaces typed.
     await client.pollJob({ jobId: structJobId, timeoutMs: WITH_RETRY_POLL_TIMEOUT_MS });
     const pollDuration6 = Date.now() - pollStart6;
     course = await client.getCourse(courseId);
@@ -1403,6 +1745,68 @@ export async function runPersonaFlow({
     logDone(
       `Step 6 done → ${structure.modules.length} modules, ${totalLessons} lessons (${structureVerdictTag})`,
     );
+
+    // ── Docs (D7): Band-adherence + per-lesson grounding ─
+    //
+    // FEEDBACK-1C made the picked tier's DISPLAYED range and the
+    // structure generator's cap derive from one shared function
+    // (getTierScope), with the generator accepting [min−1, max]. Verify
+    // that contract from the outside: lesson count vs the tier range the
+    // persona was shown vs the assessment sizeBand, plus per-lesson
+    // sourceRefs counts (grounded vs AI-supplemented).
+    if (documentsMode) {
+      // The persisted depth previews are enriched with per-tier
+      // lessonCountRange/estimatedHoursRange/sourceTierNote (TierScope),
+      // but ICourse types the tier objects narrowly — re-type on read.
+      const tierView = (depthPreviews[depth] ?? {}) as Partial<TierScope>;
+      const tierRange =
+        Array.isArray(tierView.lessonCountRange) && tierView.lessonCountRange.length === 2
+          ? ([tierView.lessonCountRange[0], tierView.lessonCountRange[1]] as [number, number])
+          : null;
+
+      const perLesson: BandAdherenceRecord['perLesson'] = [];
+      let groundedLessons = 0;
+      let supplementedLessons = 0;
+      structure.modules.forEach((m, mi) => {
+        m.lessons.forEach((l, li) => {
+          const refs = (l as { sourceRefs?: string[] }).sourceRefs;
+          const count = Array.isArray(refs) ? refs.length : 0;
+          if (count > 0) groundedLessons += 1;
+          else supplementedLessons += 1;
+          perLesson.push({ moduleIndex: mi, lessonIndex: li, name: l.name, sourceRefsCount: count });
+        });
+      });
+
+      let verdict: BandAdherenceRecord['verdict'] = 'n-a';
+      if (tierRange) {
+        if (totalLessons >= tierRange[0] && totalLessons <= tierRange[1]) verdict = 'in-band';
+        else if (totalLessons === tierRange[0] - 1) verdict = 'tolerated';
+        else verdict = 'out-of-band';
+      }
+
+      bandAdherence = {
+        depth,
+        tierRange,
+        sourceTierNote: tierView.sourceTierNote ?? null,
+        sizeBand: sourceAnalysis?.sizeBand ?? null,
+        totalLessons,
+        verdict,
+        groundedLessons,
+        supplementedLessons,
+        perLesson,
+      };
+      recorder.addBandAdherence(bandAdherence);
+      const bandTag =
+        verdict === 'in-band' || verdict === 'tolerated'
+          ? `band:${verdict}`.green
+          : verdict === 'out-of-band'
+            ? 'band:OUT-OF-BAND'.yellow
+            : 'band:n-a'.gray;
+      logDone(
+        `Band adherence → ${totalLessons} lessons vs tier ${tierRange ? `${tierRange[0]}-${tierRange[1]}` : '?'} (${bandTag}); ` +
+          `grounded ${groundedLessons}/${groundedLessons + supplementedLessons}`,
+      );
+    }
 
     // ── Step 7: Review Structure (AI as Persona) ────────
     log('Step 7: Reviewing structure...');
@@ -1486,6 +1890,8 @@ export async function runPersonaFlow({
       generationMs: number;
       stats: LessonContentStats | null;
       mentorProbe: LessonMentorRecord | null;
+      /** Docs mode: structure-lesson sourceRefs count (undefined in goal mode). */
+      sourceRefsCount?: number | null;
     }[] = [];
 
     if (config.maxLessons > 0) {
@@ -1586,6 +1992,16 @@ export async function runPersonaFlow({
             generationMs,
             stats,
             mentorProbe,
+            // Docs mode: note whether the structure lesson this content
+            // was generated for is source-grounded. `undefined` in goal
+            // mode keeps the report byte-identical there.
+            ...(documentsMode
+              ? {
+                  sourceRefsCount: Array.isArray((lesson as { sourceRefs?: string[] }).sourceRefs)
+                    ? (lesson as { sourceRefs?: string[] }).sourceRefs!.length
+                    : 0,
+                }
+              : {}),
           });
 
           logDone(
@@ -1647,10 +2063,10 @@ export async function runPersonaFlow({
 
           const jobId = await client.generateModuleQuiz({ courseId, moduleIndex: mi });
           // Quiz generation wraps a Sonnet call in withRetry (3 retries,
-          // 120s per-attempt timeout); worst case ≈ 8 min. 300s default
-          // causes the orchestrator to time out before the server's
-          // retry chain can finish — the real failure never surfaces in
-          // the report. 10 min lets the job complete cleanly.
+          // 120s per-attempt timeout); worst case ≈ 8 min. The 660s
+          // budget (above the server's 600s job timeout) lets the job
+          // either complete cleanly or fail typed — the real failure
+          // always surfaces in the report.
           await client.pollJob({ jobId, timeoutMs: WITH_RETRY_POLL_TIMEOUT_MS });
           const quiz = await client.getModuleQuiz({ courseId, moduleIndex: mi });
           const generationMs = Date.now() - genStart;
@@ -1868,6 +2284,7 @@ export async function runPersonaFlow({
       quizzesAttempted: quizRecords.length > 0 ? quizRecords.length : undefined,
       recallReviewed: recallReviews.length > 0 ? recallReviews.length : undefined,
       costSummary,
+      docsSummary: buildDocsSummary(),
     });
     recorder.addCostBreakdown(costSummary);
     const filepath = await recorder.writeToFile(config.outputDir);
@@ -1901,6 +2318,26 @@ export async function runPersonaFlow({
           // can't fetch course, use what we have
         }
       }
+      // Docs mode: if the run died before the Upload & Ingest section was
+      // recorded (ingest job failed/timed out, all uploads rejected, ingest
+      // guard fired), render it best-effort now — the per-upload outcomes
+      // plus whatever GET /documents reports at failure time are exactly
+      // the data needed to diagnose an ingest death.
+      if (documentsMode && docUploads && docUploads.length > 0 && !docUploadIngestRecorded) {
+        let docsAtFailure: ClientSourceDocument[] = [];
+        try {
+          docsAtFailure = await client.listDocuments(courseId);
+        } catch {
+          // best-effort — the uploads table alone is still worth rendering
+        }
+        recorder.addUploadIngest({
+          uploads: docUploads,
+          // Elapsed-until-failure when ingest had started; 0 when the run
+          // died before submitting the ingest job.
+          ingestJobMs: docIngestStartedAt !== null ? Date.now() - docIngestStartedAt : 0,
+          documents: docsAtFailure,
+        });
+      }
       // Always record the failure body + summary so the report is useful even
       // when we blew up before a course existed (e.g. step-1 insert collision).
       recorder.addFailure({ failedStep, error: errorMsg });
@@ -1916,6 +2353,7 @@ export async function runPersonaFlow({
         error: shortMsg,
         failedStep: failedStep ?? undefined,
         costSummary: partialCostSummary,
+        docsSummary: buildDocsSummary(),
       });
       recorder.addCostBreakdown(partialCostSummary);
       const filepath = await recorder.writeToFile(config.outputDir);

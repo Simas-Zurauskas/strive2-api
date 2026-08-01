@@ -2,6 +2,11 @@
 
 Generates AI personas with different learning needs and walks each one through the full learner journey — course wizard, lesson generation, module quizzes, and spaced-repetition recall reviews — recording every input/output to per-persona markdown reports.
 
+Two modes:
+
+- **goal mode** (default) — the persona types a learning goal.
+- **documents mode** (`--documents`) — the persona *uploads a document set* and the course is built from it (`POST /api/course {source:'documents'}` → upload → free ingest-and-assess → confirm goal + fidelity → the same clarify → depth → structure → lessons pipeline). See [§ Documents mode](#documents-mode).
+
 Each persona runs against its own auto-provisioned db user, so gamification, recall queues, and per-user state are genuinely isolated between runs.
 
 ## Prerequisites
@@ -9,6 +14,7 @@ Each persona runs against its own auto-provisioned db user, so gamification, rec
 - API dev server running (`yarn dev` in `api/`)
 - `MONGO_URI` set in `api/.env` — the orchestrator connects directly to flip `emailVerified` on fresh test users
 - `ANTHROPIC_API_KEY` set in `api/.env` (used for persona AI decisions and typed-recall grading — Claude Sonnet 4.6 for the orchestrator, Haiku 4.5 for the grader)
+- For `--documents` runs: a built document set (`yarn debug:orchestrator:sets` for the samples) and the api's document stack configured (S3, Pinecone, `OPENAI_API_KEY` for embeddings + moderation) — the same environment `yarn debug:ingest` needs
 
 ## Usage
 
@@ -49,6 +55,17 @@ yarn debug:orchestrator --concurrency 3 --personas 5 --lessons 2 \
 yarn debug:orchestrator --concurrency 3 --personas 5 --lessons 2 \
   --chat --quizzes --recall --mentor --with-hero --links \
   --goal-type-distribution "pass=2,build=2,fluency=1"
+
+# ── Documents mode ──
+# Build the sample corpora once (idempotent), then run against one:
+yarn debug:orchestrator:sets
+yarn debug:orchestrator --documents --document-set sample-basic \
+  --concurrency 1 --personas 1 --lessons 1
+
+# One set per persona (count must equal --personas). Composes with every
+# other flag exactly as goal mode does:
+yarn debug:orchestrator --documents --document-sets "sample-basic,sample-mixed" \
+  --concurrency 2 --personas 2 --lessons 2 --chat --quizzes --recall --mentor
 ```
 
 No user credentials are passed — the orchestrator creates and tears down a separate account per persona.
@@ -70,6 +87,11 @@ No user credentials are passed — the orchestrator creates and tears down a sep
 | `--no-recall-gen`           | optional | Skip recall-card extraction during lesson gen (default: on). Distinct from `--recall`, which reviews the queue. |
 | `--goal-type`               | optional | Force every persona into one bucket: `master`, `monetize`, `pass`, `build`, `fluency`             |
 | `--goal-type-distribution`  | optional | Per-bucket counts, e.g. `"pass=3,build=2"`. Sum must equal `--personas`. Mutually exclusive with `--goal-type` |
+| `--documents`               | optional | Documents mode — every persona builds their course from an uploaded document set instead of a typed goal. Requires `--document-set` or `--document-sets` |
+| `--document-set <name>`     | optional | One set (a folder under [`documentSets/`](./documentSets/)) shared by every persona. Requires `--documents` |
+| `--document-sets "a,b,…"`   | optional | One set per persona; the count must equal `--personas`. Mutually exclusive with `--document-set`. Requires `--documents` |
+
+Goal-type flags stay valid in documents mode — a persona still has a private learning intent, and the classifier still runs on the confirmed goal.
 
 `--email` and `--password` are accepted (for shell-history backward compatibility) but ignored — a warning is printed if either is passed.
 
@@ -110,6 +132,61 @@ For each AI-generated persona, the orchestrator runs the full learner journey:
 
 Because each persona has a fresh db user, Step 13 on a new run starts with `Learned: 0` — previously it always showed the shared account's accumulated history.
 
+## Documents mode
+
+`--documents` swaps **Step 1 only**. Everything from Step 2 (clarify) onward is the pipeline above, unchanged — the api makes those stages document-aware server-side (clarify sees the source digest, depth previews clamp to the assessment's size band, structure is band-enforced and emits per-lesson `sourceRefs`).
+
+The replaced step becomes four:
+
+1. **Create Course (documents)** — `POST /api/course {source:'documents'}`. No goal is typed; the server persists a placeholder until the analysis suggests one.
+2. **Upload Documents** — every file in the set via multipart `POST /:courseId/documents` (field `file`), then every `manifest.json` URL via `POST /:courseId/documents/url`. Per-file status/warnings are recorded. **A rejected file is recorded and the run continues** (a deliberately-rejected file is a legitimate set member); the run only aborts if *every* upload was rejected.
+3. **Ingest Documents** — `POST /:courseId/documents/ingest` → 202 `{jobId}` → the existing job poller. Free by policy. Then `GET /:courseId/documents` + `GET /:courseId` to capture the per-document rows and the coarse `course.sourceAssessment` (topics, `sizeBand{minLessons,maxLessons,mode}`, `teachableDensity`, `suggestedGoal`, `questions[]`, `warnings[]`, `perDocument[]`). A missing/incomplete assessment fails the run loudly — it means a server-side regression, not a persona problem.
+4. **Confirm Goal & Fidelity** — AI-as-persona reviews the analysis exactly as the live analysis screen presents it and decides whether to accept or edit the suggested goal and which fidelity to pick (`strict`/`guided`/`enrich`), honouring the generator's predicted stance unless the analysis gives a concrete reason to deviate. `PATCH /api/course/:id {goal, sourceFidelity}`. Prediction-vs-actual is recorded for both dimensions.
+
+Two more docs-only insertions later in the flow:
+
+- **Step 5b — Prepare Corpus** (before structure generation). The needs-preparation predicate is computed from the documents list, mirroring the client contract: `scannedPageCount > escalatedPages.length || (audioDurationSec != null && (transcribedSec ?? 0) < audioDurationSec)`. When it fires, `POST /:courseId/prepare-corpus` → 202 `{jobId}` → poll (this job is **debited**). When it doesn't, the step records "no preparation needed" — the correct outcome for a text-only corpus, and the endpoint is a fast no-op anyway.
+- **Band adherence** (after structure). Compares the generated lesson count against the picked tier's *displayed* `lessonCountRange` and the assessment `sizeBand`, and counts per-lesson `sourceRefs` (grounded vs AI-supplemented). Verdict is `in-band` / `tolerated` (exactly min−1, which the server accepts) / `out-of-band` / `n-a`.
+
+Lesson generation and content fetch are unchanged; each lesson additionally records whether its structure entry carried `sourceRefs`. Quizzes, recall and mentor probes all work in documents mode when flagged.
+
+### Document sets
+
+A set is a folder under [`documentSets/`](./documentSets/) holding real files plus an optional `manifest.json`:
+
+```json
+{
+  "urls": ["https://en.wikipedia.org/wiki/Standard_error"],
+  "note": "one-line description of what this corpus is",
+  "expectedTopics": ["descriptive statistics", "confidence intervals"]
+}
+```
+
+- `urls` are registered through the URL endpoint (public http(s) only).
+- `note` is shown to the persona generator (so the persona plausibly *owns* the corpus) and printed in the report.
+- `expectedTopics` is **never sent to the API** — it is the set author's ground truth, surfaced in the report so the assessment rubric's K45 (analysis honesty) has something to check the server's detected topics against.
+
+Everything except `manifest.json`, `README.md`, dotfiles and `.ts`/`.js` files counts as a corpus file.
+
+`documentSets/` is gitignored except a committed generator and its README, so corpora are built on demand:
+
+```bash
+yarn debug:orchestrator:sets
+```
+
+That produces two sets from the api's own extraction fixture builders (`src/services/documentExtraction/__fixtures__/builders.ts` — the same ones the unit tests and `yarn debug:ingest` use):
+
+| Set | Contents | Exercises |
+| --- | --- | --- |
+| `sample-basic` | text-rich pdf + docx + md on spaced repetition (~3k words) | happy path; no deferred extraction → `prepare_corpus` records "no preparation needed" |
+| `sample-mixed` | statistics pdf + docx + md + csv + a **scanned-look** pdf, plus a Wikipedia URL | scanned-page detection → the debited `prepare_corpus` pass; csv extraction; URL ingestion |
+
+Full conventions: [`documentSets/README.md`](./documentSets/README.md).
+
+### Persona generation in documents mode
+
+The generator receives each persona's set summary (filenames, manifest note, ~400-char content previews) and must emit a persona who plausibly **owns** those documents. Docs-mode personas carry a required `documentsProfile`: `ownershipStory`, `predictedFidelity` + reasoning, and `suggestedGoalStance` (`accept` | `edit`) + reasoning. The Step-1d decision is scored against those predictions in the report. Goal-mode persona generation is untouched (separate schema, unchanged prompt).
+
 ## Output
 
 Reports are written to `api/scripts/debugOrchestrator/output/` (gitignored).
@@ -131,6 +208,7 @@ Reports include:
 - Generated lesson content: block breakdown by type, code, mermaid diagrams, exercises (collapsible)
 - Module quiz: per-module score, mastery tier, next-review interval, and every question with selected vs correct option + explanation (collapsible)
 - Recall queue snapshot + per-card review log: mode, user answer (typed-recall), grade score + verdict, final rating, new Leitner box, next due date
+- **Documents-mode sections** _(only in `--documents` runs — goal-mode reports are byte-identical to before)_: `Source Document Set` (set name, per-file inventory + previews, manifest note, expected topics), `Upload & Ingest` (per-upload accept/reject table + post-ingest document rows with page/scan/audio counters and warnings), `Source Analysis` (topics, size band + mode, teachable density, suggested goal, assessment questions, per-doc rows), `Goal & Fidelity Confirmation` (persona reasoning, final PATCH, predicted-vs-actual), `Corpus Preparation` (fired or not, per-doc predicate breakdown, job timing), `Band Adherence` (displayed tier range vs lessons generated vs size band, per-lesson `sourceRefs`). Each lesson also gets a `Source grounding:` line, and the Run Summary gains `Mode` / `Document Set` / `Source Fidelity` / `Size Band` / `Lessons In Band` rows.
 - **Cost Breakdown** — per-step `Δ credits` table (snapshots taken at every step boundary against `/api/billing/summary`, including each per-lesson/per-quiz/per-recall sub-step) plus a per-feature rollup by `UsageEvent.action` label (`lesson:content`, `lesson:recall`, `lesson:image`, `lesson:links`, `recall:grade`, etc.). Analytics only — the assessment rubric ignores it. Cohort total is also printed to stdout at end of run.
 
 ## Concurrency Notes
@@ -159,7 +237,7 @@ After a run, evaluate content quality and learner satisfaction with [`assessment
 **How to use it:**
 
 1. Hand the full contents of `assessmentPrompt.md` to an evaluator agent (Claude Code, Cursor agent, etc.) with read + Agent-spawn access to `output/`.
-2. The agent is a **dispatcher** — it fans out one sub-agent per persona file in parallel (one sub-agent per `YYYY-MM-DDTHH-mm-ss_*.md`), each scoring the same 33-criterion rubric.
+2. The agent is a **dispatcher** — it fans out one sub-agent per persona file in parallel (one sub-agent per `YYYY-MM-DDTHH-mm-ss_*.md`), each scoring the same 49-criterion rubric.
 3. Each sub-agent returns a structured scorecard (stable handoff schema defined in the prompt's §12).
 4. The dispatcher runs a cross-persona drift check, synthesizes, and writes a single `output/_ASSESSMENT_<YYYY-MM-DDTHH-mm>.md` with:
    - Inventory (one row per persona)
@@ -168,7 +246,7 @@ After a run, evaluate content quality and learner satisfaction with [`assessment
    - Cross-report synthesis + top-5 RICE-prioritized product roadmap
    - Confidence statement
 
-**Rubric structure:** 10 domains, 43 criteria, 4-point ordinal scale (rubric v7). Grounded in constructive alignment (Biggs), Bloom's revised taxonomy, Mayer's multimedia principles, CLT (Sweller), ICAP, Haladyna MCQ rules, SuperMemo 20 rules of knowledge formulation. Domain J (goal-type axis) scores classification accuracy, confidence calibration, and whether the clarify questions + structure shape reflect the classified `goalType` (J42/J43 are `n/a` when the classifier emitted `master` since that's the no-special-shape default). Sub-agents are instructed to guard against leniency, position bias, halo effect, and self-preference.
+**Rubric structure:** 11 domains, 49 criteria, 4-point ordinal scale (rubric v8). Grounded in constructive alignment (Biggs), Bloom's revised taxonomy, Mayer's multimedia principles, CLT (Sweller), ICAP, Haladyna MCQ rules, SuperMemo 20 rules of knowledge formulation. Domain J (goal-type axis) scores classification accuracy, confidence calibration, and whether the clarify questions + structure shape reflect the classified `goalType` (J42/J43 are `n/a` when the classifier emitted `master` since that's the no-special-shape default). **Domain K (source grounding, K44–K49) applies to documents-mode runs only** — suggested-goal faithfulness, analysis honesty against the set inventory + `expectedTopics`, band adherence, lesson grounding, fidelity compliance, and provenance-labelling coherence; all six are `n/a` on goal-mode reports, so v7 and v8 scores stay comparable there. Sub-agents are instructed to guard against leniency, position bias, halo effect, and self-preference.
 
 **Signal discipline:** structural scores (alignment, MCQ quality, persona-grounding) are trusted; behavioral scores (would-continue, quiz scores) are treated as hypotheses because personas systematically over-perform on quizzes (they can see the lesson text). Confidence on synthetic-only evidence is capped at 80 % in the RICE roadmap.
 
@@ -178,14 +256,19 @@ The assessment file is gitignored along with the rest of `output/`.
 
 ```
 debugOrchestrator/
-  index.ts              — Entry point, CLI args, Mongo connect
+  index.ts              — Entry point, CLI args, document-set preload, Mongo connect
   orchestrator.ts       — p-limit concurrency wrapper, per-persona lifecycle
   testUser.ts           — createVerifiedTestUser + deleteTestUser helpers
-  personaGenerator.ts   — Claude Sonnet 4.6 persona generation
-  courseFlow.ts         — 14-step pipeline + AI-as-persona functions
-  apiClient.ts          — HTTP client (fetch, job polling, SSE, auth helpers)
+  personaGenerator.ts   — Claude Sonnet 4.6 persona generation (goal + documents variants)
+  courseFlow.ts         — 14-step pipeline (+ docs-mode Step 1a–1d, 5b) + AI-as-persona functions
+  apiClient.ts          — HTTP client (fetch, job polling, SSE, multipart upload, auth helpers)
   markdownRecorder.ts   — Per-persona markdown report builder
+  documentSets.ts       — Set loader + manifest parsing, CLI set resolution, needs-preparation predicate
+  documentSets.test.ts  — Unit tests for the three above (pure; no server)
   types.ts              — Shared TypeScript interfaces
-  assessmentPrompt.md   — Evaluator prompt (dispatcher + parallel sub-agents, rubric v2)
+  assessmentPrompt.md   — Evaluator prompt (dispatcher + parallel sub-agents, rubric v8)
+  documentSets/         — Corpora for documents mode (gitignored except the generator + its README)
+    generate-sample-sets.ts  — `yarn debug:orchestrator:sets`
+    README.md                — set folder conventions
   output/               — Generated reports + _ASSESSMENT_*.md (gitignored)
 ```

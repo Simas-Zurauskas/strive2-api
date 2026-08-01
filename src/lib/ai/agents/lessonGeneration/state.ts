@@ -1,5 +1,5 @@
 import { Annotation } from '@langchain/langgraph';
-import { CourseDomain } from '@lib/constants';
+import { CourseDomain, CourseSource, SourceFidelity } from '@lib/constants';
 import { ILessonBlock } from '@models/LessonContentModel';
 import { GeneratedRecallCard } from '@services/recallContentService';
 
@@ -17,9 +17,23 @@ export const LessonStateAnnotation = Annotation.Root({
     modules: {
       name: string;
       description: string;
-      lessons: { name: string; description: string }[];
+      // `sourceRefs` (documents courses only, validated chunk vectorIds)
+      // rides on the persisted structure lessons — optional so goal-course
+      // structures type-check unchanged.
+      lessons: { name: string; description: string; sourceRefs?: string[] }[];
     }[];
   }>(),
+  // ── Documents-course grounding inputs (Phase 5, additive) ──
+  // Null on goal courses — contextLoad's retrieval and the prompts'
+  // grounding section are gated entirely on these.
+  source: Annotation<CourseSource | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  sourceFidelity: Annotation<SourceFidelity | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
   moduleIndex: Annotation<number>(),
   lessonIndex: Annotation<number>(),
   includeImage: Annotation<boolean>({
@@ -43,6 +57,14 @@ export const LessonStateAnnotation = Annotation.Root({
   humanMessage: Annotation<string>({
     reducer: (_prev, next) => next,
     default: () => '',
+  }),
+  // True only when contextLoad actually injected a source-material section
+  // into humanMessage (documents course + non-empty retrieval). Gates the
+  // grounding section of the lesson system prompt — false keeps the
+  // goal-course system prompt byte-identical.
+  hasSourceMaterial: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => false,
   }),
   lessonName: Annotation<string>({
     reducer: (_prev, next) => next,

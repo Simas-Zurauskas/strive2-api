@@ -1,10 +1,29 @@
 import { z } from 'zod';
-import { CHAT_ROLES, COURSE_DEPTHS, COURSE_STATUSES, GOAL_TYPES, LESSON_PROGRESS_STATUSES } from '@lib/constants';
+import { CHAT_ROLES, COURSE_DEPTHS, COURSE_SOURCES, COURSE_STATUSES, GOAL_TYPES, LESSON_PROGRESS_STATUSES, SOURCE_FIDELITIES } from '@lib/constants';
 import LessonContentModel from '@models/LessonContentModel';
 
-export const createCourseSchema = z.object({
-  goal: z.string().min(1, 'Goal is required').max(500, 'Goal must be at most 500 characters'),
-});
+export const createCourseSchema = z
+  .object({
+    goal: z.string().min(1, 'Goal is required').max(500, 'Goal must be at most 500 characters').optional(),
+    /**
+     * Course origin. `'documents'` starts the course-from-documents flow:
+     * the course row is created first (uploads and the ingest job are
+     * course-scoped), so `goal` becomes optional and the server persists
+     * a placeholder until the analysis step suggests one. Absent → the
+     * classic goal-based flow, where `goal` stays required exactly as
+     * before.
+     */
+    source: z.enum(COURSE_SOURCES).optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.source !== 'documents' && val.goal === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Goal is required',
+        path: ['goal'],
+      });
+    }
+  });
 
 // Each clarify answer is either a single text response (free-text fields)
 // or a small set of multiple-choice selections (chip-pickers). Bound both
@@ -70,6 +89,14 @@ export const updateCourseSchema = z.object({
    * course, are unaffected.
    */
   depthOverrideAcknowledged: z.boolean().optional(),
+  /**
+   * Course-from-documents fidelity dial (strict / guided / enrich) —
+   * how tightly generation sticks to the uploaded material. Only valid
+   * on `source: 'documents'` courses; the controller rejects it on
+   * goal-based courses so the field can't be set where it has no
+   * meaning.
+   */
+  sourceFidelity: z.enum(SOURCE_FIDELITIES).optional(),
 });
 
 export const chatStreamSchema = z.object({

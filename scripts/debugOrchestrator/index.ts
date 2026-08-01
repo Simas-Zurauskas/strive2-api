@@ -1,3 +1,8 @@
+// The docs-mode import graph (sourceDocumentService / documentAssessment /
+// courseService types) reaches middleware that reads `req.userId` — pull the
+// global Express augmentation in explicitly, since this tsconfig's include
+// set doesn't carry src/types/. Same pattern as scripts/debugIngest.
+/// <reference path="../../src/types/express.d.ts" />
 import 'colors';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -13,6 +18,7 @@ import { GOAL_TYPES } from '@lib/constants';
 import type { GoalType } from '@lib/constants';
 import { generatePersonas } from './personaGenerator';
 import { runAll } from './orchestrator';
+import { loadDocumentSet, resolveDocumentSetSelection, type LoadedDocumentSet } from './documentSets';
 import type { OrchestratorConfig } from './types';
 
 // ── CLI arg parsing ──────────────────────────────────────
@@ -42,6 +48,9 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     'with-hero',
     'links',
     'no-recall-gen',
+    // Documents mode: build the course from an uploaded document set
+    // instead of a typed goal. Requires --document-set OR --document-sets.
+    'documents',
   ]);
 
   for (let i = 0; i < args.length; i++) {
@@ -100,6 +109,13 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     console.error('                                 (master | monetize | pass | build | fluency).');
     console.error('  --goal-type-distribution <s>   Per-bucket counts, comma-separated.');
     console.error('                                 Example: "pass=3,build=2". Sum must equal --personas.');
+    console.error('  --documents                    Documents mode: build the course from an uploaded');
+    console.error('                                 document set instead of a typed goal. Requires one of:');
+    console.error('  --document-set <name>          One set (folder under scripts/debugOrchestrator/documentSets/)');
+    console.error('                                 shared by every persona.');
+    console.error('  --document-sets "a,b,..."      One set per persona (count must equal --personas).');
+    console.error('                                 Mutually exclusive with --document-set.');
+    console.error('                                 Build the samples first: yarn debug:orchestrator:sets');
     console.error('');
     console.error('Each persona runs against its own auto-provisioned db user (debug-*@strive-debug.test),');
     console.error('verified in Mongo at provision time and deleted via /api/auth/delete-account on teardown.');
@@ -112,6 +128,25 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     distribution: flags['goal-type-distribution'],
     personaCount,
   });
+
+  // Documents mode: --documents + exactly one of --document-set /
+  // --document-sets. Resolution (incl. mutual exclusion + count checks)
+  // is pure and unit-tested in documentSets.ts.
+  const documentsMode = boolFlags.has('documents');
+  const setSelection = resolveDocumentSetSelection({
+    documentsMode,
+    single: flags['document-set'],
+    multi: flags['document-sets'],
+    personaCount,
+  });
+  if (!setSelection.ok) {
+    console.error(setSelection.error);
+    console.error('');
+    console.error('Documents-mode usage:');
+    console.error('  yarn debug:orchestrator --documents --document-set sample-basic --concurrency 1 --personas 1 --lessons 1');
+    console.error('  yarn debug:orchestrator --documents --document-sets "sample-basic,sample-mixed" --concurrency 2 --personas 2 --lessons 1');
+    process.exit(1);
+  }
 
   return {
     apiUrl: flags['api-url'] ?? 'http://localhost:4000',
@@ -133,6 +168,8 @@ function parseArgs(): OrchestratorConfig & { personaCount: number } {
     includeLinks: boolFlags.has('links'),
     includeRecall: !boolFlags.has('no-recall-gen'),
     goalTypeDistribution,
+    documentsMode,
+    documentSetNames: setSelection.setNames,
   };
 }
 
@@ -204,6 +241,32 @@ async function main() {
   console.log('Debug Orchestrator — Course Creation Flow Testing'.cyan);
   console.log('─'.repeat(50).dim);
 
+  // Documents mode: load every referenced set BEFORE any money is spent
+  // (persona generation is a paid Sonnet call) so a missing folder or a
+  // broken manifest is an instant usage error, not a mid-run failure.
+  // Loaded once per distinct name; the per-persona array aligns with the
+  // persona index (personaSets[i] is persona i's corpus).
+  let personaSets: LoadedDocumentSet[] | null = null;
+  if (config.documentsMode && config.documentSetNames) {
+    const cache = new Map<string, LoadedDocumentSet>();
+    try {
+      personaSets = config.documentSetNames.map((name) => {
+        if (!cache.has(name)) cache.set(name, loadDocumentSet({ name }));
+        return cache.get(name)!;
+      });
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+    for (const set of cache.values()) {
+      console.log(
+        `Document set "${set.name}": ${set.files.length} file(s)` +
+          `${(set.manifest?.urls.length ?? 0) > 0 ? ` + ${set.manifest!.urls.length} URL(s)` : ''}` +
+          `${set.manifest?.note ? ` — ${set.manifest.note}` : ''}`.gray,
+      );
+    }
+  }
+
   // Direct mongoose connection — not `connectDB()` from @conf/mongo, which
   // runs `cleanupOrphanedJobs()` as a side effect and would mark all
   // in-flight jobs on a live dev server as failed. The orchestrator only
@@ -213,11 +276,12 @@ async function main() {
   console.log('MongoDB connected.'.green);
 
   try {
-    // Generate personas
-    const personas = await generatePersonas(personaCount, config.goalTypeDistribution);
+    // Generate personas (documents mode hands the generator each
+    // persona's set summary so the persona plausibly OWNS the corpus)
+    const personas = await generatePersonas(personaCount, config.goalTypeDistribution, personaSets);
 
     // Run all persona flows
-    const runs = await runAll({ personas, config });
+    const runs = await runAll({ personas, config, personaSets });
 
     // Exit code based on results
     const allOk = runs.every((r) => r.status === 'completed');

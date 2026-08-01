@@ -23,11 +23,20 @@ export const EMBEDDING_DIMENSIONS = 1536;
 
 let client: OpenAI | null = null;
 
-const getClient = (): OpenAI | null => {
+/**
+ * The one lazily-initialised OpenAI client for the whole api. Exported so
+ * other OpenAI surfaces (document moderation's `omni-moderation-latest`
+ * calls) reuse this singleton instead of growing divergent client
+ * patterns. Null when the key is absent — callers decide whether that is
+ * a graceful no-op (embeddings) or a fail-closed error (moderation).
+ */
+export const getOpenAIClient = (): OpenAI | null => {
   if (!OPENAI_API_KEY) return null;
   if (!client) client = new OpenAI({ apiKey: OPENAI_API_KEY });
   return client;
 };
+
+const getClient = getOpenAIClient;
 
 export const isEmbeddingsEnabled = (): boolean => Boolean(OPENAI_API_KEY);
 

@@ -17,9 +17,21 @@ import {
   GoalType,
   GoalTypeConfidence,
   QUESTION_TYPES,
+  SOURCE_ANALYSIS_MODES,
+  SourceAnalysisMode,
+  SourceFidelity,
 } from '@lib/constants';
+import { wrapExternalContentBudgeted } from '@lib/ai/agents/shared/externalContent';
+import { DEFAULT_SOURCE_FIDELITY, SOURCE_FIDELITY_GUIDANCE } from '@lib/ai/agents/shared/sourceFidelity';
 import { sanitizePromptInput } from '@lib/sanitize';
-import { bumpClarifyRefinementRetry, bumpStructureCapExceeded } from '@lib/metrics';
+import {
+  bumpClarifyRefinementRetry,
+  bumpStructureCapExceeded,
+  bumpStructureSourceBandRetried,
+  bumpStructureSourceBandAcceptedOutOfRange,
+  bumpStructureSourceBandFailed,
+} from '@lib/metrics';
+import { AppError } from '@middleware/errorMiddleware';
 import { genLog } from '@lib/loggers';
 import { detectSoftnessHint, getLessonCountHint, getEstimatedHoursRange, SoftnessHint } from './softness';
 import {
@@ -279,9 +291,19 @@ const CLARIFY_USER_MESSAGE_TILT_DIRECTIVE: Record<GoalType, string> = {
     'TILT REQUIRED for goalType=fluency: at LEAST ONE question MUST elicit BOTH the learner\'s CURRENT CEFR level AND their TARGET CEFR level (or named fluency target like "business" / "conversational" / "academic"). Example shape: "What\'s your current level (A1 / A2 / B1 / B2 / C1) and the level you\'re targeting?"',
 };
 
-export const clarifyCourse = async (params: { goal: string; goalType?: GoalType }): Promise<ClarifyOutput> => {
+export const clarifyCourse = async (params: {
+  goal: string;
+  goalType?: GoalType;
+  /** Documents-course prompt context; null/omitted on goal courses (byte-identical path). */
+  sourceContext?: CourseSourceContext | null;
+}): Promise<ClarifyOutput> => {
   const goal = sanitizePromptInput(params.goal);
   const goalType = params.goalType ?? 'master';
+
+  // Documents course: append the source-material section to the USER
+  // message (never the cached system block). '' on goal courses, keeping
+  // the message byte-identical to the pre-feature shape (pinned).
+  const sourceSection = buildSourceMaterialSection(params.sourceContext, 'clarify');
 
   // The user message carries goal + goalType + the per-goalType tilt
   // directive. The directive is duplicated from the system prompt's tilt
@@ -290,7 +312,7 @@ export const clarifyCourse = async (params: { goal: string; goalType?: GoalType 
   // dropping fluency/build/pass MUST-elicit rules). Pre-feature courses
   // that don't pass `goalType` default to `master`, whose directive is the
   // explicit "no tilt" line — no regression on the working path.
-  const userMessage = `Learning goal: ${goal}\n\nGoal type: ${goalType}\n\n${CLARIFY_USER_MESSAGE_TILT_DIRECTIVE[goalType]}`;
+  const userMessage = `Learning goal: ${goal}\n\nGoal type: ${goalType}\n\n${CLARIFY_USER_MESSAGE_TILT_DIRECTIVE[goalType]}${sourceSection ? `\n\n${sourceSection}` : ''}`;
 
   // Raw Anthropic SDK (not LangChain `.withStructuredOutput`) so we keep the
   // explicit tool_use contract and targeted cache breakpoint.
@@ -365,6 +387,200 @@ const formatSoftnessSection = (softness: SoftnessHint): string => {
   }
   const cueList = softness.cues.map((c) => `  - ${c}`).join('\n');
   return `Heuristic softness check: SOFT=YES — the learner used phrasing that suggests light-effort intent.\nCues:\n${cueList}`;
+};
+
+// ── Course source context (documents courses) ───────────
+//
+// Phase 5 of course-from-documents (PLAN §3.1 steps 5–6): when a course was
+// created from uploaded documents (`course.source === 'documents'`), the
+// design-stage prompts gain a `## Source material (untrusted reference)`
+// section carrying the coarse digest topic tree, the assessed size band and
+// the fidelity guidance. STRICTLY ADDITIVE: every entry point below takes an
+// optional `sourceContext` that is `null` for goal-based courses, in which
+// case the produced prompt strings are byte-identical to the pre-feature
+// ones (pinned by coursePromptPin.test.ts).
+//
+// Placement contract (codebase-fit "Area: pipeline" #2): the section is
+// appended to the HUMAN message, after the cached system block — never
+// inside it — so per-course content can't bust the shared prompt cache.
+// The digest tree is model-generated over untrusted documents, so it goes
+// INSIDE `wrapExternalContentBudgeted` (32 KB budget — the digest is capped
+// at 8k tokens ≈ 32k chars by sourceDigestService, so the budget is a
+// guardrail, not a working truncation); the size band and fidelity lines
+// are schema-validated coarse metadata and render as our own text.
+
+/** Shape of `sourceAssessment.sizeBand` after Zod validation at ingest. */
+export interface SourceSizeBand {
+  minLessons: number;
+  maxLessons: number;
+  mode: SourceAnalysisMode;
+}
+
+/** Loose digest node — `course.sourceDigest` is Mixed, so parse defensively. */
+interface DigestTopicNodeLike {
+  topic?: unknown;
+  summaryLine?: unknown;
+  spanRefs?: unknown;
+  docIds?: unknown;
+  children?: unknown;
+}
+
+export interface CourseSourceContext {
+  digestTopics: DigestTopicNodeLike[];
+  sizeBand: SourceSizeBand | null;
+  fidelity: SourceFidelity;
+}
+
+/** Budget for the wrapped digest tree inside design-stage prompts (PLAN §3.5). */
+export const SOURCE_DIGEST_PROMPT_MAX_CHARS = 32_000;
+
+const isSizeBand = (v: unknown): v is SourceSizeBand => {
+  const band = v as SourceSizeBand | null | undefined;
+  return (
+    !!band &&
+    typeof band.minLessons === 'number' &&
+    typeof band.maxLessons === 'number' &&
+    (SOURCE_ANALYSIS_MODES as readonly string[]).includes(band.mode as string)
+  );
+};
+
+/**
+ * Read the validated corpus size band off a (lean) Course row. `null` for
+ * goal courses and for documents courses whose assessment carries no
+ * well-formed band. Shared by `buildCourseSourceContext`, the depth-gate
+ * math in `updateCourse`, and the design-chat context builder — one parse,
+ * one truth.
+ */
+export const extractSourceSizeBand = (course: {
+  source?: string | null;
+  sourceAssessment?: Record<string, unknown> | null;
+}): SourceSizeBand | null => {
+  if (course.source !== 'documents') return null;
+  const rawBand = (course.sourceAssessment as { sizeBand?: unknown } | null | undefined)?.sizeBand;
+  return isSizeBand(rawBand) ? rawBand : null;
+};
+
+/**
+ * Derive the prompt-side source context from the lean Course row. Returns
+ * `null` for goal-based courses (source null) and for documents courses
+ * whose digest hasn't been built yet (ingest not finished) — both fall
+ * back to the exact pre-feature prompts.
+ */
+export const buildCourseSourceContext = (course: {
+  source?: string | null;
+  sourceDigest?: Record<string, unknown> | null;
+  sourceAssessment?: Record<string, unknown> | null;
+  sourceFidelity?: SourceFidelity | null;
+}): CourseSourceContext | null => {
+  if (course.source !== 'documents') return null;
+  const topics = (course.sourceDigest as { topics?: unknown } | null | undefined)?.topics;
+  if (!Array.isArray(topics) || topics.length === 0) return null;
+  return {
+    digestTopics: topics as DigestTopicNodeLike[],
+    sizeBand: extractSourceSizeBand(course),
+    fidelity: course.sourceFidelity ?? DEFAULT_SOURCE_FIDELITY,
+  };
+};
+
+/**
+ * Serialize the digest topic tree to an indented outline. Topic/summary
+ * strings pass `sanitizePromptInput` (they were distilled FROM untrusted
+ * documents); spanRefs are server-assembled chunk vectorIds and are printed
+ * verbatim so the structure model can echo them back as `sourceRefs`.
+ */
+const serializeDigestTopics = (nodes: DigestTopicNodeLike[], depth = 0): string[] => {
+  const lines: string[] = [];
+  for (const node of nodes) {
+    if (!node || typeof node.topic !== 'string') continue;
+    const indent = '  '.repeat(depth);
+    const summary = typeof node.summaryLine === 'string' && node.summaryLine.trim()
+      ? ` — ${sanitizePromptInput(node.summaryLine)}`
+      : '';
+    const refs = Array.isArray(node.spanRefs)
+      ? (node.spanRefs as unknown[]).filter((r): r is string => typeof r === 'string')
+      : [];
+    const refsSuffix = refs.length > 0 ? ` [refs: ${refs.join(', ')}]` : '';
+    lines.push(`${indent}- ${sanitizePromptInput(node.topic)}${summary}${refsSuffix}`);
+    if (Array.isArray(node.children)) {
+      lines.push(...serializeDigestTopics(node.children as DigestTopicNodeLike[], depth + 1));
+    }
+  }
+  return lines;
+};
+
+const SIZE_BAND_MODE_NOTES: Record<SourceAnalysisMode, string> = {
+  source_only: 'the documents alone carry enough substance for the course',
+  needs_supplement: 'the documents are thin in places — supplementary AI content will be needed',
+  multi_course: 'the documents contain more material than a single course can cover; this course covers a focused selection',
+};
+
+/**
+ * Fidelity-specific tail appended to the clarify stage instruction
+ * (FEEDBACK-1 flow-adaptation): what the clarify questions may range over
+ * depends on how strictly the course follows the sources. Strict courses
+ * must never invite scope expansion; enrich courses may explore direction.
+ */
+const CLARIFY_FIDELITY_INSTRUCTIONS: Record<SourceFidelity, string> = {
+  strict:
+    'Fidelity is strict: ask only about emphasis, level, and ordering WITHIN the source material — never propose expanding the course beyond the documents.',
+  guided:
+    "Fidelity is guided: questions about small gaps worth filling with supplementary content are fine, but keep the course anchored to the documents' scope.",
+  enrich:
+    'Fidelity is enrich: broader direction questions are welcome — the documents are the spine, and the learner may want related material beyond them.',
+};
+
+/** Per-design-stage instruction appended under the source section. */
+const SOURCE_STAGE_INSTRUCTIONS: Record<'clarify' | 'depth' | 'structure', string> = {
+  clarify:
+    'Because the course is grounded in these documents, prefer FEWER, SHARPER questions: never ask about anything the source material already answers (experience with the material, its topics, its level). Focus on what the documents cannot tell you — the learner\'s purpose, gaps to fill or skip, and how strictly to follow the material.',
+  depth:
+    "Calibrate every tier's summary and bullets to what the source material actually contains — reference its topics, not a generic version of the subject.",
+  structure:
+    'Ground the course in the source material per the fidelity guidance above. Per-lesson source mapping: each lesson in your output MAY include a `sourceRefs` array (at most 12 entries) listing the chunk ids shown as `refs:` in the topic tree that ground that lesson. Map every lesson that draws on the source material to its supporting refs; omit the field for purely supplementary lessons. Only use ids that appear in the topic tree — never invent ids. In `scopeDecisions`, note which source topics the course covers and which are deliberately left out (the coverage note).',
+};
+
+/**
+ * Build the `## Source material (untrusted reference)` human-message
+ * section for one design stage. Returns '' when `sourceContext` is null —
+ * the goal-course no-op path.
+ */
+export const buildSourceMaterialSection = (
+  sourceContext: CourseSourceContext | null | undefined,
+  stage: 'clarify' | 'depth' | 'structure',
+): string => {
+  if (!sourceContext) return '';
+  const { digestTopics, sizeBand, fidelity } = sourceContext;
+
+  const tree = serializeDigestTopics(digestTopics).join('\n');
+  const wrapped = wrapExternalContentBudgeted({
+    origin: 'doc:digest',
+    content: tree,
+    maxChars: SOURCE_DIGEST_PROMPT_MAX_CHARS,
+  });
+
+  const bandLine = sizeBand
+    ? `Assessed size band: the material supports roughly ${sizeBand.minLessons}-${sizeBand.maxLessons} lessons (${sizeBand.mode} — ${SIZE_BAND_MODE_NOTES[sizeBand.mode]}).`
+    : null;
+
+  // Clarify gets a fidelity-specific tail (what questions may range over);
+  // the other stages carry fidelity through SOURCE_FIDELITY_GUIDANCE above.
+  const stageInstruction =
+    stage === 'clarify'
+      ? `${SOURCE_STAGE_INSTRUCTIONS.clarify} ${CLARIFY_FIDELITY_INSTRUCTIONS[fidelity]}`
+      : SOURCE_STAGE_INSTRUCTIONS[stage];
+
+  return [
+    '## Source material (untrusted reference)',
+    '',
+    'This course is being built from documents the learner uploaded. The topic tree below summarizes them; each topic lists the chunk ids (`refs:`) that ground it in the document corpus.',
+    ...(bandLine ? ['', bandLine] : []),
+    '',
+    `Source fidelity: ${fidelity} — ${SOURCE_FIDELITY_GUIDANCE[fidelity]}`,
+    '',
+    wrapped,
+    '',
+    stageInstruction,
+  ].join('\n');
 };
 
 // ── Depth previews ──────────────────────────────────────
@@ -449,19 +665,129 @@ type DepthPreviewsLLMOutput = z.infer<typeof depthPreviewsOutputSchema>;
  *     and gate dialog update together.
  */
 type DepthPreviewsOutput = DepthPreviewsLLMOutput & {
-  overview: DepthPreviewsLLMOutput['overview'] & {
-    lessonCountRange: [number, number];
-    estimatedHoursRange: [number, number];
-  };
-  comprehensive: DepthPreviewsLLMOutput['comprehensive'] & {
-    lessonCountRange: [number, number];
-    estimatedHoursRange: [number, number];
-  };
-  deep_dive: DepthPreviewsLLMOutput['deep_dive'] & {
-    lessonCountRange: [number, number];
-    estimatedHoursRange: [number, number];
+  overview: DepthPreviewsLLMOutput['overview'] & TierScope;
+  comprehensive: DepthPreviewsLLMOutput['comprehensive'] & TierScope;
+  deep_dive: DepthPreviewsLLMOutput['deep_dive'] & TierScope;
+  /**
+   * Documents courses only, `mode === 'multi_course'`: a learner-facing
+   * note that the corpus holds more than one course's worth of material.
+   * Absent on goal courses and on the other two modes (additive field —
+   * pre-feature rows never carry it).
+   */
+  sourceScopeNote?: string;
+};
+
+/**
+ * FEEDBACK-1 rework of the Phase-5 band clamp. The original rule
+ * INTERSECTED each tier's (depth, isSoft) base range with the band, which
+ * collapsed all three tiers onto the band edge for small corpora — a band
+ * of [3,6] rendered Overview, Comprehensive AND Deep Dive as "~6 lessons",
+ * flattening the depth choice entirely (founder screenshot, FEEDBACK-1).
+ *
+ * New rule, per mode:
+ *   - `source_only`     — tiers are SPREAD monotonically WITHIN the band:
+ *     overview takes the low end, comprehensive the middle-to-top,
+ *     deep_dive the top (see `spreadTierWithinBand`). Band [3,6] →
+ *     overview [3,4], comprehensive [4,6], deep_dive [5,6].
+ *   - `needs_supplement` — same spread, within [min, ceil(max×1.5)]: the
+ *     corpus is thin so AI supplement earns 50% headroom at the top.
+ *   - `multi_course`     — untouched base ranges + course-level
+ *     `sourceScopeNote` (the corpus exceeds one course; tiers keep their
+ *     goal-course meaning).
+ *
+ * When the band is too narrow to spread (max − min ≤ 1) all tiers share
+ * the band and differentiate by HOURS ONLY — per-tier minutes-per-lesson
+ * factors turn equal lesson counts into visibly deeper treatment
+ * ("~4 lessons · ~1h" vs "~4 lessons · ~3h"), and `sourceTierNote`
+ * says so explicitly.
+ */
+const spreadTierWithinBand = (depth: CourseDepth, lo: number, hi: number): [number, number] => {
+  const span = hi - lo;
+  if (span <= 1) return [lo, hi];
+  const step = Math.ceil(span / 3);
+  if (depth === 'overview') return [lo, lo + step];
+  if (depth === 'comprehensive') return [lo + step, hi];
+  return [hi - step, hi];
+};
+
+/** Headroom multiplier on the band max for thin (`needs_supplement`) corpora. */
+const NEEDS_SUPPLEMENT_HEADROOM = 1.5;
+
+/**
+ * Per-tier minutes-per-lesson factors for band-clamped documents courses.
+ * A 1:2:3 ladder: an overview lesson is a survey pass, a comprehensive
+ * lesson works the material, a deep-dive lesson adds practice and edge
+ * cases. Goal courses keep the flat 25-min heuristic in softness.ts.
+ */
+const SOURCE_TIER_MINUTES_PER_LESSON: Record<CourseDepth, number> = {
+  overview: 15,
+  comprehensive: 30,
+  deep_dive: 45,
+};
+
+/**
+ * Learner-facing per-tier note for band-clamped documents courses —
+ * surfaces WHY tiers with similar lesson counts differ in hours (same
+ * source scope, deeper per-lesson treatment). Additive OpenAPI field on
+ * DepthPreview (`sourceTierNote`); absent on goal courses.
+ */
+export const SOURCE_TIER_NOTES: Record<CourseDepth, string> = {
+  overview: "Covers your documents' key ideas at survey depth.",
+  comprehensive: 'Same source scope, fuller treatment of each topic.',
+  deep_dive: 'Same source scope, deepest per-lesson treatment.',
+};
+
+export interface TierScope {
+  lessonCountRange: [number, number];
+  estimatedHoursRange: [number, number];
+  /** Band-clamped documents courses only — explains the depth-of-treatment differentiation. */
+  sourceTierNote?: string;
+}
+
+/**
+ * THE shared tier-scope function (FEEDBACK-1): depth previews
+ * (`enrichDepthPreviewsWithScope`), structure/refine generation caps
+ * (`generateCourseStructure` / `refineCourseStructure`) and the depth-gate
+ * math in `updateCourse` ALL derive lesson counts from this single
+ * function, so what the preview promises and what generation enforces
+ * cannot diverge. Pure and deterministic.
+ */
+export const getTierScope = ({
+  depth,
+  isSoft,
+  sizeBand,
+}: {
+  depth: CourseDepth;
+  isSoft: boolean;
+  sizeBand: SourceSizeBand | null;
+}): TierScope => {
+  const clampingBand = sizeBand && sizeBand.mode !== 'multi_course' ? sizeBand : null;
+  if (!clampingBand) {
+    // Goal courses, doc courses without a band, and multi_course corpora:
+    // the exact pre-feature (depth, isSoft) heuristics.
+    return {
+      lessonCountRange: getLessonCountHint({ depth, isSoft }),
+      estimatedHoursRange: getEstimatedHoursRange({ depth, isSoft }),
+    };
+  }
+  const lo = Math.max(1, clampingBand.minLessons);
+  const rawHi =
+    clampingBand.mode === 'needs_supplement'
+      ? Math.ceil(clampingBand.maxLessons * NEEDS_SUPPLEMENT_HEADROOM)
+      : clampingBand.maxLessons;
+  const hi = Math.max(lo, rawHi);
+  const lessonCountRange = spreadTierWithinBand(depth, lo, hi);
+  const minutes = SOURCE_TIER_MINUTES_PER_LESSON[depth];
+  const toHours = (n: number) => Math.max(1, Math.ceil((n * minutes) / 60));
+  return {
+    lessonCountRange,
+    estimatedHoursRange: [toHours(lessonCountRange[0]), toHours(lessonCountRange[1])],
+    sourceTierNote: SOURCE_TIER_NOTES[depth],
   };
 };
+
+const buildMultiCourseScopeNote = (sizeBand: SourceSizeBand): string =>
+  `Your documents contain more material than a single course can cover (roughly ${sizeBand.minLessons}-${sizeBand.maxLessons} lessons of substance). This course will cover a focused selection of it — you can create further courses from the same documents later.`;
 
 /**
  * Enrich the LLM output with per-tier `lessonCountRange` and
@@ -478,20 +804,21 @@ type DepthPreviewsOutput = DepthPreviewsLLMOutput & {
  * field, in which case `useSoftBand` collapses to the regex signal alone
  * — same behaviour as before this change.
  */
-const enrichDepthPreviewsWithScope = (
+export const enrichDepthPreviewsWithScope = (
   llmOutput: DepthPreviewsLLMOutput,
-  { isSoft }: { isSoft: boolean },
+  { isSoft, sizeBand = null }: { isSoft: boolean; sizeBand?: SourceSizeBand | null },
 ): DepthPreviewsOutput => {
   const useSoftBand = isSoft || llmOutput.overcommitRisk === 'high';
-  const tier = (depth: CourseDepth) => ({
-    lessonCountRange: getLessonCountHint({ depth, isSoft: useSoftBand }),
-    estimatedHoursRange: getEstimatedHoursRange({ depth, isSoft: useSoftBand }),
-  });
+  // Delegates to THE shared tier-scope function so preview and generation
+  // cannot diverge (FEEDBACK-1). Goal courses (sizeBand null) get the
+  // identical pre-feature ranges.
+  const tier = (depth: CourseDepth) => getTierScope({ depth, isSoft: useSoftBand, sizeBand });
   return {
     ...llmOutput,
     overview: { ...llmOutput.overview, ...tier('overview') },
     comprehensive: { ...llmOutput.comprehensive, ...tier('comprehensive') },
     deep_dive: { ...llmOutput.deep_dive, ...tier('deep_dive') },
+    ...(sizeBand?.mode === 'multi_course' ? { sourceScopeNote: buildMultiCourseScopeNote(sizeBand) } : {}),
   };
 };
 
@@ -623,11 +950,15 @@ const stripXmlParameterTags = (input: unknown): unknown => {
 interface DepthPreviewsInput {
   goal: string;
   answers: { questionId: string; answer: string }[];
+  /** Documents-course prompt context; null/omitted on goal courses (byte-identical path). */
+  sourceContext?: CourseSourceContext | null;
 }
 
 export const generateDepthPreviews = async (params: DepthPreviewsInput): Promise<DepthPreviewsOutput> => {
   const goal = sanitizePromptInput(params.goal);
   const softness = detectSoftnessHint({ answers: params.answers });
+  // '' on goal courses — human message stays byte-identical (pinned).
+  const sourceSection = buildSourceMaterialSection(params.sourceContext, 'depth');
 
   const humanMessage = `Learning goal: ${goal}
 
@@ -636,7 +967,7 @@ ${formatAnswers(params.answers)}
 
 ${formatSoftnessSection(softness)}
 
-Generate personalized depth previews for each tier.`;
+${sourceSection ? `${sourceSection}\n\n` : ''}Generate personalized depth previews for each tier.`;
 
   // Migrated from LangChain `withStructuredOutput` → raw Anthropic SDK +
   // explicit tool_use after a recurring "Failed to parse" regression where
@@ -665,8 +996,11 @@ Generate personalized depth previews for each tier.`;
     async () => {
       const result = await withCallTimeout((signal) => anthropic.messages.create({
         model: MODEL_IDS.SONNET,
-        max_tokens: 4096,
-        temperature: 0.7,
+        // Sonnet 5: no `temperature` (400); explicit thinking-off (omitted
+        // = adaptive-ON, and forced tool_choice pairs with disabled
+        // thinking); +50% output headroom for the ~1.4× tokenizer.
+        max_tokens: 6144,
+        thinking: { type: 'disabled' },
         system: [
           {
             type: 'text',
@@ -701,7 +1035,13 @@ Generate personalized depth previews for each tier.`;
     { label: 'clarify:depth-previews' },
   );
 
-  return enrichDepthPreviewsWithScope(response, { isSoft: softness.isSoft });
+  // Documents course: clamp per-tier lesson counts to the assessed size
+  // band (see clampRangeToSizeBand for the exact rule). Goal courses pass
+  // `sizeBand: null` — identical output to the pre-feature path.
+  return enrichDepthPreviewsWithScope(response, {
+    isSoft: softness.isSoft,
+    sizeBand: params.sourceContext?.sizeBand ?? null,
+  });
 };
 
 /**
@@ -748,30 +1088,88 @@ export const ensureDepthPreviewsScope = <T extends { answers?: unknown; depthPre
 
 // ── Generate course structure ───────────────────────────
 
-const structureOutputSchema = z.object({
-  courseName: z.string(),
-  domain: z.enum(COURSE_DOMAINS),
-  reasoning: z.object({
-    learnerProfile: z.string(),
-    topicAnalysis: z.string(),
-    scopeDecisions: z.string(),
-    progressionStrategy: z.string(),
-  }),
-  modules: jsonish(z.array(
-    z.object({
-      name: z.string(),
-      description: z.string(),
-      lessons: jsonish(z.array(
-        z.object({
-          name: z.string(),
-          description: z.string(),
-        }),
-      )),
-    }),
-  )),
+// Two lesson schemas, selected per course source at invoke time:
+//   - goal courses keep the EXACT pre-feature schema (and therefore the
+//     exact `withStructuredOutput` tool definition the model sees — the
+//     byte-identity contract covers the tool schema, not just the
+//     messages). Zod's default strip mode also removes any hallucinated
+//     `sourceRefs` key, same as before this feature existed.
+//   - documents courses use the extended schema whose lessons MAY carry
+//     `sourceRefs` (chunk vectorIds from the digest's `refs:` lists).
+//     The schema bound (40) is a sanity cap only — the deterministic
+//     product cap of 12 refs/lesson is enforced by
+//     `filterStructureSourceRefs` (a parse failure here would cost a
+//     full Sonnet regeneration; a slice costs nothing).
+const structureLessonSchema = z.object({
+  name: z.string(),
+  description: z.string(),
 });
 
-type StructureOutput = z.infer<typeof structureOutputSchema>;
+const structureLessonWithRefsSchema = structureLessonSchema.extend({
+  sourceRefs: z
+    .array(z.string())
+    .max(40)
+    .optional()
+    .describe('Chunk ids from the source-material topic tree (`refs:` values) grounding this lesson. Omit for purely supplementary lessons. At most 12.'),
+});
+
+const makeStructureOutputSchema = <L extends z.ZodTypeAny>(lessonSchema: L) =>
+  z.object({
+    courseName: z.string(),
+    domain: z.enum(COURSE_DOMAINS),
+    reasoning: z.object({
+      learnerProfile: z.string(),
+      topicAnalysis: z.string(),
+      scopeDecisions: z.string(),
+      progressionStrategy: z.string(),
+    }),
+    modules: jsonish(z.array(
+      z.object({
+        name: z.string(),
+        description: z.string(),
+        lessons: jsonish(z.array(lessonSchema)),
+      }),
+    )),
+  });
+
+const structureOutputSchema = makeStructureOutputSchema(structureLessonSchema);
+const structureOutputSchemaWithSourceRefs = makeStructureOutputSchema(structureLessonWithRefsSchema);
+
+// The superset type — goal-course results simply never carry `sourceRefs`.
+type StructureOutput = z.infer<typeof structureOutputSchemaWithSourceRefs>;
+
+/** Deterministic per-lesson cap on persisted sourceRefs (PLAN §3.1 step 5). */
+export const MAX_SOURCE_REFS_PER_LESSON = 12;
+
+/**
+ * Drop every model-emitted `sourceRefs` id that is not a REAL chunk
+ * vectorId of this course (ai-features.md §4.4 / task rule "never honor
+ * invented ids"), dedupe, and cap at MAX_SOURCE_REFS_PER_LESSON. Lessons
+ * whose refs all filtered away lose the field entirely. Pure — the caller
+ * (jobRunner) supplies the valid-id set from a Mongo `distinct` and passes
+ * an empty set to strip refs wholesale. Returns new objects; never
+ * mutates the input.
+ */
+export const filterStructureSourceRefs = <M extends { lessons: { name: string; description: string; sourceRefs?: string[] }[] }>(
+  modules: M[],
+  validVectorIds: ReadonlySet<string>,
+): M[] =>
+  modules.map((mod) => ({
+    ...mod,
+    lessons: mod.lessons.map((lesson) => {
+      const { sourceRefs, ...rest } = lesson;
+      if (!Array.isArray(sourceRefs)) return { ...rest } as typeof lesson;
+      const kept = [...new Set(sourceRefs)]
+        .filter((id) => validVectorIds.has(id))
+        .slice(0, MAX_SOURCE_REFS_PER_LESSON);
+      if (kept.length !== (sourceRefs?.length ?? 0)) {
+        genLog.info(
+          `course:structure sourceRefs filtered lesson="${lesson.name.slice(0, 60)}" emitted=${sourceRefs.length} kept=${kept.length}`,
+        );
+      }
+      return kept.length > 0 ? ({ ...rest, sourceRefs: kept } as typeof lesson) : ({ ...rest } as typeof lesson);
+    }),
+  }));
 
 // ── Per-domain classifier guidance ─────────────────────
 // The structure-design prompt asks the LLM to classify each course into
@@ -888,6 +1286,8 @@ interface StructureInput {
   // re-entering the structure pipeline — the `master` branch in the
   // structure prompt is explicitly the no-op path.
   goalType: GoalType;
+  /** Documents-course prompt context; null/omitted on goal courses (byte-identical path). */
+  sourceContext?: CourseSourceContext | null;
 }
 
 // How `goalType` reshapes the curriculum. Single source of truth — one
@@ -914,13 +1314,161 @@ const formatGoalTypeStructureSection = (goalType: GoalType): string =>
 const totalLessonCount = (structure: StructureOutput): number =>
   structure.modules.reduce((sum, m) => sum + m.lessons.length, 0);
 
+// ── Documents-course lesson-count enforcement (FEEDBACK-1) ──
+//
+// Goal courses keep the ADVISORY cap (metric + warn only — see the
+// observation-only comment in generateCourseStructure). Documents courses
+// carry a promise the preview made from the corpus size band, so the same
+// range is a HARD constraint here: prompt sentence (below), then post-parse
+// enforcement (enforceSourceLessonBand) with one corrective retry, a
+// bounded acceptance window, and a typed retryable failure. A failed job
+// debits nothing (debit-on-success invariant), so a clean failure is
+// strictly better than a course 4× the promised size.
+
+/** Overrun tolerance applied AFTER the corrective retry: accept ≤ ceil(1.25 × max). */
+export const SOURCE_BAND_OVERRUN_TOLERANCE = 1.25;
+
+/**
+ * Fidelity framing appended to the hard lesson-count sentence — the reason
+ * the range binds differs per fidelity (strict: no outside-knowledge
+ * padding; guided: supplements count against the same limit; enrich:
+ * enrichment deepens lessons rather than adding them).
+ */
+const SOURCE_FIDELITY_COUNT_FRAMING: Record<SourceFidelity, string> = {
+  strict:
+    'Fidelity is strict: every lesson must be grounded in the source material — never pad toward the maximum with outside-knowledge lessons.',
+  guided:
+    'Fidelity is guided: clearly-marked supplementary lessons are allowed, but they count against the same limit — deepen lessons rather than adding more.',
+  enrich:
+    'Fidelity is enrich: broaden freely within each lesson — enrichment deepens treatment, but it never adds lessons beyond the limit.',
+};
+
+/** The documents-course replacement for the advisory "Lesson-count target" line. */
+const buildSourceLessonCountLine = (params: {
+  capMin: number;
+  capMax: number;
+  fidelity: SourceFidelity;
+  kind: 'generate' | 'refine';
+}): string => {
+  const { capMin, capMax, fidelity, kind } = params;
+  const scopeSentence =
+    kind === 'generate'
+      ? `Lesson-count limit (HARD): produce between ${capMin} and ${capMax} total lessons (sum across all modules). This range comes from the assessed substance of the learner's documents and is enforced after generation — a structure outside it is rejected. Consolidate related source topics into fewer, richer lessons instead of exceeding the maximum.`
+      : `Lesson-count limit (HARD): the refined course must keep between ${capMin} and ${capMax} total lessons (sum across all modules). This range comes from the assessed substance of the learner's documents and is enforced after generation, even when the request asks to grow the course — stay inside it and prefer consolidating or swapping content over adding lessons.`;
+  return `${scopeSentence} ${SOURCE_FIDELITY_COUNT_FRAMING[fidelity]}`;
+};
+
+/** Corrective-retry message: names the violation and the produced shape. */
+const buildBandViolationCorrection = (params: {
+  produced: StructureOutput;
+  count: number;
+  capMin: number;
+  capMax: number;
+}): string => {
+  const { produced, count, capMin, capMax } = params;
+  const moduleSummary = produced.modules
+    .map((m, i) => `- Module ${i + 1} "${m.name}": ${m.lessons.length} lessons`)
+    .join('\n');
+  const direction =
+    count > capMax
+      ? 'consolidate related lessons into fewer, richer lessons — do not simply truncate the course'
+      : `expand the treatment so the material is covered in at least ${capMin} lessons`;
+  return [
+    `CORRECTION REQUIRED: the structure you just produced contains ${count} total lessons across ${produced.modules.length} modules:`,
+    moduleSummary,
+    `The allowed total is ${capMin}-${capMax} lessons (sum across all modules). Regenerate the FULL structure now with a total inside that range — ${direction}. Keep the same grounding, reasoning quality, and sourceRefs mapping.`,
+  ].join('\n');
+};
+
+/**
+ * Post-parse enforcement for documents courses. Acceptance windows:
+ *   - silent accept:            capMin−1 ≤ count ≤ capMax (under-run by
+ *     exactly one is tolerated without a retry — lenient floor);
+ *   - violation → ONE retry:    count > capMax or count < capMin−1;
+ *   - after the retry:          in-range → accept; inside the tolerance
+ *     window [max(1, capMin−1), ceil(1.25×capMax)] → accept with metric
+ *     (preferring the retry, salvaging the first attempt if the retry
+ *     regressed); otherwise a typed STRUCTURE_SIZE_VIOLATION failure —
+ *     the job fails cleanly, nothing is debited, the user re-runs.
+ */
+const enforceSourceLessonBand = async (params: {
+  first: StructureOutput;
+  capMin: number;
+  capMax: number;
+  label: 'structure:generate' | 'structure:refine';
+  regenerate: (correction: string) => Promise<StructureOutput>;
+}): Promise<StructureOutput> => {
+  const { first, capMin, capMax, label, regenerate } = params;
+  const acceptMin = Math.max(1, capMin - 1);
+  const acceptMax = Math.ceil(capMax * SOURCE_BAND_OVERRUN_TOLERANCE);
+  const firstCount = totalLessonCount(first);
+  if (firstCount >= acceptMin && firstCount <= capMax) return first;
+
+  bumpStructureSourceBandRetried();
+  genLog.warn(
+    `course:${label} source-band violation lessons=${firstCount} allowed=${capMin}-${capMax} — issuing corrective retry`,
+  );
+  const second = await regenerate(
+    buildBandViolationCorrection({ produced: first, count: firstCount, capMin, capMax }),
+  );
+  const secondCount = totalLessonCount(second);
+  if (secondCount >= capMin && secondCount <= capMax) {
+    genLog.info(`course:${label} source-band retry complied lessons=${secondCount}`);
+    return second;
+  }
+  const inTolerance = (n: number) => n >= acceptMin && n <= acceptMax;
+  if (inTolerance(secondCount)) {
+    bumpStructureSourceBandAcceptedOutOfRange();
+    genLog.warn(
+      `course:${label} source-band retry still out of range lessons=${secondCount} allowed=${capMin}-${capMax} — accepted inside tolerance (≤${acceptMax})`,
+    );
+    return second;
+  }
+  if (inTolerance(firstCount)) {
+    bumpStructureSourceBandAcceptedOutOfRange();
+    genLog.warn(
+      `course:${label} source-band retry regressed lessons=${secondCount}; salvaging first attempt lessons=${firstCount} (inside tolerance ≤${acceptMax})`,
+    );
+    return first;
+  }
+  bumpStructureSourceBandFailed();
+  genLog.error(
+    `course:${label} source-band enforcement failed lessons=${secondCount} (first=${firstCount}) allowed=${capMin}-${capMax} tolerance=${acceptMin}-${acceptMax}`,
+  );
+  throw new AppError(
+    `The generated course structure did not fit the size your documents support (produced ${secondCount} lessons; allowed ${capMin}-${capMax}). Nothing was charged — please try again.`,
+    {
+      errorCode: 'STRUCTURE_SIZE_VIOLATION',
+      meta: { producedLessons: secondCount, minLessons: capMin, maxLessons: capMax },
+    },
+  );
+};
+
 export const generateCourseStructure = async (params: StructureInput): Promise<StructureOutput> => {
-  const { answers, depth, goalType } = params;
+  const { answers, depth, goalType, sourceContext = null } = params;
   const goal = sanitizePromptInput(params.goal);
   const softness = detectSoftnessHint({ answers });
-  const [capMin, capMax] = getLessonCountHint({ depth, isSoft: softness.isSoft });
+  // Documents courses take the band-derived, tier-clamped range from THE
+  // shared tier-scope function — the exact numbers the depth preview
+  // showed (FEEDBACK-1: preview and generation cannot diverge). Goal
+  // courses keep the pre-feature (depth, isSoft) hint verbatim.
+  const [capMin, capMax] = sourceContext
+    ? getTierScope({ depth, isSoft: softness.isSoft, sizeBand: sourceContext.sizeBand }).lessonCountRange
+    : getLessonCountHint({ depth, isSoft: softness.isSoft });
   const model = getStructureModel();
-  const structuredModel = model.withStructuredOutput(structureOutputSchema);
+  // Goal courses keep the pre-feature schema (and tool definition) exactly;
+  // documents courses get the sourceRefs-aware lesson schema.
+  const structuredModel = model.withStructuredOutput(
+    sourceContext ? structureOutputSchemaWithSourceRefs : structureOutputSchema,
+  );
+  // '' on goal courses — human message stays byte-identical (pinned).
+  const sourceSection = buildSourceMaterialSection(sourceContext, 'structure');
+
+  // Goal courses: the advisory target line, byte-identical (pinned).
+  // Documents courses: the HARD constraint sentence with fidelity framing.
+  const lessonCountLine = sourceContext
+    ? buildSourceLessonCountLine({ capMin, capMax, fidelity: sourceContext.fidelity, kind: 'generate' })
+    : `Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules). Do not exceed ${capMax} unless the topic genuinely cannot be taught at this scale.`;
 
   const humanMessage = `Learning goal: ${goal}
 
@@ -933,27 +1481,43 @@ ${formatSoftnessSection(softness)}
 
 ${formatGoalTypeStructureSection(goalType)}
 
-Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules). Do not exceed ${capMax} unless the topic genuinely cannot be taught at this scale.
+${sourceSection ? `${sourceSection}\n\n` : ''}${lessonCountLine}
 
 Fill in the reasoning fields first, then design the course structure.`;
 
-  const response = await withRetry(() =>
-    withCallTimeout((signal) =>
-      structuredModel.invoke(
-        [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
-        { metadata: { llmLabel: 'structure:generate' }, signal },
+  const invokeStructure = (human: string) =>
+    withRetry(() =>
+      withCallTimeout((signal) =>
+        structuredModel.invoke(
+          [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(human)],
+          { metadata: { llmLabel: 'structure:generate' }, signal },
+        ),
       ),
-    ),
-  );
+    );
 
-  // Observation-only post-check. The cap is a pedagogical suggestion the
-  // prompt carries — not a correctness invariant. Previous iteration of
-  // this function tried a corrective-regeneration + hard-throw, but that
-  // cost ~2 min of Sonnet time and failed entire courses on misses. A
-  // 32-lesson comprehensive course is verbose but usable; a failed Step 6
-  // is not. Per user directive: "range is only a suggestion, should not
-  // be a hard rule". We warn + emit a counter so dashboards can observe
-  // the LLM's miss rate, but we always return what the LLM produced.
+  const response = await invokeStructure(humanMessage);
+
+  // Documents courses: hard enforcement of the band-derived range — one
+  // corrective retry, bounded tolerance, typed failure (FEEDBACK-1; see
+  // enforceSourceLessonBand for the exact windows).
+  if (sourceContext) {
+    return enforceSourceLessonBand({
+      first: response,
+      capMin,
+      capMax,
+      label: 'structure:generate',
+      regenerate: (correction) => invokeStructure(`${humanMessage}\n\n${correction}`),
+    });
+  }
+
+  // Goal courses — observation-only post-check. The cap is a pedagogical
+  // suggestion the prompt carries — not a correctness invariant. Previous
+  // iteration of this function tried a corrective-regeneration + hard-throw,
+  // but that cost ~2 min of Sonnet time and failed entire courses on
+  // misses. A 32-lesson comprehensive course is verbose but usable; a
+  // failed Step 6 is not. Per user directive: "range is only a suggestion,
+  // should not be a hard rule". We warn + emit a counter so dashboards can
+  // observe the LLM's miss rate, but we always return what the LLM produced.
   const lessonCount = totalLessonCount(response);
   if (lessonCount > capMax) {
     bumpStructureCapExceeded();
@@ -977,14 +1541,23 @@ interface RefineInput extends StructureInput {
 }
 
 export const refineCourseStructure = async (params: RefineInput): Promise<StructureOutput> => {
-  const { answers, depth, goalType, currentStructure, currentDomain } = params;
+  const { answers, depth, goalType, currentStructure, currentDomain, sourceContext = null } = params;
   const goal = sanitizePromptInput(params.goal);
   const feedback = sanitizePromptInput(params.feedback);
   const feedbackHistory = params.feedbackHistory.map(sanitizePromptInput);
   const softness = detectSoftnessHint({ answers });
-  const [capMin, capMax] = getLessonCountHint({ depth, isSoft: softness.isSoft });
+  // Same band-derived cap as generateCourseStructure (shared function —
+  // FEEDBACK-1); goal courses keep the pre-feature hint verbatim.
+  const [capMin, capMax] = sourceContext
+    ? getTierScope({ depth, isSoft: softness.isSoft, sizeBand: sourceContext.sizeBand }).lessonCountRange
+    : getLessonCountHint({ depth, isSoft: softness.isSoft });
   const model = getStructureModel();
-  const structuredModel = model.withStructuredOutput(structureOutputSchema);
+  // Same per-source schema selection as generateCourseStructure.
+  const structuredModel = model.withStructuredOutput(
+    sourceContext ? structureOutputSchemaWithSourceRefs : structureOutputSchema,
+  );
+  // '' on goal courses — human message stays byte-identical (pinned).
+  const sourceSection = buildSourceMaterialSection(sourceContext, 'structure');
 
   const currentStructureText = currentStructure.modules
     .map(
@@ -992,6 +1565,13 @@ export const refineCourseStructure = async (params: RefineInput): Promise<Struct
         `Module ${i + 1}: ${m.name}\n  ${m.description}\n  Lessons:\n${m.lessons.map((l, j) => `    ${j + 1}. ${l.name} — ${l.description}`).join('\n')}`,
     )
     .join('\n\n');
+
+  // Goal courses: the advisory line, byte-identical (pinned). Documents
+  // courses: the HARD constraint — the band binds even when the learner's
+  // request asks to grow the course (the enforcement below backs it up).
+  const lessonCountLine = sourceContext
+    ? buildSourceLessonCountLine({ capMin, capMax, fidelity: sourceContext.fidelity, kind: 'refine' })
+    : `Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules). The current structure may be inside or outside this range; respect the cap unless the learner's CURRENT REQUEST below explicitly asks to expand beyond it.`;
 
   const humanMessage = `Learning goal: ${goal}
 
@@ -1004,7 +1584,7 @@ ${formatSoftnessSection(softness)}
 
 ${formatGoalTypeStructureSection(goalType)}
 
-Lesson-count target: ${capMin}-${capMax} total lessons (sum across all modules). The current structure may be inside or outside this range; respect the cap unless the learner's CURRENT REQUEST below explicitly asks to expand beyond it.
+${sourceSection ? `${sourceSection}\n\n` : ''}${lessonCountLine}
 
 ${currentDomain ? `Current course domain: ${currentDomain} — keep this domain unless the refinement genuinely changes the subject of the course.\n\n` : ''}--- CURRENT STRUCTURE (previously generated) ---
 ${currentStructureText}
@@ -1024,14 +1604,30 @@ Rules for refinement:
 - Update the reasoning fields to reflect the refined structure.
 - The result should feel like a thoughtful revision, not a complete regeneration.`;
 
-  const response = await withRetry(() =>
-    withCallTimeout((signal) =>
-      structuredModel.invoke(
-        [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(humanMessage)],
-        { metadata: { llmLabel: 'structure:refine' }, signal },
+  const invokeRefine = (human: string) =>
+    withRetry(() =>
+      withCallTimeout((signal) =>
+        structuredModel.invoke(
+          [cachedSystemMessage({ text: STRUCTURE_SYSTEM_PROMPT }), new HumanMessage(human)],
+          { metadata: { llmLabel: 'structure:refine' }, signal },
+        ),
       ),
-    ),
-  );
+    );
+
+  const response = await invokeRefine(humanMessage);
+
+  // Documents courses: same hard enforcement as generateCourseStructure —
+  // the design-chat modify_structure tool relies on the typed
+  // STRUCTURE_SIZE_VIOLATION to refuse ballooning refinements politely.
+  if (sourceContext) {
+    return enforceSourceLessonBand({
+      first: response,
+      capMin,
+      capMax,
+      label: 'structure:refine',
+      regenerate: (correction) => invokeRefine(`${humanMessage}\n\n${correction}`),
+    });
+  }
 
   return response;
 };

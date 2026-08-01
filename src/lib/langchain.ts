@@ -12,8 +12,16 @@ import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
 // a tier-dependent budget. Out of scope for the current audit pass.
 
 // ── Model IDs (centralized for easy version pinning) ──
+// Sonnet 5 migration (2026-08-01, wiki-strive/notes/WORKING/ai-upgrade/):
+//   • `temperature` is REJECTED by claude-sonnet-5 (400) — no Sonnet call
+//     site may set it. Haiku 4.5 still accepts it.
+//   • An omitted `thinking` param means adaptive-ON for Sonnet 5, so every
+//     Sonnet call sends an explicit `thinking: {type: 'disabled'}` (also
+//     valid on 4.6, keeping rollback a one-line revert of this constant).
+//   • The Sonnet 5 tokenizer emits ~1.36× (prose) – 1.44× (code) as many
+//     tokens as 4.6 for the same text — maxTokens carry matching headroom.
 export const MODEL_IDS = {
-  SONNET: 'claude-sonnet-4-6',
+  SONNET: 'claude-sonnet-5',
   HAIKU: 'claude-haiku-4-5',
 } as const;
 
@@ -35,9 +43,9 @@ export const MODEL_IDS = {
 // Clarify questions & depth previews — structured extraction with domain reasoning
 const clarifyModel = new ChatAnthropic({
   model: MODEL_IDS.SONNET,
-  temperature: 0.7,
   anthropicApiKey: ANTHROPIC_API_KEY,
-  maxTokens: 4096,
+  maxTokens: 6144,
+  thinking: { type: 'disabled' },
   clientOptions: { timeout: 60000 },
   callbacks: [makeLlmCacheCallback({ defaultLabel: 'clarify:generate', model: MODEL_IDS.SONNET })],
 });
@@ -45,32 +53,36 @@ const clarifyModel = new ChatAnthropic({
 // Structure generation — needs strong reasoning, long output, complex constraint adherence
 const structureModel = new ChatAnthropic({
   model: MODEL_IDS.SONNET,
-  temperature: 0.7,
   anthropicApiKey: ANTHROPIC_API_KEY,
-  maxTokens: 16384,
+  maxTokens: 24000,
+  thinking: { type: 'disabled' },
   clientOptions: { timeout: 600000 }, // 10 minutes
   callbacks: [makeLlmCacheCallback({ defaultLabel: 'structure:generate', model: MODEL_IDS.SONNET })],
 });
 
-// Lesson content generation — best long-form educational writing, slight creativity
+// Lesson content generation — best long-form educational writing
 const lessonModel = new ChatAnthropic({
   model: MODEL_IDS.SONNET,
-  temperature: 0.3,
   anthropicApiKey: ANTHROPIC_API_KEY,
-  maxTokens: 16384,
+  maxTokens: 24000,
+  thinking: { type: 'disabled' },
   clientOptions: { timeout: 600000 }, // 10 minutes
   callbacks: [makeLlmCacheCallback({ defaultLabel: 'lesson:content', model: MODEL_IDS.SONNET })],
 });
 
 // Quiz & exercise generation — needs strong reasoning for understanding-based questions.
-// Temp 0.6 gives retries enough divergence to escape repeated structured-output parse
-// failures (e.g. Anthropic stringifying nested arrays when it hits the same prompt at
-// low temp); lower values caused every retry to produce the same broken output.
+// ⚠ Pre-Sonnet-5 this ran temperature 0.6 so retries diverged instead of
+// repeating the same structured-output parse failure (Anthropic stringifying
+// nested arrays at low temp). Sonnet 5 rejects temperature entirely; we rely
+// on its stronger structured output. If the retry seesaw returns, watch
+// `interactive_sonnet_escalations_total` / `with_retry_total` and add a
+// retry-nonce line AFTER the cached prompt prefix rather than reintroducing
+// temperature. (Decision logged in wiki-strive/notes/WORKING/ai-upgrade/.)
 const interactiveModel = new ChatAnthropic({
   model: MODEL_IDS.SONNET,
-  temperature: 0.6,
   anthropicApiKey: ANTHROPIC_API_KEY,
-  maxTokens: 4096,
+  maxTokens: 6144,
+  thinking: { type: 'disabled' },
   clientOptions: { timeout: 120000 }, // 2 minutes (Sonnet is slower than Haiku)
   callbacks: [makeLlmCacheCallback({ defaultLabel: 'interactive', model: MODEL_IDS.SONNET })],
 });

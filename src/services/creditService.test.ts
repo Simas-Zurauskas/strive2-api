@@ -49,6 +49,9 @@ import {
 import { recordUsage } from '@services/usageService';
 import UsageEventModel from '@models/UsageEventModel';
 import * as errorReporter from '@lib/errorReporter';
+// `creditDebitExhausted` is an `export let` counter — the namespace object
+// gives a live binding, so the contention tests below can read it as a delta.
+import * as metrics from '@lib/metrics';
 
 setupTestDb();
 
@@ -307,19 +310,94 @@ describe('debitActualSpend', () => {
     expect(after?.credits.allowanceBalance).toBe(99);
   });
 
-  test('two concurrent debits on same user: both succeed via CAS retry', async () => {
-    const user = await seedUser({ allowance: 100 });
-    // Each costs 5 credits
-    await Promise.all([
-      debitInScope({ userId: user._id, microCents: 25_000 }),
-      debitInScope({ userId: user._id, microCents: 25_000 }),
-    ]);
+  // ── Contention on the CAS loop ────────────────────────
+  //
+  // These replace an earlier "two concurrent debits" test that could not fail:
+  // a 100-credit balance, two 5-credit debits and a 10-attempt retry loop
+  // cannot exhaust under any interleaving, so it passed on a correct CAS, a
+  // broken CAS and no CAS at all. The shape below follows
+  // `jobRunner.test.ts:186` — enough writers that contention is certain, and
+  // assertions on an *invariant* (the ledger reconciles to the balance
+  // movement; every call is accounted for) rather than a hardcoded total.
+  //
+  // Read the accounting identity as: each call either commits exactly one
+  // ledger row or loses all 10 retries and bumps `creditDebitExhausted`.
+  // There is no third outcome while the balance cannot reach zero.
+
+  const readOutcome = async (userId: mongoose.Types.ObjectId, startingBalance: number) => {
+    const after = await UserModel.findById(userId).lean();
+    const balanceAfter =
+      (after?.credits.allowanceBalance ?? 0) + (after?.credits.bonusBalance ?? 0);
+    const ledger = await CreditLedgerModel.find({ userId, reason: 'debit_action' }).lean();
+    return {
+      balanceAfter,
+      ledger,
+      ledgerSum: ledger.reduce((acc, row) => acc + row.delta, 0),
+      movement: startingBalance - balanceAfter,
+    };
+  };
+
+  test('8 concurrent debits: the ledger reconciles to the balance movement, every call accounted for', async () => {
+    const user = await seedUser({ allowance: 500 });
+    const exhaustedBefore = metrics.creditDebitExhausted;
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, () => debitInScope({ userId: user._id, microCents: 25_000 })),
+    );
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(0);
+
+    const { balanceAfter, ledger, ledgerSum, movement } = await readOutcome(user._id, 500);
+    const exhausted = metrics.creditDebitExhausted - exhaustedBefore;
+
+    expect(balanceAfter).toBeGreaterThanOrEqual(0);
+    expect(ledgerSum).toBe(-movement);
+    expect(ledger.length + exhausted).toBe(8);
+  });
+
+  test('contention at the clamp boundary: balance floors at 0 and NEVER goes negative', async () => {
+    // 3 credits available, four concurrent 5-credit debits. Exactly one writer
+    // can satisfy the `$gte` CAS filter; the rest find a zero balance and
+    // return. Drop the filter and this ends at −17 with four ledger rows.
+    const user = await seedUser({ allowance: 3 });
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 4 }, () => debitInScope({ userId: user._id, microCents: 25_000 })),
+    );
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(0);
 
     const after = await UserModel.findById(user._id).lean();
-    expect(after?.credits.allowanceBalance).toBe(90);
-    const ledger = await CreditLedgerModel.find({ userId: user._id }).lean();
-    expect(ledger).toHaveLength(2);
+    expect(after?.credits.allowanceBalance).toBe(0);
+    expect(after?.credits.bonusBalance).toBe(0);
+
+    const { ledger, ledgerSum, movement } = await readOutcome(user._id, 3);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].delta).toBe(-3); // clamped from 5, difference absorbed
+    expect(ledgerSum).toBe(-movement);
   });
+
+  test('20 concurrent writers: full reconciliation OR an exhausted-retry signal — never a torn state', async () => {
+    const user = await seedUser({ allowance: 500 });
+    const exhaustedBefore = metrics.creditDebitExhausted;
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 20 }, () => debitInScope({ userId: user._id, microCents: 25_000 })),
+    );
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(0);
+
+    const { balanceAfter, ledger, ledgerSum, movement } = await readOutcome(user._id, 500);
+    const exhausted = metrics.creditDebitExhausted - exhaustedBefore;
+
+    expect(balanceAfter).toBeGreaterThanOrEqual(0);
+    expect(ledgerSum).toBe(-movement);
+    expect(ledger.length + exhausted).toBe(20);
+
+    if (ledger.length < 20) {
+      // Losing under contention is acceptable (the user got free work); losing
+      // it SILENTLY is not — the operator signal must have fired.
+      expect(exhausted).toBeGreaterThan(0);
+      expect(errorReporter.captureWarning).toHaveBeenCalled();
+    }
+  }, 60_000);
 });
 
 // ── End-to-end: recordUsage → debitActualSpend under single-layer markup ──
@@ -357,8 +435,9 @@ describe('action-driven single-layer markup integration (recordUsage → debit)'
       await new Promise((r) => setTimeout(r, 5));
     }
 
-    // Charged = (10_000 × lesson) + (16_000 + 25_000 + 5_000 + 2_000) × other
-    const expectedCharged = 10_000 * lessonFactor + (16_000 + 25_000 + 5_000 + 2_000) * otherFactor;
+    // Charged = round(10_000 × lesson) + (16_000 + 25_000 + 5_000 + 2_000) × other
+    // (per-row rounding mirrors applyMarkup; lesson factor is non-integer)
+    const expectedCharged = Math.round(10_000 * lessonFactor) + (16_000 + 25_000 + 5_000 + 2_000) * otherFactor;
     const expectedCredits = Math.ceil(expectedCharged / 5_000);
 
     const after = await UserModel.findById(user._id).lean();
@@ -381,12 +460,15 @@ describe('action-driven single-layer markup integration (recordUsage → debit)'
       usageRows.map((r) => [r.action, (r as { chargedMicroCents?: number }).chargedMicroCents]),
     );
     // lesson:content is the only one at the lesson rate; everything else is `other`.
+    // Math.round mirrors applyMarkup's integer-ledger contract — since the
+    // 2026-08 Sonnet-5 markup cut the lesson factor is non-integer (4.73),
+    // so a bare float product carries FP artifacts the ledger never stores.
     expect(chargedByAction).toMatchObject({
-      'lesson:content': 10_000 * lessonFactor,
-      'lesson:links.plan': 16_000 * otherFactor,
-      'image:hero': 25_000 * otherFactor,
-      'reader:fetch': 5_000 * otherFactor,
-      'code:exec': 2_000 * otherFactor,
+      'lesson:content': Math.round(10_000 * lessonFactor),
+      'lesson:links.plan': Math.round(16_000 * otherFactor),
+      'image:hero': Math.round(25_000 * otherFactor),
+      'reader:fetch': Math.round(5_000 * otherFactor),
+      'code:exec': Math.round(2_000 * otherFactor),
     });
   });
 

@@ -6,6 +6,11 @@ build
 var
 videos
 scripts/debugOrchestrator/output
+# Generated document-set corpora (yarn debug:orchestrator:sets). Only the
+# generator + its README are tracked; the built files are disposable.
+scripts/debugOrchestrator/documentSets/*
+!scripts/debugOrchestrator/documentSets/generate-sample-sets.ts
+!scripts/debugOrchestrator/documentSets/README.md
 strive-454313-61c6760e0389.json
 *.pem
 *.key

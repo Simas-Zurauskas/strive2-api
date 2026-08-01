@@ -49,6 +49,24 @@ export const SENTRY_DSN =
 // scrapers.
 export const METRICS_TOKEN = process.env.METRICS_TOKEN;
 
+// Mail sender identities. Optional with the addresses in use today as
+// defaults, so an unset var is exactly current behaviour and no deploy is
+// blocked on setting them.
+//
+// They are env-configurable rather than hardcoded because of PLAN A7: at the
+// 1,000-user design target the promotional stream moves to a dedicated
+// marketing subdomain with its own SPF/DKIM, so a blast cannot damage the
+// deliverability of verification and password-reset mail. That is a Mailjet
+// console + DNS change, and it must not also require a code change — the two
+// streams have to be able to diverge on the operator's timetable.
+//
+// Whatever is set here must be a Mailjet-verified sender; an unverified
+// address fails the send at the API, not silently.
+export const SENDER_EMAIL_ACCOUNT =
+  process.env.SENDER_EMAIL_ACCOUNT || 'accounts@strive-learning.com';
+export const SENDER_EMAIL_PROMOTIONAL =
+  process.env.SENDER_EMAIL_PROMOTIONAL || 'hello@strive-learning.com';
+
 export const STRIPE_SECRET_KEY = getEnv('STRIPE_SECRET_KEY');
 export const STRIPE_WEBHOOK_SECRET = getEnv('STRIPE_WEBHOOK_SECRET');
 // Toggles Stripe's automatic tax computation + customer address collection at

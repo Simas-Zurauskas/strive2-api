@@ -123,6 +123,31 @@ test('maxSavingsVsTopup is non-negative (may be 0 under uniform $/credit)', () =
   assert.ok(maxSavingsVsTopup() >= 0);
 });
 
+// ── Sonnet 5 migration parity (2026-08-01) ──────────────────
+
+test('base-lesson credit debit matches the pre-Sonnet-5 price (79 allowance / 103 bonus)', () => {
+  // The whole point of the 2026-08 MARKUP.lesson cut (6/8 → 4.73/6.35) is
+  // that users keep paying exactly what a base lesson cost before the
+  // claude-sonnet-5 upgrade — the ~1.36× tokenizer increase is absorbed in
+  // margin. If either number drifts, a knob was edited without re-solving
+  // the parity equation. Pre-migration values:
+  //   allowance: ceil((60_000×6 + 17_000×2) / 5_000) = 79
+  //   bonus:     ceil((60_000×8 + 17_000×2) / 5_000) = 103
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCredits[0], 79);
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCredits[1], 79);
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCreditsTopup[0], 103);
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCreditsTopup[1], 103);
+});
+
+test('lesson markup differential still favors subscriptions after the Sonnet 5 cut', () => {
+  const { lesson } = PRICING_CONFIG.markup;
+  assert.ok(lesson.bonus > lesson.allowance, 'bonus lesson markup must stay > allowance');
+  // Ratio stays in the neighborhood of the original 8/6 ≈ 1.33 so the
+  // subscribe-to-save story is materially unchanged.
+  const ratio = lesson.bonus / lesson.allowance;
+  assert.ok(ratio > 1.25 && ratio < 1.45, `differential ratio ${ratio.toFixed(3)} drifted out of band`);
+});
+
 // ── Reference costs (UI approximations) ─────────────────────
 
 test('referenceCosts.lessonCredits has a positive [lo, hi] tuple with lo <= hi', () => {

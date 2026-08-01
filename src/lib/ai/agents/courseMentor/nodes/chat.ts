@@ -28,7 +28,10 @@ const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
  * NOT included: fetch_url (rare at this scope) and emit_handoff
  * (added in v2 — see api/src/lib/ai/agents/shared/emitHandoffTool.ts).
  */
-const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
+// Exported so the tool-parity test can assert this hand-written array
+// stays name-aligned with the LangChain TOOLS registry (the tool
+// duplication trap — both must be edited together).
+export const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: 'web_search',
     description:
@@ -78,6 +81,21 @@ const ANTHROPIC_TOOLS: Anthropic.Messages.Tool[] = [
           type: 'number',
           description:
             'Optional: restrict search to a specific module index. Omit to search the entire course.',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'search_user_documents',
+    description:
+      "Search the source documents the learner uploaded to create this course (their own PDFs, notes, slides, audio transcripts, article snapshots) via vector similarity. Use when the learner asks what THEIR material says, wants a claim checked against their documents, or references their uploaded files. Returns up to 5 ranked excerpts with document location. On courses not created from documents this returns an empty result — say so honestly.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'The natural-language question or concept to search for in the uploaded documents.',
         },
       },
       required: ['query'],

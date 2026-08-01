@@ -210,13 +210,20 @@ export const recordLinksCandidateCount = (count: number) => {
   linksCandidateCountObservations += 1;
 };
 
-export type LinksFetchFailureReason = 'timeout' | 'http_error' | 'ssrf_reject' | 'empty_body';
+/** `reserved` = refused by the robots.txt / TDM rights-reservation gate. */
+export type LinksFetchFailureReason =
+  | 'timeout'
+  | 'http_error'
+  | 'ssrf_reject'
+  | 'empty_body'
+  | 'reserved';
 
 const LINKS_FETCH_FAILURE_REASONS: LinksFetchFailureReason[] = [
   'timeout',
   'http_error',
   'ssrf_reject',
   'empty_body',
+  'reserved',
 ];
 
 export const linksFetchFailure: Record<LinksFetchFailureReason, number> = {
@@ -224,6 +231,7 @@ export const linksFetchFailure: Record<LinksFetchFailureReason, number> = {
   http_error: 0,
   ssrf_reject: 0,
   empty_body: 0,
+  reserved: 0,
 };
 
 export const bumpLinksFetchFailure = (reason: LinksFetchFailureReason) => {
@@ -413,6 +421,28 @@ export let depthOverrideAcknowledged = 0;
 export let depthUndercommitGateFired = 0;
 export let depthUndercommitAcknowledged = 0;
 
+// ── Documents-course lesson-count enforcement (FEEDBACK-1) ──
+// Unlike the advisory goal-course cap above, documents courses enforce the
+// band-derived lesson range post-parse: one corrective retry, a bounded
+// out-of-range acceptance window, then a typed job failure. Three distinct
+// counters so dashboards can chart retry rate vs. salvage rate vs. hard
+// failures independently.
+export let structureSourceBandRetried = 0;
+export let structureSourceBandAcceptedOutOfRange = 0;
+export let structureSourceBandFailed = 0;
+
+export const bumpStructureSourceBandRetried = () => {
+  structureSourceBandRetried += 1;
+};
+
+export const bumpStructureSourceBandAcceptedOutOfRange = () => {
+  structureSourceBandAcceptedOutOfRange += 1;
+};
+
+export const bumpStructureSourceBandFailed = () => {
+  structureSourceBandFailed += 1;
+};
+
 export const bumpStructureCapExceeded = () => {
   structureCapExceeded += 1;
 };
@@ -472,6 +502,22 @@ export const bumpLlmCallMetrics = ({
   bumpKey(llmCacheWriteTokensTotal, label, usage.cacheCreation);
   bumpKey(llmUncachedInputTokensTotal, label, usage.uncached);
   bumpKey(llmOutputTokensTotal, label, usage.output);
+};
+
+// ── Forced-tool output clamped to schema caps (per-label) ────
+//
+// Bumped by `lib/ai/modelOutputCaps.clampModelToolPayload` whenever a
+// model's tool payload came back over a Zod cap (an over-long string, an
+// over-count array) and was trimmed instead of failing the job. The clamp
+// keeps a paid job alive; the counter is how we SEE that it fired — a
+// rising rate means prompt drift (the model is ignoring an advertised
+// `maxLength`), which is a prompt problem to fix, not a healthy steady
+// state. Keyed by the call-site label already used for retries + usage
+// (`doc:assess`, `doc:digest-map`, `doc:digest-reduce`, `doc:adjudicate`).
+export const modelOutputClampedTotal: Record<string, number> = {};
+
+export const bumpModelOutputClamped = (label: string): void => {
+  bumpKey(modelOutputClampedTotal, label, 1);
 };
 
 // ── Event loop lag monitor ──────────────────────────────────
@@ -551,6 +597,18 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
       // defensive escaping keeps the Prometheus exposition format valid.
       const escaped = label.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       lines.push(`with_retry_total{label="${escaped}"} ${count}`);
+    }
+  }
+
+  // ── Forced-tool payloads clamped to schema caps (per-label) ──
+  if (Object.keys(modelOutputClampedTotal).length > 0) {
+    lines.push(
+      '# HELP model_output_clamped_total Forced-tool model payloads trimmed to their Zod caps (over-long string / over-count array) instead of failing the job, keyed by call-site label. A rising rate means prompt drift against an advertised maxLength',
+    );
+    lines.push('# TYPE model_output_clamped_total counter');
+    for (const [label, count] of Object.entries(modelOutputClampedTotal)) {
+      const escaped = label.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      lines.push(`model_output_clamped_total{label="${escaped}"} ${count}`);
     }
   }
 
@@ -762,6 +820,24 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
     'Times the structure generator produced more lessons than the (depth, soft)-derived capMax. Observation-only: cap is a prompt suggestion, not a hard rule',
     'counter',
     structureCapExceeded,
+  );
+  metric(
+    'structure_source_band_retried_total',
+    'Times a documents-course structure/refine output violated the band-derived lesson range and a corrective retry was issued',
+    'counter',
+    structureSourceBandRetried,
+  );
+  metric(
+    'structure_source_band_accepted_out_of_range_total',
+    'Times a documents-course structure was accepted OUTSIDE the band range but inside the tolerance window (≤1.25×max overrun / ≥min−1 under-run) after the corrective retry',
+    'counter',
+    structureSourceBandAcceptedOutOfRange,
+  );
+  metric(
+    'structure_source_band_failed_total',
+    'Times a documents-course structure job failed with STRUCTURE_SIZE_VIOLATION (both attempts outside the tolerance window)',
+    'counter',
+    structureSourceBandFailed,
   );
   metric(
     'depth_override_gate_fired_total',

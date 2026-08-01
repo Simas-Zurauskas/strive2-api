@@ -173,7 +173,9 @@ test('lesson:content on allowance charges MARKUP.lesson.allowance × vendor', as
     },
   });
   await new Promise((r) => setImmediate(r));
-  assert.equal(accumulator, 10_000 * factor, `lesson:content on allowance charges ${factor}× vendor`);
+  // Math.round mirrors applyMarkup's integer-ledger contract (lesson factor
+  // is non-integer since the 2026-08 Sonnet-5 markup cut).
+  assert.equal(accumulator, Math.round(10_000 * factor), `lesson:content on allowance charges ${factor}× vendor`);
 });
 
 test('lesson:content on bonus charges MARKUP.lesson.bonus × vendor (top-up tax)', async () => {
@@ -188,7 +190,7 @@ test('lesson:content on bonus charges MARKUP.lesson.bonus × vendor (top-up tax)
     },
   });
   await new Promise((r) => setImmediate(r));
-  assert.equal(accumulator, 10_000 * factor, `lesson:content on bonus charges ${factor}× vendor`);
+  assert.equal(accumulator, Math.round(10_000 * factor), `lesson:content on bonus charges ${factor}× vendor`);
 });
 
 test('supporting calls inside a lesson job bill at the OTHER rate, not the lesson rate', async () => {
@@ -217,7 +219,7 @@ test('supporting calls inside a lesson job bill at the OTHER rate, not the lesso
   assert.equal(byAction['lesson:recall'], 5_000 * otherFactor, 'lesson:recall → other rate');
   assert.equal(byAction['lesson:links.plan'], 3_000 * otherFactor, 'lesson:links.plan → other rate');
   assert.equal(byAction['search:basic'], 8_000 * otherFactor, 'search:basic → other rate');
-  assert.equal(byAction['lesson:content'], 60_000 * lessonFactor, 'lesson:content → lesson rate');
+  assert.equal(byAction['lesson:content'], Math.round(60_000 * lessonFactor), 'lesson:content → lesson rate');
 });
 
 test('mixed batch: accumulator sums each call at its own action-driven rate', async () => {
@@ -235,7 +237,8 @@ test('mixed batch: accumulator sums each call at its own action-driven rate', as
     },
   });
   await new Promise((r) => setImmediate(r));
-  const expected = 1_000 * lessonFactor + 2_000 * otherFactor + 5_000 * otherFactor;
+  // Per-row rounding mirrors applyMarkup (lesson factor is non-integer).
+  const expected = Math.round(1_000 * lessonFactor) + 2_000 * otherFactor + 5_000 * otherFactor;
   assert.equal(accumulator, expected);
   const vendorTotal = createdDocs.reduce<number>(
     (sum, d) => sum + ((d as Record<string, number>).costMicroCents ?? 0),

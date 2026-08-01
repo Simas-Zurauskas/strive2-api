@@ -119,6 +119,29 @@ const buildDepthRecommendationBlock = (state: {
   return lines.join('\n');
 };
 
+/**
+ * Render the Source-Grounded Course block for documents courses with a
+ * clamping size band (FEEDBACK-1). Pairs with modify_structure's band
+ * enforcement: the agent is told the allowed range up front so it explains
+ * the limit instead of attempting a change the tool will refuse. Empty
+ * string on goal courses and band-less doc courses.
+ */
+const buildSourceGroundingBlock = (state: {
+  sourceFidelity?: string;
+  sourceLessonRange?: [number, number];
+}): string => {
+  if (!state.sourceLessonRange) return '';
+  const [lo, hi] = state.sourceLessonRange;
+  return [
+    '',
+    '',
+    '## Source-Grounded Course',
+    `- This course is generated from the learner's uploaded documents (fidelity: ${state.sourceFidelity ?? 'guided'}).`,
+    `- Allowed total lesson range for this course: ${lo}-${hi} lessons — derived from the assessed substance of the documents. modify_structure ENFORCES this range and will refuse changes that push the total outside it.`,
+    '- Prefer consolidating, swapping, or deepening lessons over adding new ones. When the learner asks to grow the course beyond the range, explain the source-derived limit and offer an in-range alternative instead of attempting the change.',
+  ].join('\n');
+};
+
 const buildStructureSummary = (state: {
   goal?: string;
   depth?: string;
@@ -134,6 +157,8 @@ const buildStructureSummary = (state: {
   undercommitRationale?: string;
   recommendedLessonCountRange?: [number, number];
   recommendedHoursRange?: [number, number];
+  sourceFidelity?: string;
+  sourceLessonRange?: [number, number];
 }): string => {
   const modules = state.currentStructure?.modules ?? [];
   if (modules.length === 0) return '';
@@ -152,8 +177,9 @@ const buildStructureSummary = (state: {
     : '';
 
   const depthBlock = buildDepthRecommendationBlock(state);
+  const sourceBlock = buildSourceGroundingBlock(state);
 
-  return `\n\n## Current Course Context\n- Goal: ${state.goal ?? 'N/A'}\n- Depth: ${state.depth ?? 'N/A'}\n- Modules: ${modules.length}\n- Total lessons: ${totalLessons}${answersText}${depthBlock}\n\n${structureText}`;
+  return `\n\n## Current Course Context\n- Goal: ${state.goal ?? 'N/A'}\n- Depth: ${state.depth ?? 'N/A'}\n- Modules: ${modules.length}\n- Total lessons: ${totalLessons}${answersText}${depthBlock}${sourceBlock}\n\n${structureText}`;
 };
 
 export const chat: NodeFunction = async (state, config) => {
@@ -180,8 +206,10 @@ export const chat: NodeFunction = async (state, config) => {
   const stream = anthropic.messages.stream(
     {
       model: MODEL_IDS.SONNET,
-      max_tokens: 4096,
-      temperature: 0.7,
+      // Sonnet 5: no `temperature` (400); explicit thinking-off (omitted =
+      // adaptive-ON); +50% output headroom for the ~1.4× tokenizer.
+      max_tokens: 6144,
+      thinking: { type: 'disabled' },
       system: systemBlocks,
       messages: anthropicMessages,
       tools: ANTHROPIC_TOOLS,

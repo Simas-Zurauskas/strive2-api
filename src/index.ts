@@ -37,6 +37,7 @@ import { decodeAuthToken } from '@lib/auth';
 import { bumpRateLimitHit, renderMetrics } from '@lib/metrics';
 import { requestId } from '@middleware/requestId';
 import { jobLimit, startStuckJobWatchdog, stopStuckJobWatchdog } from '@services/jobRunner';
+import { startSourceDocumentOrphanSweep, stopSourceDocumentOrphanSweep } from '@services/courseCleanupService';
 import { getVersionInfo } from '@conf/versionInfo';
 import { printGraphImages } from '@lib/ai/agents/printGraphImages';
 import { lifecycleLog } from '@lib/loggers';
@@ -282,6 +283,14 @@ connectDB().then(() => {
     // the same `processing` rows. Starting it here also means tests can
     // import jobRunner without spawning a background timer.
     startStuckJobWatchdog();
+    // Boot-time pass + daily interval running BOTH source sweeps off one
+    // timer: (a) source documents abandoned on `creating` courses for 30+
+    // days (course-from-documents data hygiene), and (b) fetched URL
+    // snapshots past the retention window published in ToS §6.2 / Privacy
+    // §5 (90 days, 30 for press domains). Same idiom as the watchdog:
+    // unref'd timer, started only at boot so tests importing the service
+    // never spawn it.
+    startSourceDocumentOrphanSweep();
     // printGraphImages();
   });
 });
@@ -302,6 +311,7 @@ const gracefulShutdown = async (signal: string) => {
   // Stop the watchdog timer so a slow shutdown doesn't get a final tick that
   // would race our drain logic.
   stopStuckJobWatchdog();
+  stopSourceDocumentOrphanSweep();
 
   // Hard safety net: if anything below hangs (a driver op, a socket, a
   // background flush), kill the process anyway. `unref()` so the timer

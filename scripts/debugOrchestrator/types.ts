@@ -1,6 +1,8 @@
 import type { ICourse } from '@models/CourseModel';
-import type { CourseDepth, GoalType, GoalTypeConfidence, QuestionType } from '@lib/constants';
+import type { CourseDepth, GoalType, GoalTypeConfidence, QuestionType, SourceFidelity } from '@lib/constants';
 import type { RecallCardKind, RecallMode, RecallRating } from '@lib/recallConstants';
+import type { ClientSourceDocument } from '@services/sourceDocumentService';
+import type { SizeBand, PerDocumentAnalysis } from '@services/documentAssessment';
 
 // ── Persona (orchestrator-only) ──────────────────────────
 
@@ -86,6 +88,38 @@ export interface Persona {
    * Null on personas who would accept the classification as-is.
    */
   goalTypeOverrideTarget: GoalType | null;
+  /**
+   * Documents-mode extension (only set when the orchestrator runs with
+   * --documents). Describes how this persona relates to the document set
+   * they were generated to own: why they plausibly have these files, how
+   * tightly they'd want generation to follow them, and whether they'd
+   * accept or edit the AI-suggested goal on the analysis screen. Absent
+   * on goal-mode personas — the generator's output shape is unchanged
+   * there.
+   */
+  documentsProfile?: DocumentsPersonaProfile | null;
+}
+
+/**
+ * Docs-mode persona dimensions (see Persona.documentsProfile). Typed
+ * separately so the docs-mode persona schema and the courseFlow D4
+ * decision step share one contract.
+ */
+export interface DocumentsPersonaProfile {
+  /**
+   * 1-2 sentences: why THIS persona owns THIS document set (e.g.
+   * "collected these lecture notes over a semester of Bio 101"). Must be
+   * consistent with the set's filenames + previews.
+   */
+  ownershipStory: string;
+  /** Fidelity the persona is predicted to pick on the analysis screen. */
+  predictedFidelity: SourceFidelity;
+  /** One sentence: why that fidelity fits this persona's intent. */
+  predictedFidelityReasoning: string;
+  /** Whether they'd accept the AI-suggested goal verbatim or edit it. */
+  suggestedGoalStance: 'accept' | 'edit';
+  /** How they'd edit it (or why they'd accept it as-is). */
+  suggestedGoalStanceReasoning: string;
 }
 
 export interface OrchestratorConfig {
@@ -123,6 +157,19 @@ export interface OrchestratorConfig {
    * unbiased (the default — generator uses its own ≥5 coverage rule).
    */
   goalTypeDistribution: Partial<Record<GoalType, number>> | null;
+  /**
+   * Documents mode (--documents): personas build their course from an
+   * uploaded document set instead of a typed goal. The pipeline swaps
+   * Step 1 for create-shell → upload → ingest → analysis review →
+   * goal+fidelity PATCH, then rejoins the standard clarify → … flow.
+   */
+  documentsMode: boolean;
+  /**
+   * Per-persona document-set names, length === personaCount (a
+   * --document-set run repeats the one name). Null in goal mode.
+   * Resolved by resolveDocumentSetSelection in documentSets.ts.
+   */
+  documentSetNames: string[] | null;
 }
 
 export interface StepResult {
@@ -262,6 +309,9 @@ export type CourseData = Pick<
   | 'depthPreviews'
   | 'structure'
   | 'feedbackHistory'
+  | 'source'
+  | 'sourceFidelity'
+  | 'sourceAssessment'
 > & { _id: string };
 
 // Re-export for convenience
@@ -440,6 +490,88 @@ export interface LessonMentorRecord extends MentorChatProbeRecord {
   lessonIndex: number;
   moduleName: string;
   lessonName: string;
+}
+
+// ── Documents mode (orchestrator-only) ───────────────────
+//
+// Records for the docs-mode pipeline steps (D1–D8). Server shapes are
+// imported from the real modules (`ClientSourceDocument` mirrors GET
+// /documents rows; `SizeBand`/`PerDocumentAnalysis` mirror the persisted
+// `course.sourceAssessment`) so a server-side contract change surfaces
+// as a compile error here, not a silently-wrong report.
+
+/**
+ * The coarse SourceAnalysis persisted on `course.sourceAssessment` by the
+ * ingest job — the exact `toSourceAnalysis` projection from
+ * api/src/services/documentAssessment.ts (the model stores it as Mixed,
+ * so the orchestrator re-types it structurally on read).
+ */
+export interface SourceAnalysisView {
+  topics: string[];
+  sizeBand: SizeBand;
+  teachableDensity: number;
+  suggestedGoal: string;
+  questions: string[];
+  warnings: string[];
+  perDocument: PerDocumentAnalysis[];
+}
+
+/** One upload attempt (file or manifest URL) during docs-mode Step 1b. */
+export interface DocumentUploadRecord {
+  kind: 'file' | 'url';
+  /** Filename for files; the URL string for url-kind rows. */
+  name: string;
+  byteSize?: number;
+  outcome: 'accepted' | 'rejected';
+  /** Server error (status + body) when the upload was rejected. */
+  error?: string;
+  /** Server row on success — status/warnings surface in the report. */
+  document?: ClientSourceDocument;
+  durationMs: number;
+}
+
+/** Docs-mode Step 1d — the persona's analysis-screen decision. */
+export interface GoalFidelityRecord {
+  suggestedGoal: string;
+  acceptedSuggestedGoal: boolean;
+  finalGoal: string;
+  fidelity: SourceFidelity;
+  aiReasoning: string;
+  /** The generator's predicted stance, for prediction-vs-actual scoring. */
+  predictedStance: 'accept' | 'edit';
+  stanceMatchedPrediction: boolean;
+  predictedFidelity: SourceFidelity;
+  fidelityMatchedPrediction: boolean;
+  durationMs: number;
+}
+
+/** Docs-mode Step 5b — whether/why prepare_corpus fired. */
+export interface CorpusPreparationRecord {
+  needed: boolean;
+  /** Per-document predicate breakdown (name + reason string). */
+  perDocument: { name: string; needsPreparation: boolean; reason: string }[];
+  /** Job wall-clock (submit → poll complete). Only set when `needed`. */
+  jobMs?: number;
+}
+
+/** Docs-mode band-adherence check recorded after Step 6. */
+export interface BandAdherenceRecord {
+  depth: CourseDepth;
+  /** The picked tier's displayed lesson-count range (from depthPreviews). */
+  tierRange: [number, number] | null;
+  sourceTierNote: string | null;
+  sizeBand: SizeBand | null;
+  totalLessons: number;
+  /**
+   * in-band     — within the displayed tier range.
+   * tolerated   — exactly min−1 (the server's accepted band per FEEDBACK-1C).
+   * out-of-band — outside both.
+   * n-a         — no tier range was displayed (preview lacked the field).
+   */
+  verdict: 'in-band' | 'tolerated' | 'out-of-band' | 'n-a';
+  groundedLessons: number;
+  supplementedLessons: number;
+  perLesson: { moduleIndex: number; lessonIndex: number; name: string; sourceRefsCount: number }[];
 }
 
 // ── Recall review (orchestrator-only) ───────────────────

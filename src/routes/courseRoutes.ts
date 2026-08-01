@@ -47,6 +47,12 @@ import {
   courseMentorChatController,
   getCourseMentorHistoryController,
   clearCourseMentorController,
+  uploadDocumentController,
+  addUrlDocumentController,
+  listDocumentsController,
+  deleteDocumentController,
+  ingestDocumentsController,
+  prepareCorpusController,
 } from '@controlers/course';
 import { ENVIRONMENT } from '@conf/env';
 import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
@@ -58,6 +64,10 @@ import {
   attachmentUpload,
   handleAttachmentUploadErrors,
 } from '@middleware/attachmentUpload';
+import {
+  documentUpload,
+  handleDocumentUploadErrors,
+} from '@middleware/documentUpload';
 
 const router = Router();
 
@@ -137,6 +147,38 @@ router.post(
   handleAttachmentUploadErrors,
   lessonAttachController,
 );
+
+// Course-from-documents source documents. Same multer + 4-arg error
+// translator shape as the attachment route above, but a separate
+// middleware instance (50 MB cap, document allowlist, typed AppErrors).
+// No requireCredits() — upload/list/delete are free; the debited work
+// (ingest and beyond) is gated on its own routes in later phases.
+// `/documents/url` is registered before `/documents/:documentId` so the
+// static segment can never be captured as a documentId.
+router.post(
+  '/:courseId/documents',
+  documentUpload,
+  handleDocumentUploadErrors,
+  uploadDocumentController,
+);
+router.post('/:courseId/documents/url', addUrlDocumentController);
+// Static `/documents/ingest` registered before the parameterized
+// `/documents/:documentId` below (static-before-param rule). Credit-gated:
+// ingest itself is free (no debit — PLAN §3.4) but the pre-flight
+// "balance ≥ 1 credit" gate applies like every generation entry point.
+router.post('/:courseId/documents/ingest', requireCredits(), ingestDocumentsController);
+router.get('/:courseId/documents', listDocumentsController);
+router.delete(
+  '/:courseId/documents/:documentId',
+  validateObjectId('documentId'),
+  deleteDocumentController,
+);
+// Debited corpus-preparation pass (Phase 5): full vision escalation +
+// full audio transcription before structure generation. `prepare-corpus`
+// is a static segment directly under `/:courseId` — no parameterized
+// sibling exists at that position, but it's registered with the other
+// document routes for locality. Credit-gated like every generation entry.
+router.post('/:courseId/prepare-corpus', requireCredits(), prepareCorpusController);
 
 // Course-scoped mentor (compass) — sits on the course-overview surface
 // and helps with between-lessons decisions, cross-module synthesis, and

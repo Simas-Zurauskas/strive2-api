@@ -1,13 +1,14 @@
 import asyncHandler from 'express-async-handler';
 import { updateCourseSchema } from './validation';
+import { AppError } from '@middleware/errorMiddleware';
 import { updateCourse, getUserCourseLean, omitServerOnlyCourseFields } from '@services/courseDbService';
+import { detectSoftnessHint, detectFinishPressure } from '@services/softness';
 import {
-  detectSoftnessHint,
-  detectFinishPressure,
-  getLessonCountHint,
-  getEstimatedHoursRange,
-} from '@services/softness';
-import { OVERCOMMIT_RISK_LEVELS, UNDERCOMMIT_RISK_LEVELS } from '@services/courseService';
+  OVERCOMMIT_RISK_LEVELS,
+  UNDERCOMMIT_RISK_LEVELS,
+  extractSourceSizeBand,
+  getTierScope,
+} from '@services/courseService';
 import { COURSE_DEPTHS, CourseDepth } from '@lib/constants';
 import {
   bumpDepthOverrideGateFired,
@@ -96,6 +97,13 @@ const formatAnswersForSoftness = (
  *                   DEPTH_OVERRIDE_REQUIRES_ACK response to confirm the
  *                   learner has seen the course-magnitude modal and chooses
  *                   to proceed with the selected depth. Never persisted.
+ *               sourceFidelity:
+ *                 $ref: '#/components/schemas/SourceFidelity'
+ *                 description: >
+ *                   Course-from-documents fidelity dial — how tightly
+ *                   generation sticks to the uploaded material. Only
+ *                   accepted on courses with source documents; a 400 is
+ *                   returned when set on a goal-based course.
  *     responses:
  *       200:
  *         content:
@@ -144,6 +152,16 @@ export const updateCourseController = asyncHandler(async (req, res) => {
       res.status(403).json({ message: 'Cannot edit an accepted course. Course structure is locked once accepted.' });
       return;
     }
+  }
+
+  // Guard: the fidelity dial only exists on course-from-documents rows.
+  // On a goal-based course the field is meaningless — reject rather than
+  // silently persisting dead state.
+  if (updates.sourceFidelity !== undefined && resolved.source !== 'documents') {
+    throw new AppError('sourceFidelity can only be set on a course created from documents.', {
+      errorCode: 'CUSTOM_ERROR',
+      statusCode: 400,
+    });
   }
 
   // Diagnostic: log every PATCH that touches `depth`, BEFORE the gate's
@@ -245,8 +263,18 @@ export const updateCourseController = asyncHandler(async (req, res) => {
     // Compute the lesson + hours range under the SELECTED depth + soft-band
     // — what the dialog would show. Computed unconditionally so the audit
     // log includes "what the user would have seen" even on silent passes.
-    const [minLessons, maxLessons] = getLessonCountHint({ depth: updates.depth, isSoft: useSoftBand });
-    const [minHours, maxHours] = getEstimatedHoursRange({ depth: updates.depth, isSoft: useSoftBand });
+    //
+    // FEEDBACK-1: documents courses use THE shared tier-scope function, so
+    // the gate quotes the SAME band-clamped numbers the preview cards
+    // showed (a band of [3,6] must never produce a dialog citing "18–28
+    // lessons"), and `isLargeCourse` evaluates the clamped max — with all
+    // tiers inside a small band the gates rarely/never fire for doc
+    // courses, which is the coherent outcome. Goal courses (sizeBand
+    // null) get the identical pre-feature ranges.
+    const sizeBand = extractSourceSizeBand(resolved);
+    const selectedScope = getTierScope({ depth: updates.depth, isSoft: useSoftBand, sizeBand });
+    const [minLessons, maxLessons] = selectedScope.lessonCountRange;
+    const [minHours, maxHours] = selectedScope.estimatedHoursRange;
     const isLargeCourse = maxLessons > 15;
 
     // `isLargeCourse` (selected depth produces >15 lessons) only counts
@@ -273,13 +301,11 @@ export const updateCourseController = asyncHandler(async (req, res) => {
     // "what you would have gotten with the recommended tier". Computed
     // only when we have a recommendation to compare against; nullish
     // otherwise. Same useSoftBand applied for consistency.
-    const recommendedRanges =
-      recommended !== undefined
-        ? {
-            lessons: getLessonCountHint({ depth: recommended, isSoft: useSoftBand }),
-            hours: getEstimatedHoursRange({ depth: recommended, isSoft: useSoftBand }),
-          }
-        : null;
+    const recommendedRanges = (() => {
+      if (recommended === undefined) return null;
+      const scope = getTierScope({ depth: recommended, isSoft: useSoftBand, sizeBand });
+      return { lessons: scope.lessonCountRange, hours: scope.estimatedHoursRange };
+    })();
 
     // ── Rationale extraction (truncated for log; full for dialog) ──
     const rawOvercommitRationale = (resolved.depthPreviews as { overcommitRationale?: unknown } | null)

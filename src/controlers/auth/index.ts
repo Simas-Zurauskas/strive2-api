@@ -16,5 +16,6 @@ export * from './securityActions';
 export * from './refresh';
 export * from './getMarketingPreference';
 export * from './updateMarketingPreference';
+export * from './unsubscribeMarketing';
 export * from './recordConsent';
 export * from './recordAttribution';

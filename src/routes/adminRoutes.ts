@@ -1,12 +1,9 @@
 import { Router } from 'express';
 import {
   sendPromotionalTestEmailController,
-  listRelaunchRecipientsController,
-  sendRelaunchBatchController,
-  addRelaunchRecipientController,
-  deleteRelaunchRecipientController,
-  updateRelaunchRecipientGrantController,
-  updateRelaunchRecipientPayingController,
+  sendMarketingCampaignController,
+  listMarketingCampaignClaimsController,
+  reclaimMarketingCampaignClaimsController,
 } from '@controlers/admin';
 import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
 
@@ -25,12 +22,11 @@ router.use(protect, requireVerified, requireAdmin);
 // ── Email ────────────────────────────────────────────────
 router.post('/email/send-promotional-test', sendPromotionalTestEmailController);
 
-// ── Old-user relaunch campaign ──────────────────────────
-router.get('/relaunch/recipients', listRelaunchRecipientsController);
-router.post('/relaunch/recipients', addRelaunchRecipientController);
-router.delete('/relaunch/recipients', deleteRelaunchRecipientController);
-router.post('/relaunch/send', sendRelaunchBatchController);
-router.patch('/relaunch/recipients/grant', updateRelaunchRecipientGrantController);
-router.patch('/relaunch/recipients/paying', updateRelaunchRecipientPayingController);
+// ── Promotional campaigns ───────────────────────────────
+// Batch send + the stranded-claim recovery pair. All three inherit the
+// router-level `protect → requireVerified → requireAdmin` gate above.
+router.post('/marketing/send', sendMarketingCampaignController);
+router.get('/marketing/claims', listMarketingCampaignClaimsController);
+router.post('/marketing/reclaim', reclaimMarketingCampaignClaimsController);
 
 export { router as adminRoutes };
