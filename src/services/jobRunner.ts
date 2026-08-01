@@ -12,8 +12,11 @@ import { contextLoad, imageGeneration, linksGeneration, minSummaryCharsForDepth,
 import type { LessonState } from '@lib/ai/agents/lessonGeneration/state';
 import { quizGenerationAgent } from '@lib/ai/agents/quizGeneration';
 import ModuleQuizContentModel from '@models/ModuleQuizContentModel';
-import { clarifyCourse, classifyGoalType, generateCourseStructure, refineCourseStructure, generateDepthPreviews, isThinFreeText } from './courseService';
+import { buildCourseSourceContext, clarifyCourse, classifyGoalType, filterStructureSourceRefs, generateCourseStructure, refineCourseStructure, generateDepthPreviews, isThinFreeText } from './courseService';
 import { cleanupCourseContent } from './courseCleanupService';
+import { runIngestDocuments } from './documentIngestService';
+import { runPrepareCorpus } from './corpusPreparationService';
+import SourceDocumentChunkModel from '@models/SourceDocumentChunkModel';
 import { GeneratedRecallCard, persistLessonRecallCards } from './recallContentService';
 import { deleteByPrefix } from './s3Service';
 import { jobEvents } from './jobEvents';
@@ -236,7 +239,21 @@ export const submitJob = async (params: SubmitJobParams): Promise<string> => {
 
 // ── Execute (core job logic) ──────────────────────────────
 
-const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: string; userId: string; courseId: string; type: string; metadata?: Record<string, unknown> | null }): Promise<void> => {
+// Exported for job-level tests and the debug harness (scripts/debugIngest);
+// the production entry point is `submitJob` → `processJob`.
+//
+// `type` is `JobType`, NOT `string`. That is what makes a new `JOB_TYPES`
+// member with no `case` below a COMPILE error (via the `never` assertion in
+// `default`) rather than a runtime throw discovered by the first real user.
+// `JobModel.ts` already declares `type: JobType`, so `processJob`'s call site
+// needs no cast — if this ever appears to need `as JobType`, something else
+// changed and the compile-time guarantee has become theatre.
+//
+// Caveat, stated so nobody over-claims: `scripts/` is outside both
+// `tsconfig.json`'s and `tsconfig.build.json`'s `include`, so the second call
+// site (`scripts/debugIngest/index.ts`) is checked by no type gate. Its
+// literal is `'ingest_documents'`, a valid member, verified by hand.
+export const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: string; userId: string; courseId: string; type: JobType; metadata?: Record<string, unknown> | null }): Promise<void> => {
   // Read-only — every downstream mutation goes through `findByIdAndUpdate`
   // by id, never via `course.save()`. `.lean()` cuts hydration overhead on
   // a doc that can be very large (full structure with hundreds of lessons)
@@ -257,7 +274,14 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         ? { goalType: course.goalType!, confidence: 'high' as const, noun: course.clarifyData?.goalTypeNoun ?? course.goal.slice(0, 60) }
         : await classifyGoalType({ goal: course.goal });
 
-      const result = await clarifyCourse({ goal: course.goal, goalType: classification.goalType });
+      // `sourceContext` is null on goal courses (byte-identical prompts,
+      // pinned) and carries the digest/size-band/fidelity on documents
+      // courses (PLAN §3.1 step 5 — clarify sees the digest).
+      const result = await clarifyCourse({
+        goal: course.goal,
+        goalType: classification.goalType,
+        sourceContext: buildCourseSourceContext(course),
+      });
 
       await CourseModel.findByIdAndUpdate(courseId, {
         clarifyData: { ...result, goalTypeNoun: classification.noun },
@@ -278,17 +302,30 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
     }
     case 'generate_structure': {
       await cleanupCourseContent(courseId);
+      const sourceContext = buildCourseSourceContext(course);
       const result = await generateCourseStructure({
         goal: course.goal,
         answers: formatCourseAnswers(course),
         depth: course.depth as CourseDepth,
         goalType: course.goalType ?? 'master',
+        sourceContext,
       });
+      // Documents courses: model-emitted `sourceRefs` are validated against
+      // the REAL chunk vectorIds of this course before persisting — an
+      // invented id must never be stored as provenance (ai-features §4.4).
+      // Goal courses skip both the Mongo distinct and the filter entirely
+      // (the goal-course schema strips the field at parse time anyway).
+      const modules = sourceContext
+        ? filterStructureSourceRefs(
+            result.modules,
+            new Set<string>(await SourceDocumentChunkModel.distinct('vectorId', { courseId: course._id })),
+          )
+        : result.modules;
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
         slug: await generateUniqueSlug({ userId: course.userId.toString(), name: result.courseName }),
         domain: result.domain,
-        structure: { reasoning: result.reasoning, modules: result.modules },
+        structure: { reasoning: result.reasoning, modules },
         feedbackHistory: [],
       });
       // Generate the design-chat opening prompts AFTER the structure is
@@ -304,6 +341,7 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
     case 'refine_structure': {
       await cleanupCourseContent(courseId);
       const feedback = course.pendingFeedback ?? '';
+      const sourceContext = buildCourseSourceContext(course);
       const result = await refineCourseStructure({
         goal: course.goal,
         answers: formatCourseAnswers(course),
@@ -315,12 +353,21 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         currentDomain: course.domain ?? null,
         feedback,
         feedbackHistory: course.feedbackHistory,
+        sourceContext,
       });
+      // Same sourceRefs validation as generate_structure (never persist ids
+      // the model invented); goal courses skip the query + filter.
+      const modules = sourceContext
+        ? filterStructureSourceRefs(
+            result.modules,
+            new Set<string>(await SourceDocumentChunkModel.distinct('vectorId', { courseId: course._id })),
+          )
+        : result.modules;
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
         slug: await generateUniqueSlug({ userId: course.userId.toString(), name: result.courseName }),
         domain: result.domain,
-        structure: { reasoning: result.reasoning, modules: result.modules },
+        structure: { reasoning: result.reasoning, modules },
         feedbackHistory: [...course.feedbackHistory, feedback],
         pendingFeedback: null,
       });
@@ -443,6 +490,10 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
             includeImage,
             includeLinks,
             includeRecallCards,
+            // Documents-course grounding inputs — null on goal courses, in
+            // which case contextLoad skips retrieval entirely (pinned path).
+            source: course.source ?? null,
+            sourceFidelity: course.sourceFidelity ?? null,
           },
           {
             streamMode: 'updates',
@@ -650,6 +701,9 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       const result = await generateDepthPreviews({
         goal: course.goal,
         answers: formatCourseAnswers(course),
+        // Documents courses: previews see the digest and per-tier lesson
+        // counts are clamped to the assessed size band. Null on goal courses.
+        sourceContext: buildCourseSourceContext(course),
       });
       await CourseModel.findByIdAndUpdate(courseId, { depthPreviews: result });
       return;
@@ -722,6 +776,8 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         lessonIndex,
         includeImage: true,
         includeLinks: false,
+        source: course.source ?? null,
+        sourceFidelity: course.sourceFidelity ?? null,
       };
       const derived = await contextLoad(baseState as unknown as LessonState);
       const state = { ...baseState, ...derived } as LessonState;
@@ -758,6 +814,8 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         includeImage: false,
         includeLinks: true,
         contentSummary: lessonContent.summary ?? '',
+        source: course.source ?? null,
+        sourceFidelity: course.sourceFidelity ?? null,
       };
       const derived = await contextLoad(baseState as unknown as LessonState);
       const state = { ...baseState, ...derived } as LessonState;
@@ -812,6 +870,8 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
         includeRecallCards: true,
         contentBlocks: lessonContent.blocks,
         contentSummary: lessonContent.summary ?? '',
+        source: course.source ?? null,
+        sourceFidelity: course.sourceFidelity ?? null,
       };
       const derived = await contextLoad(baseState as unknown as LessonState);
       const state = { ...baseState, ...derived } as LessonState;
@@ -865,14 +925,61 @@ const executeJob = async ({ jobId, userId, courseId, type, metadata }: { jobId: 
       });
       return;
     }
-    default:
-      throw new Error(`Unknown job type: ${type}`);
+    case 'ingest_documents': {
+      // Course-from-documents free ingest pass (PLAN §3.1 step 3). The
+      // heavy lifting lives in documentIngestService (the lesson_narration
+      // delegation idiom); per-document progress reaches the client as
+      // `document_status` variants on the same jobEvents 'progress'
+      // channel generate_lesson uses — no lesson coords, type-discriminated
+      // on `event.type`. Heartbeats come from processJob's interval (this
+      // is a non-streaming job type in the trackingWriter sense).
+      if (course.source !== 'documents') {
+        throw new Error('Document ingest is only available for courses created from documents');
+      }
+      const emitProgress = (event: LessonProgressEvent) => {
+        jobEvents.emit('progress', { jobId, userId, courseId, type: 'ingest_documents', event });
+      };
+      await runIngestDocuments({ courseId, userId, emitProgress });
+      return;
+    }
+    case 'prepare_corpus': {
+      // Debited corpus-completion pass (PLAN §3.1 step 5, §3.4): full
+      // vision escalation of unescalated scanned pages + full audio
+      // transcription beyond the triage window, with moderation BEFORE any
+      // chunk/embed/digest-merge. Thin case — the body lives in
+      // corpusPreparationService (the ingest_documents delegation idiom).
+      // This type takes the NORMAL debit path in processJob (only
+      // ingest_documents is exempt), so a successful run charges the real
+      // accumulated spend and a failed run charges nothing.
+      if (course.source !== 'documents') {
+        throw new Error('Corpus preparation is only available for courses created from documents');
+      }
+      const emitProgress = (event: LessonProgressEvent) => {
+        jobEvents.emit('progress', { jobId, userId, courseId, type: 'prepare_corpus', event });
+      };
+      await runPrepareCorpus({ courseId, userId, emitProgress });
+      return;
+    }
+    default: {
+      // Exhaustiveness brace. Every `JOB_TYPES` member has a `case` above, so
+      // TypeScript narrows `type` to `never` here. Add a member without a
+      // `case` and this assignment fails to compile — the error lands on the
+      // developer's machine, before any test runs.
+      const unhandled: never = type;
+      // The runtime throw STAYS. A Job row written by an older deploy, by a
+      // migration, or by hand can still carry a string that is not in the
+      // current union, and that must fail loudly rather than fall through as
+      // a silent no-op job that reports "completed".
+      throw new Error(`Unknown job type: ${String(unhandled)}`);
+    }
   }
 };
 
 // ── Process ────────────────────────────────────────────────
 
-const processJob = async (jobId: string): Promise<void> => {
+// Exported for job-level tests (the no-debit branch below is unreachable
+// through `executeJob` alone); the production entry point is `submitJob`.
+export const processJob = async (jobId: string): Promise<void> => {
   const job = await JobModel.findById(jobId);
   if (!job) {
     jobLog.warn(`processJob:vanished jobId=${jobId} — job document missing at dequeue`);
@@ -1011,11 +1118,21 @@ const processJob = async (jobId: string): Promise<void> => {
         jobTimeout({ ms: JOB_TIMEOUT_MS, jobId }),
       ]);
       // On success only — failure throws above and skips this block.
-      await debitActualSpend({
-        userId: job.userId,
-        jobId: job._id,
-        jobType: job.type,
-      }).catch(bgError('jobRunner.debitOnSuccess'));
+      //
+      // PLAN §3.4 (no-debit rule): the `ingest_documents` pass is FREE by
+      // policy — its vendor spend is still recorded to UsageEvent through
+      // this scope (recordUsage ran for every paid call above; that is why
+      // ingest still executes inside runInUsageContext), but nothing is
+      // debited from the user's balance. Abuse is bounded by the A9 caps
+      // and the no-verbatim rule (A10), not by billing. Every other job
+      // type debits its real accumulated spend here.
+      if (job.type !== 'ingest_documents') {
+        await debitActualSpend({
+          userId: job.userId,
+          jobId: job._id,
+          jobType: job.type,
+        }).catch(bgError('jobRunner.debitOnSuccess'));
+      }
     });
     status = 'completed';
     jobLog.info(`${job.type}:done jobId=${jobId} ms=${Date.now() - startedAt}`);

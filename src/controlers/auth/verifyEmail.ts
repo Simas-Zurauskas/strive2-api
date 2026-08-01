@@ -1,8 +1,11 @@
 import UserModel from '@models/UserModel';
+import MarketingContactModel from '@models/MarketingContactModel';
 import { hashVerificationToken } from '@lib/auth';
 import { AppError } from '@middleware/errorMiddleware';
 import asyncHandler from 'express-async-handler';
 import { analytics } from '@lib/analytics';
+import { MARKETING_EVIDENCE } from '@lib/constants';
+import { bgError } from '@lib/bg';
 import { verifyEmailSchema } from './validation';
 
 /**
@@ -95,6 +98,38 @@ export const verifyEmailController = asyncHandler(async (req, res) => {
   user.emailVerificationToken = undefined;
   user.emailVerificationExpiry = undefined;
   await user.save();
+
+  // Enrol the freshly-verified address in the marketing audience (PLAN
+  // A4/F15). "Emailable by default" is established by the at-collection
+  // notice under the sign-up button, not by a pre-ticked box — so the basis
+  // recorded here is `soft_opt_in` against that notice's version, never
+  // `consent`. Only the profile toggle may write `consent`.
+  //
+  // `$setOnInsert` only: if a row already exists it is left exactly as it
+  // is, so a returning address that previously opted out is NOT resurrected
+  // (PLAN A2b). Nothing here touches Mailjet, so `addforce` — the action
+  // that clears an unsubscribe flag — is unreachable from this path.
+  //
+  // Best-effort: a ledger blip must never fail an email verification, which
+  // is the user's route into the product.
+  try {
+    await MarketingContactModel.updateOne(
+      { email: user.email },
+      {
+        $setOnInsert: {
+          userId: user._id,
+          email: user.email,
+          basis: 'soft_opt_in',
+          source: 'signup',
+          evidence: MARKETING_EVIDENCE.SIGNUP_NOTICE,
+          optedOut: false,
+        },
+      },
+      { upsert: true },
+    );
+  } catch (err) {
+    bgError('marketingContact.upsertOnVerify')(err);
+  }
 
   const userId = user._id.toString();
   const createdAtMs = user.createdAt instanceof Date ? user.createdAt.getTime() : null;

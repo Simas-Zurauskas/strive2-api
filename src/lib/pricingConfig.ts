@@ -52,9 +52,20 @@ const TOPUP = {
 // KNOB 5 — markup table. Charged cost = vendor cost × MARKUP[category][bucket].
 // Read by lib/pricing.ts:applyMarkup and by REFERENCE_COSTS below — editing
 // here cascades to every "≈ N lessons" chip and every paid debit.
+//
+// 2026-08-01 (Sonnet 5 migration): lesson row cut 6/8 → 4.73/6.35 so the
+// per-lesson credit debit stays at the pre-migration 79 (allowance) / 103
+// (bonus) — the ~1.36× tokenizer cost increase is absorbed in margin, not
+// passed to users (owner decision; see
+// wiki-strive/notes/WORKING/ai-upgrade/PROGRESS.md). Values solve
+//   ceil((content×M + supporting×2) / 5_000) = 79 resp. 103
+// against the measured vendor costs in BASE_VENDOR_COSTS below. The
+// allowance/bonus differential ratio (~1.34) preserves subscribe-to-save.
+// `other` stays 2/2 deliberately: Haiku-driven actions got no costlier, so
+// cutting it would be a pure margin giveaway.
 const MARKUP: Record<'other' | 'lesson', Record<'allowance' | 'bonus', number>> = {
   other: { allowance: 2, bonus: 2 },
-  lesson: { allowance: 6, bonus: 8 },
+  lesson: { allowance: 4.73, bonus: 6.35 },
 };
 
 // Markup is action-driven, not scope-driven. Only `lesson:content` (the Sonnet
@@ -75,14 +86,26 @@ const BASE_VENDOR_COSTS_MICROCENTS = {
   // excluded from the UI "≈ N lessons" estimate. Split because action-driven
   // markup applies different factors:
   //   baseLessonContent    → lesson:content Sonnet call → lesson markup
-  //   baseLessonSupporting → validation/links/RAG/embed → other markup
-  baseLessonContent: 60_000,
-  baseLessonSupporting: 17_000,
+  //   baseLessonSupporting → interactive/validation/RAG/embed → other markup
+  //
+  // Recalibrated 2026-08-01 for claude-sonnet-5 (~1.36× tokenizer):
+  //   baseLessonContent 60_000 → 74_000 — measured 73,871 μ¢/lesson avg
+  //     over a live 2-lesson debug:orchestrator run (mixed cold/warm cache).
+  //   baseLessonSupporting 17_000 → 22_000 — scaled ~1.3× for the Sonnet
+  //     share; deliberately NOT calibrated to the measured run, which hit
+  //     an anomalous 2/2 interactive Haiku→Sonnet escalation (watch
+  //     `interactive_sonnet_escalations_total`; recalibrate if the real
+  //     rate stays >~20%).
+  baseLessonContent: 74_000,
+  baseLessonSupporting: 22_000,
   recallExtraction_lo: 3_000,
   recallExtraction_hi: 6_000,
-  // Course clarify + structure: wide range covers retry storms.
-  courseStructure_lo: 15_000,
-  courseStructure_hi: 60_000,
+  // Course clarify + structure: wide range covers retry storms. Rebased
+  // 2026-08-01: a comprehensive-depth run measured 97k (structure) + 25k
+  // (depth previews, both Sonnet 5) + ~7k clarify Haiku ≈ 130k — the old
+  // 60k hi was stale even before the tokenizer change.
+  courseStructure_lo: 25_000,
+  courseStructure_hi: 130_000,
   moduleQuiz_lo: 13_000,
   moduleQuiz_hi: 20_000,
   mentorTurn_lo: 1_000,
@@ -141,7 +164,7 @@ const REFERENCE_COSTS = {
 // KNOB 7 — pricing version stamped onto every UsageEvent and CreditLedger row
 // for historical billing audits. Bump on any MARKUP / ALLOWANCE / PLAN_PRICING
 // / TOPUP change. Format YYYY-MM-DD with optional `-vN` suffix; increment-only.
-const PRICING_VERSION = '2026-05-12';
+const PRICING_VERSION = '2026-08-01';
 
 // KNOB 8 — Free tier allowance refresh cadence. Paid tiers refresh on their
 // Stripe billing cycle and ignore this.

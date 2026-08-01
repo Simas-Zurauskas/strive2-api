@@ -1,5 +1,6 @@
 import { FRONTEND_URL } from '@conf/env';
 import { renderEmail, type RenderedEmail } from './render';
+import { brand } from './tokens';
 
 // Template builders. Each returns the full payload Mailjet needs (subject +
 // html + text), keeping `services/emailService.ts` purely a transport. The
@@ -15,7 +16,7 @@ export type SecurityActionKind = 'set_password' | 'change_password' | 'delete_ac
 // directly off this type. Transactional templates (verification, reset,
 // security codes) are NOT listed here — they're not user-targetable from
 // the admin surface.
-export type PromotionalTemplateKey = 'old_user_relaunch' | 'old_paying_user_thanks';
+export type PromotionalTemplateKey = 'documents_feature';
 
 const SECURITY_ACTION_COPY: Record<
   SecurityActionKind,
@@ -130,99 +131,96 @@ export const buildSecurityActionCodeEmail = (params: {
 //      sender, so opt-out / bounce / spam metrics on the marketing stream
 //      don't damage the verification-mail sender reputation.
 
-export const buildOldUserRelaunchEmail = (): EmailPayload => {
-  return {
-    // Subject pairs a wistful "miss you" beat ("It's been a while.") with the
-    // news ("We rebuilt Strive."). Wistful subject lines convert best on
-    // win-back per industry benchmarks; the headline carries arrival energy
-    // separately so subject + headline don't duplicate inbox real estate.
-    subject: "It's been a while. We rebuilt Strive.",
-    ...renderEmail({
-      // Preheader is the only pre-open real estate. Three short
-      // reader-facing sentences (not engineering bullets) so the snippet
-      // reads as benefit, not spec-sheet.
-      preheader: "Personalized courses. An AI mentor on every lesson. Daily review that catches what you're about to forget.",
-      title: 'The new Strive is here',
-      body: [
-        { type: 'eyebrow', text: 'Reintroducing Strive' },
-        {
-          type: 'lede',
-          text: "We won't pretend the first Strive was the product we wanted to ship. We took it down, rebuilt every part, and waited until it actually worked before reaching back out.",
-        },
-        { type: 'divider' },
-        {
-          type: 'paragraph',
-          text: 'Tell Strive a specific goal — "speak conversational Italian in three months," or "understand transformer attention well enough to read the papers" — and where you\'re starting from. It writes the course for that, starting from your level.',
-        },
-        {
-          type: 'paragraph',
-          text: "Lessons aren't dead pages. Code runs in place, math and diagrams render properly, and an AI mentor sits next to every one of them, already up to speed on what you're reading. Ask anything.",
-        },
-        {
-          type: 'paragraph',
-          text: "What you learn doesn't leak. A daily review queue resurfaces what's slipping before you forget it.",
-        },
-        {
-          type: 'paragraph',
-          text: "We've put some starter credit on your account so you can see for yourself — generate a course, work through a few lessons, ask the mentor anything.",
-        },
-        // Hardcoded to the production domain — this campaign is sent against
-        // real inboxes and the CTA must land on production regardless of which
-        // environment the send was triggered from (dev/staging operator UI).
-        // Transactional templates above still use FRONTEND_URL so they remain
-        // env-correct for verification + password-reset flows.
-        { type: 'cta', url: 'https://www.strive-learning.com/', label: 'Try the new Strive' },
-        { type: 'signoff', text: '— Simas, founder of Strive' },
-        {
-          type: 'fineprint',
-          text: "You're getting this email because you signed up for the original Strive.",
-        },
-      ],
-      showUnsubscribe: true,
-      variant: 'promotional',
-    }),
-  };
-};
+// Public marketing origin. Hardcoded rather than derived from `FRONTEND_URL`:
+// this campaign is sent against real inboxes, so the CTA must land on
+// production no matter which environment the operator triggered the send
+// from. Transactional templates above still use `FRONTEND_URL` so they remain
+// env-correct for verification + password-reset flows.
+//
+// It points at the LANDING page, not at `/courses/new`. `/courses/new` sits
+// under the client's `(protected)` tree, where middleware bounces a
+// logged-out visitor to `/` **and strips the query string** — so a recipient
+// who is not signed in on that device would lose both the destination and
+// the campaign attribution (F21).
+const DOCUMENTS_FEATURE_CTA_URL =
+  'https://www.strive-learning.com/?source=documents-email';
 
-// Sent to the small subset who paid for the original Strive. Plainer, more
-// personal, founder-voiced. Subject inverts the expected order ("Thank you"
-// before "an apology") so the open behaviour is gratitude-first, not
-// guilt-first — better received and a more honest framing of the
-// relationship. Grant amount is intentionally NOT mentioned by number; the
-// import script controls that and the user sees the bonus on login.
-export const buildOldPayingUserThanksEmail = (): EmailPayload => {
+/**
+ * The documents/links feature announcement — the one promotional campaign
+ * in this plan (PLAN A3: the separate Terms/Privacy notice campaign was
+ * dropped in favour of an in-product notice plus the footer line below).
+ *
+ * Copy constraints applied, from `STRIVE_FOR_MARKETING.md` §10–§11:
+ *   - no generation-speed claim of any kind;
+ *   - no accuracy, outcome or efficacy claim;
+ *   - formats named honestly — never "any file" or "any website";
+ *   - no user counts, testimonials or social proof;
+ *   - no model provider named as an endorsement;
+ *   - nothing about credits, in either the word or a number;
+ *   - the lead claim is the one we can substantiate against our own
+ *     published documents: the material is not used to train models
+ *     (ToS §6, Privacy §3).
+ *
+ * @param params.unsubscribeUrl Absolute URL of our own opt-out route for
+ *   this recipient. Omitted only by the dev preview and by a test send to
+ *   an address with no ledger row, where the renderer falls back to
+ *   Mailjet's hosted `[[UNSUB_LINK_EN]]`.
+ */
+export const buildDocumentsFeatureEmail = (params?: {
+  unsubscribeUrl?: string;
+}): EmailPayload => {
   return {
-    subject: 'Thank you. And an apology.',
+    subject: 'Build a course from your own material',
     ...renderEmail({
-      preheader: 'A note from Simas about the old Strive, and why we rebuilt it.',
-      title: 'Thank you. And an apology.',
+      preheader:
+        'Upload the documents and links you already have, and Strive writes the course around them.',
+      title: 'Bring your own material',
       body: [
-        { type: 'eyebrow', text: 'From the founder' },
+        { type: 'eyebrow', text: 'New in Strive' },
         {
           type: 'lede',
-          text: "You paid for the original Strive. That's stuck with me for a long time — we knew it wasn't ready, and we shipped it anyway.",
+          text: 'Until now, Strive built a course from a goal you described. It can now build one from the material you already have.',
         },
         { type: 'divider' },
         {
           type: 'paragraph',
-          text: "We took it offline, rebuilt every part, and only got back in touch when it actually worked. It's a different product now: courses written for your specific goal, code that runs inside the lesson, an AI mentor on every page, and a daily review queue that catches what's slipping.",
+          text: 'Add PDFs, Word documents, slides, spreadsheets, ePub files, plain text, images, audio recordings, and links to pages you want covered. Strive reads what you give it and writes the course around it — a syllabus and a stack of readings, a folder of lecture slides, the notes you took at work.',
         },
         {
           type: 'paragraph',
-          text: "You already supported us once. There's extra starter credit on your account — more than everyone else is getting — enough to generate a course and actually work through it. See whether it lives up to what we promised the first time.",
+          text: 'Before anything is generated you see what came through: which files were read, how much usable material each one holds, and where the gaps are. You choose how closely the course should follow your sources — stay strictly inside them, use them as a spine, or let Strive fill in around them — and every lesson is marked either "from your documents" or "AI-supplemented", so you always know which you are reading.',
         },
-        { type: 'cta', url: 'https://www.strive-learning.com/', label: 'Try the new Strive' },
         {
           type: 'paragraph',
-          text: "If something feels off — or even if it doesn't — reply to this email. It lands directly in my inbox.",
+          text: 'Your material stays yours. It is private to your account and never shown to other learners. We do not use it to train AI models, and the providers that process the text are contractually prohibited from training on it.',
         },
+        { type: 'cta', url: DOCUMENTS_FEATURE_CTA_URL, label: 'Try it with your own files' },
         { type: 'signoff', text: '— Simas, founder of Strive' },
+        { type: 'divider' },
+        // PLAN A3: with the separate notice campaign dropped, this line is
+        // how email recipients learn the documents are updated. The
+        // in-product notice carries the obligation for everyone else,
+        // including people who have opted out of marketing.
         {
           type: 'fineprint',
-          text: "You're getting this email because you supported the original Strive.",
+          text: 'We have also updated our Terms of Service and Privacy Policy to cover uploaded documents and submitted links. Both are at strive-learning.com/terms and strive-learning.com/privacy.',
+        },
+        // Sender identification. The entity is named here and again in the
+        // footer's copyright line; the registered address and registration
+        // code live on the website (e-Commerce Directive Art. 5(1) requires
+        // them to be "easily, directly and permanently accessible", not
+        // repeated in every message) rather than in the email body.
+        //
+        // Known, accepted gap: US CAN-SPAM does require a physical postal
+        // address in marketing mail, so a US recipient is the one case this
+        // omission bites. Accepted deliberately — see PROGRESS.md.
+        {
+          type: 'fineprint',
+          text: "You're receiving this because you have a Strive account.",
         },
       ],
       showUnsubscribe: true,
+      unsubscribeUrl: params?.unsubscribeUrl,
       variant: 'promotional',
     }),
   };

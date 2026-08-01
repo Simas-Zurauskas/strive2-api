@@ -9,6 +9,8 @@ import type { GetRecallQueueResult, RecallStats } from '@services/recallQueueSer
 import type { GradeResult } from '@services/recallGradingService';
 import type { RecallMode, RecallRating } from '@lib/recallConstants';
 import type { IUserRecallProgress } from '@models/UserRecallProgressModel';
+import type { ClientSourceDocument } from '@services/sourceDocumentService';
+import type { SourceFidelity } from '@lib/constants';
 
 interface ApiResponse<T = unknown> {
   data: T;
@@ -23,18 +25,30 @@ interface JobStatus {
 }
 
 const POLL_INTERVAL_MS = 2_000;
-const POLL_TIMEOUT_MS = 300_000; // 5 minutes
-export const LESSON_POLL_TIMEOUT_MS = 600_000; // 10 minutes — lesson generation is slow
 /**
- * 10 minutes. Quiz + structure generation both invoke `withRetry` (3 retries,
- * exponential backoff) around a Sonnet call with a 120s per-attempt timeout,
- * so worst-case server time is ~4×120s + backoff ≈ 8 min. Bump to 10 min so
- * the client doesn't time out mid-retry — a real failure now surfaces as
- * `Job failed:` with the actual error, not `timed out after 300s`.
- * Structure generation additionally does a second full generation pass via
- * Phase 4's cap-retry, so the headroom is genuinely needed.
+ * Poll budgets vs the server's job timeout: jobRunner enforces
+ * `JOB_TIMEOUT_MS = 600_000` on every job, and on expiry marks the job
+ * `failed` with a typed "Job <id> timed out after 600s" error. The harness
+ * deadline starts at SUBMIT time (before the server's processing clock),
+ * so any harness budget ≤ 600s times out blind ("timed out after Ns")
+ * right before the server's own failure would have landed — the smoke-run
+ * failure mode. All budgets therefore sit at 660s (server timeout + 60s
+ * slack for submit overhead + poll interval) so the server's typed failure
+ * always surfaces as `Job failed: …` instead of a blind client timeout.
+ * (Global job concurrency is 50 and each persona owns its course, so
+ * queue wait is ~0 even at 5 parallel personas.)
  */
-export const WITH_RETRY_POLL_TIMEOUT_MS = 600_000;
+const POLL_TIMEOUT_MS = 660_000;
+export const LESSON_POLL_TIMEOUT_MS = 660_000; // lesson generation is slow; see budget note above
+/**
+ * Quiz + structure generation both invoke `withRetry` (3 retries,
+ * exponential backoff) around a Sonnet call with a 120s per-attempt timeout,
+ * so worst-case server time is ~4×120s + backoff ≈ 8 min — and structure
+ * generation may run a second full pass via Phase 4's cap-retry. The server
+ * cuts everything at 600s; 660s (see budget note above) lets that typed
+ * failure surface rather than racing it.
+ */
+export const WITH_RETRY_POLL_TIMEOUT_MS = 660_000;
 
 export function createApiClient({ baseUrl, token }: { baseUrl: string; token: string }) {
   const headers = {
@@ -150,6 +164,121 @@ export function createApiClient({ baseUrl, token }: { baseUrl: string; token: st
     async createCourse(goal: string): Promise<string> {
       const { data } = await request<{ courseId: string }>({ method: 'POST', path: '/api/course', body: { goal } });
       return data.courseId;
+    },
+
+    // ── Course-from-documents (docs mode) ───────────────
+    //
+    // Shell course first (`{source:'documents'}` — the server persists a
+    // placeholder goal), then per-file multipart uploads + optional URL
+    // registrations, then the free ingest job. `prepare-corpus` is the
+    // debited deferred-extraction pass submitted before generate-structure
+    // when GET /documents shows unescalated scans or untranscribed audio.
+
+    async createDocumentsCourse(): Promise<string> {
+      const { data } = await request<{ courseId: string }>({
+        method: 'POST',
+        path: '/api/course',
+        body: { source: 'documents' },
+      });
+      return data.courseId;
+    },
+
+    /**
+     * Multipart upload via the global fetch/FormData/Blob (undici, Node
+     * ≥20 — no extra deps). Content-Type is deliberately NOT set: undici
+     * derives the multipart boundary itself; forcing the JSON header from
+     * the shared `headers` object would corrupt the body.
+     */
+    async uploadDocument({
+      courseId,
+      buffer,
+      filename,
+    }: {
+      courseId: string;
+      buffer: Buffer;
+      filename: string;
+    }): Promise<ClientSourceDocument> {
+      const form = new FormData();
+      // Buffer → Blob copy: undici's Blob accepts any ArrayBufferView.
+      form.append('file', new Blob([new Uint8Array(buffer)]), filename);
+      const res = await fetch(`${baseUrl}/api/course/${courseId}/documents`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let parsedBody: unknown = text;
+        try {
+          parsedBody = JSON.parse(text);
+        } catch {
+          /* non-JSON body — keep text as-is */
+        }
+        const err = new Error(`POST /documents (${filename}) → ${res.status}: ${text}`) as Error & {
+          status: number;
+          data: unknown;
+        };
+        err.status = res.status;
+        err.data = parsedBody;
+        throw err;
+      }
+      const body = (await res.json()) as ApiResponse<ClientSourceDocument>;
+      return body.data;
+    },
+
+    async addUrlDocument({ courseId, url }: { courseId: string; url: string }): Promise<ClientSourceDocument> {
+      const { data } = await request<ClientSourceDocument>({
+        method: 'POST',
+        path: `/api/course/${courseId}/documents/url`,
+        body: { url },
+      });
+      return data;
+    },
+
+    async listDocuments(courseId: string): Promise<ClientSourceDocument[]> {
+      const { data } = await request<ClientSourceDocument[]>({
+        method: 'GET',
+        path: `/api/course/${courseId}/documents`,
+      });
+      return data;
+    },
+
+    /** POST /documents/ingest → 202 {jobId}. Free by policy; poll with pollJob. */
+    async ingestDocuments(courseId: string): Promise<string> {
+      const { data } = await request<{ jobId: string }>({
+        method: 'POST',
+        path: `/api/course/${courseId}/documents/ingest`,
+        body: {},
+      });
+      return data.jobId;
+    },
+
+    /** POST /prepare-corpus → 202 {jobId}. Debited; fast no-op when nothing is outstanding. */
+    async prepareCorpus(courseId: string): Promise<string> {
+      const { data } = await request<{ jobId: string }>({
+        method: 'POST',
+        path: `/api/course/${courseId}/prepare-corpus`,
+        body: {},
+      });
+      return data.jobId;
+    },
+
+    /** PATCH the analysis-screen confirmation: user-final goal + fidelity dial. */
+    async confirmGoalAndFidelity({
+      courseId,
+      goal,
+      sourceFidelity,
+    }: {
+      courseId: string;
+      goal: string;
+      sourceFidelity: SourceFidelity;
+    }): Promise<CourseData> {
+      const { data } = await request<CourseData>({
+        method: 'PATCH',
+        path: `/api/course/${courseId}`,
+        body: { goal, sourceFidelity },
+      });
+      return data;
     },
 
     async getCourse(courseId: string): Promise<CourseData> {

@@ -29,6 +29,17 @@ export const ERROR_CODES = [
   // is no longer valid (user deleted, tokenVersion bumped, etc.). Distinct
   // from a generic 401 so the client can branch (force re-login).
   'SESSION_INVALID',
+  // Course-from-documents ingestion. CONTENT_REJECTED carries only a
+  // category-level reason in meta — never the flagged content itself.
+  'CONTENT_REJECTED',
+  'UNSUPPORTED_FILE_TYPE',
+  'DOCUMENT_LIMIT_EXCEEDED',
+  'DOCUMENT_EXTRACTION_FAILED',
+  // Course-from-documents structure sizing: the generator exceeded the
+  // band-derived lesson-count limit even after one corrective retry. The
+  // job fails cleanly (nothing debited) and the user can re-run; meta
+  // carries { producedLessons, minLessons, maxLessons }.
+  'STRUCTURE_SIZE_VIOLATION',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

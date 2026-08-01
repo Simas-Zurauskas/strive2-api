@@ -2,7 +2,7 @@
 
 Feed this to a dispatcher agent with read + Agent-spawn access in `api/scripts/debugOrchestrator/output/`. The dispatcher fans out one sub-agent per persona file **in parallel** (all tool calls in a single message), then synthesizes the scorecards into `_ASSESSMENT_<timestamp>.md`.
 
-Rubric version: **v7**. Echo it in every scorecard.
+Rubric version: **v8**. Echo it in every scorecard. (v8 = v7 + Domain K, source grounding for documents-mode runs. Domains A–J and criteria 1–43 are unchanged from v7; K is additive and is entirely `n/a` on goal-mode reports, so v7 and v8 scores remain comparable for goal-mode runs.)
 
 ## Harness context (read this first)
 
@@ -24,6 +24,8 @@ Concrete mapping:
 - `Recall queue review=off` → G33 (Grading fairness) is `n/a` if no typed-recall attempts; G29–G32 still scorable from the lesson-body recall cards when `recall-gen=on`.
 - `Module quizzes=off` → F27, F28 are `n/a` (already covered by the missing-artifact rule).
 
+**Documents mode (`--documents`).** When the `## Run Configuration` block says `**Mode:** documents`, the persona did not type a goal — they uploaded a set of real files and the platform analyzed them. Such a report replaces `## Step 1: Create Course` with `## Step 1: Create Course — documents mode` and adds six sections (`Source Document Set`, `Upload & Ingest`, `Source Analysis`, `Goal & Fidelity Confirmation`, `Corpus Preparation`, `Band Adherence`) plus a `**Source grounding:**` line per lesson. Domain K scores those; everything else is scored exactly as in goal mode, with two reading adjustments: (a) the goal in `## Persona Profile` is the persona's *private intent* — the goal actually submitted is the `Final goal (PATCHed)` line in `## Goal & Fidelity Confirmation`, so score B4 ("serves stated goal") against the submitted goal; (b) a `Corpus Preparation` section reporting "No preparation needed" is correct behavior for a text-only corpus, not a skipped step. On a goal-mode report none of these sections exist and all K rows are `n/a`.
+
 **Cost Breakdown is analytics, not evaluation.** Reports include a `## Cost Breakdown` section with TWO tables: (1) per-step `Δ credits` rows from `/api/billing/summary` snapshots and (2) `### By feature (UsageEvent.action label)` — credits rolled up by per-LLM-call label (`lesson:content`, `lesson:recall`, `lesson:image`, `lesson:links`, `recall:grade`, etc.). The Run Summary also carries a `Credits Spent (this persona)` row. **Ignore all three for scoring purposes** — they do not feed any rubric criterion. Do not penalize, reward, or comment on cost in your scorecard. The numbers exist for the orchestrator operator to track spend, not for content-quality assessment.
 
 ## Your job
@@ -44,9 +46,9 @@ Decide — grounded in quotes — whether the generated artifacts would keep a r
 - **Stamp** every scorecard with `run_id` (file basename) and `judge_model` (exact snapshot string).
 - **Trust structural signals** (alignment, correctness, domain fit, MCQ quality, persona grounding). **Treat behavioral signals as hypothesis** (would-continue, satisfaction, quiz scores — synthetic personas over-perform). **Don't grade infrastructure** (latency, block counts, plumbing).
 
-## Rubric — 43 criteria across 10 domains
+## Rubric — 49 criteria across 11 domains
 
-Maps to Strive's pillars: course generation [A, B, C, J], lessons [E], assessment mastery [F, H], spaced review [G, H], conversational support [I], goal-type axis [J]. Domain averages exclude `n/a` rows.
+Maps to Strive's pillars: course generation [A, B, C, J], lessons [E], assessment mastery [F, H], spaced review [G, H], conversational support [I], goal-type axis [J], course-from-documents source grounding [K — documents-mode runs only]. Domain averages exclude `n/a` rows.
 
 ### A. Constructive alignment (3)
 1. **Outcome verbs are measurable.** Module objectives use Bloom verbs with a behavioral anchor. "Understand / learn / be aware" fails.
@@ -133,6 +135,31 @@ The pre-flight goalType classifier (api `classifyGoalType` in `services/courseSe
 
 **Override-cascade integrity (when Step 2b present):** add a fifth signal to J42/J43 — does the post-override question set actually shift to the new goalType's tilt, AND does the structure (if generated after the override) reflect the *new* goalType? If `Questions regenerated: NO` appears in Step 2b, that is a hard cap-at-1 on J42 (the chip toggle is non-load-bearing in the api prompt). The override block's snapshot diff is your evidence.
 
+### K. Source grounding — documents-mode runs only (6)
+
+**Applicability gate — read this first.** These criteria apply ONLY to reports whose `## Run Configuration` block says `**Mode:** documents`. **For a goal-mode report, score all six K rows `n/a` with the reason "goal-mode run — no source documents"** and exclude them from every average. Do not infer documents mode from anything else; the Mode line is the authority.
+
+A documents-mode report replaces the goal-mode `## Step 1: Create Course` block with `## Step 1: Create Course — documents mode` (no goal was typed — the persona uploaded files) and adds these sections, in order: `## Source Document Set` (set name, per-file inventory with sizes + content previews, manifest note, and the set author's `Expected topics`), `## Upload & Ingest` (per-upload accept/reject table + post-ingest document rows with page/scan/audio counters and warnings), `## Source Analysis` (server-detected topics, size band + mode, teachable density, suggested goal, assessment questions, per-document rows), `## Goal & Fidelity Confirmation` (the persona's accept-or-edit decision, the final PATCHed goal, the chosen fidelity, plus a predicted-vs-actual table), `## Corpus Preparation` (whether the debited `prepare_corpus` pass fired, the per-document predicate breakdown, and the job time when it ran), and `## Band Adherence` (the picked tier's displayed lesson range, the assessment size band, the lesson count actually generated, a verdict, and per-lesson `sourceRefs` counts). Each lesson under Steps 9-10 additionally carries a `**Source grounding:**` line. The persona header carries a `### Documents Profile (predicted)` block — the generator's predictions, which the Goal & Fidelity section scores against.
+
+The `Expected topics` list in `## Source Document Set` is written by the set author and is **never** sent to the server — it is your ground truth for K2. The per-file previews in the same section are your ground truth for K1 and K4.
+
+44. **Suggested goal faithfully reflects the corpus.** The `Suggested goal` in `## Source Analysis` must be a goal these documents can actually deliver — grounded in the file inventory and previews, neither inflated beyond them ("become a professional statistician" from one intro handout) nor a content-free restatement ("learn from your documents"). Score 4 when the suggestion names the corpus's real subject at a scope the material supports. Score ≤2 when it invents scope the corpus cannot support, when it is generic enough to fit any upload, or when it describes a different subject than the files. Quote the suggested goal and the strongest contradicting/supporting preview line.
+45. **Analysis honesty.** Compare the server's `Topics` and `Size band` against the set inventory + `Expected topics`. Topics must be recognizably the corpus's topics (paraphrase is fine; hallucinated topics absent from every file are not), and the band must be defensible for the volume actually present — a 3-file handout corpus claiming 20+ lessons is inflation, a substantial multi-document pack squeezed to 1–2 lessons is deflation. `Teachable density` and the `mode` (`source_only` / `needs_supplement` / `multi_course`) must agree with each other and with the material: thin corpora should read `needs_supplement`, not `source_only`. Warnings must be honest — a rejected or `failed` document in `## Upload & Ingest` that leaves no trace in the analysis warnings is a silence failure (cap at 2). Quote a topic and the band cell.
+46. **Band adherence.** In `## Band Adherence`, the generated lesson count must fall inside the tier range the persona was **shown** on the depth step. Score 4 on `Verdict: IN BAND`. Score 3 on `TOLERATED (min−1…)` — the server accepts it, but the learner was shown a range the course missed on the low side. Score 1 on `OUT OF BAND`: the promise the depth preview made was not kept, which is the exact FEEDBACK-1C regression this row exists to catch. `n/a` only when the verdict itself is `n/a (no tier range displayed)`. Quote the verdict line, the displayed range, and the lesson count.
+47. **Lesson grounding.** Lesson content must be traceable to the uploaded material rather than generic domain filler: facts, terminology, examples and framing that visibly come from the corpus previews. Cross-check the per-lesson `**Source grounding:**` lines and the `## Band Adherence` per-lesson `sourceRefs` table against the bodies — a lesson marked as carrying sourceRefs whose content shows no trace of the documents is a worse failure than an honestly-labelled AI-supplemented lesson. Score 4 when sampled lessons are recognizably built on the corpus AND the labelling matches. Score ≤2 when the lessons read as if the documents were never uploaded, or when every lesson reports zero sourceRefs on a `source_only` corpus (the structure never mapped to the material). Quote a lesson passage and the corpus preview it traces to (or the absence).
+48. **Fidelity compliance.** Read the `Fidelity (PATCHed)` value in `## Goal & Fidelity Confirmation`, then judge the structure + lessons against it. `strict` → scope stays inside the documents; introducing whole modules on topics absent from the corpus is a violation. `guided` → small gap-filling is expected; wholesale expansion is not. `enrich` → outside material is expected, but it must be distinguishable from the learner's own material (a provenance marker, an explicit "beyond your documents" framing, or a lesson-level supplemented label) rather than silently blended. Score 4 when the fidelity is visibly honoured, ≤2 on a clear violation. Quote the fidelity cell plus the offending (or exemplary) module/lesson.
+49. **Provenance labelling coherence.** The provenance signals must agree with each other across the report: `## Band Adherence`'s grounded/supplemented split, the per-lesson `**Source grounding:**` lines, and the `Grounding` column must tell one consistent story, and that story must match `## Source Analysis`'s mode. Contradictions — a lesson listed as grounded in the band table but labelled AI-supplemented under Steps 9-10, or a `source_only` analysis paired with an all-supplemented lesson set — score ≤2 because the learner-facing badge would be wrong. Score 4 when every signal lines up. Quote the two cells that disagree (or confirm agreement).
+
+**Documents-mode red flags** (add to the §Red-flags list when Mode is documents; each still needs a quote):
+
+- Suggested goal untethered from the corpus (K44) — inflated scope or a subject the files don't contain.
+- Analysis inflation/deflation (K45) — band or density unsupportable by the inventory; hallucinated topics.
+- Band promise broken (K46) — `OUT OF BAND` verdict.
+- Ungrounded "grounded" lesson (K47) — sourceRefs present, no visible trace of the documents.
+- Silent enrichment (K48) — `strict` course inventing scope, or `enrich` supplements blended in with no marker.
+- Provenance contradiction (K49) — grounding signals disagreeing across sections.
+- Rejected-upload silence — a document rejected or `failed` in `## Upload & Ingest` with no corresponding analysis warning.
+
 ## Satisfaction verdict
 
 After the rubric, answer three questions with quotes: **(1)** Would they continue after lesson 1? **(2)** After 5 lessons + a module quiz, is the product working for *their* goal? Cite highest + lowest moments. **(3)** Would they recommend it? If not, the single most fixable blocker?
@@ -164,6 +191,8 @@ Summarize as:
 ## Dispatcher flow
 
 1. **Inventory** `output/` (skip `_ASSESSMENT_*.md` / `_SCORECARD_*.md`). Per file: course name, domain, depth selected/recommended, modules, lessons-gen / total-declared, quizzes, recall cards reviewed, harness status. Apply the §Harness-context true-failure check.
+
+   **Documents-mode columns (required whenever ≥1 report has `**Mode:** documents`):** extend the inventory table with `mode` (goal | documents), `document set`, `fidelity`, `size band`, and `lessons in band` — all five read straight from the report's `## Run Summary` rows (`Mode`, `Document Set`, `Source Fidelity`, `Size Band`, `Lessons In Band`). Goal-mode rows fill these with `goal` / `—` / `—` / `—` / `n/a`. When every report is goal mode, omit the five columns entirely and state "all runs goal-mode" under the table.
 2. **Fan out** — one sub-agent per file, **all tool calls in a single message**. Each gets the §Sub-agent prompt template.
 3. **Gate** on returned scorecards. Malformed output → re-spawn once with "Your previous output was missing: <X>" preamble.
 4. **Drift check** — flag any criterion where a persona's score differs from the cross-persona median by ≥2.
@@ -175,11 +204,13 @@ Summarize as:
 ```markdown
 # Strive Quality Assessment — <date>
 
-**Rubric:** v7 | **Judge model:** <snapshot> | **Content generator:** Anthropic | **Self-preference risk:** <low|medium|high>
+**Rubric:** v8 | **Judge model:** <snapshot> | **Content generator:** Anthropic | **Self-preference risk:** <low|medium|high>
 **Runs:** <n completed> / <n failed> / <n total>
 
 ## Inventory
-| file | persona | status | domain | depth (sel/rec) | modules | lessons gen / total declared | quizzes | recall cards reviewed |
+| file | persona | status | domain | depth (sel/rec) | modules | lessons gen / total declared | quizzes | recall cards reviewed | mode | document set | fidelity | size band | lessons in band |
+
+(Drop the last five columns when every run is goal-mode — see §Dispatcher-flow step 1.)
 
 ## Per-persona scorecards
 <Inline each sub-agent scorecard verbatim in the §Handoff-schema format. Do not paraphrase or re-score.>
@@ -200,6 +231,7 @@ Summarize as:
 | Mastery & scheduling (H) | | | | |
 | Mentor experience (I) | | | | |
 | Goal-type axis (J) | | | | |
+| Source grounding (K — documents runs only) | | | | |
 | **Overall** (all non-n/a rows, criterion-weighted) | | | | — |
 
 Scale: 10.0 excellent / 7.5 at bar / 5.0 below bar / ≤5.0 blocking. High aggregates can mask severity — cross-check the Main weakness column and red flags.
@@ -263,17 +295,17 @@ You are one of N parallel evaluators. You score exactly one persona run and retu
 
 Persona slug: {{PERSONA_SLUG}}
 File: {{FILE_PATH}}
-Rubric: v7
+Rubric: v8
 Your judge_model: <exact snapshot>
 
-<PASTE: §Harness context, §Scoring, §Rubric (all 43), §Satisfaction verdict, §Red flags>
+<PASTE: §Harness context, §Scoring, §Rubric (all 49), §Satisfaction verdict, §Red flags>
 
 Steps:
 1. Read {{FILE_PATH}} in full. No other files.
 2. Apply the §Harness-context true-failure check. Do not flag lesson caps as failure.
 3. E-band sampling: first / middle / last of the generated set. Note single-module collapse in provenance.
-4. Score all 43 criteria. Each row: `{score 1–4, one-sentence rationale, quote-or-n/a, severity, frequency}`. No row skipped — `n/a` with explanation is valid.
-5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state; **I36–I39 all `n/a` if no mentor probes (no Step 8b AND no `🎓 Lesson Mentor probe` blocks).** **J42/J43 `n/a` if classified goalType is `master` (no special tilt/shape expected).** **All J40–J43 `n/a` if Step 2 lacks the `### Goal Type Classification` block (pre-feature run, run before the api classifier was deployed).** **Toggle-driven n/a (read the `## Run Configuration` block):** `links=off` → E24 `n/a`; `recall-gen=off` → G29–G33 all `n/a`. Not a "reliability silence" red flag unless §Harness-context true-failure fires.
+4. Score all 49 criteria. Each row: `{score 1–4, one-sentence rationale, quote-or-n/a, severity, frequency}`. No row skipped — `n/a` with explanation is valid.
+5. Apply missing-artifact rules: F27/F28 n/a if Step 11/12 absent; G32/G33 n/a if no cloze/typed-recall; H34 n/a if no transition; H35 n/a if <2 ratings or no before/after box state; **I36–I39 all `n/a` if no mentor probes (no Step 8b AND no `🎓 Lesson Mentor probe` blocks).** **J42/J43 `n/a` if classified goalType is `master` (no special tilt/shape expected).** **All J40–J43 `n/a` if Step 2 lacks the `### Goal Type Classification` block (pre-feature run, run before the api classifier was deployed).** **K44–K49 all `n/a` when `## Run Configuration` does NOT say `**Mode:** documents` (goal-mode run — no source documents); K46 additionally `n/a` when the Band Adherence verdict is itself `n/a (no tier range displayed)`.** **Toggle-driven n/a (read the `## Run Configuration` block):** `links=off` → E24 `n/a`; `recall-gen=off` → G29–G33 all `n/a`. Not a "reliability silence" red flag unless §Harness-context true-failure fires.
 6. Leniency self-check: if >70% of non-n/a ≥3, re-examine lowest items.
 7. Self-preference adjustment (medium risk, same family): E17/E18/E19=4 on polish alone drops to 3.
 8. Answer §Satisfaction with quotes.
@@ -287,7 +319,8 @@ Steps:
 
 **run_id:** {{file basename}}
 **judge_model:** <snapshot>
-**Rubric:** v7
+**Rubric:** v8
+**Mode:** goal | documents (+ set name when documents)
 **Status:** completed | failed — <reason if failed>
 **Verdict:** 🟢 | 🟡 | 🔴 | ⚪ — <one sentence>
 
@@ -338,8 +371,14 @@ Steps:
 | J41 | GoalType confidence calibration | | | | | |
 | J42 | Clarify-question tilt to goalType | | | | | |
 | J43 | Structure shape matches goalType | | | | | |
+| K44 | Suggested goal reflects corpus | | | | | |
+| K45 | Analysis honesty (topics / band) | | | | | |
+| K46 | Band adherence | | | | | |
+| K47 | Lesson grounding in sources | | | | | |
+| K48 | Fidelity compliance | | | | | |
+| K49 | Provenance labelling coherence | | | | | |
 
-**Domain averages (exclude n/a):** A | B | C | D | E | F | G | H | I | J
+**Domain averages (exclude n/a):** A | B | C | D | E | F | G | H | I | J | K
 
 #### Satisfaction
 

@@ -39,6 +39,20 @@ export type EmailRenderInput = {
   // message. Mailjet hosts the unsubscribe + re-subscribe page and tracks
   // opt-out state in their Contact DB; we don't host or persist any of it.
   showUnsubscribe?: boolean;
+  /**
+   * Absolute URL of the opt-out route WE own (PLAN A12 / F1). When present
+   * — and only when `showUnsubscribe` is also set — it replaces Mailjet's
+   * `[[UNSUB_LINK_EN]]` in the HTML footer and in the plain-text footer, so
+   * the click lands on our own token-authenticated route and flips the
+   * `MarketingContact` ledger rather than only Mailjet's Contact DB.
+   *
+   * **Additive by contract.** This is a declared, pinned exception to the
+   * "transactional email does not change" rule: absent, every existing
+   * template renders byte-identically to what it rendered before the field
+   * existed (pinned in `render.test.ts`). Never make it required, and never
+   * default it — a transactional email must not grow an opt-out row.
+   */
+  unsubscribeUrl?: string;
   variant?: EmailVariant;
 };
 
@@ -274,11 +288,18 @@ export const renderEmail = (input: EmailRenderInput): RenderedEmail => {
   const blocksText = body.map(renderTextBlock).join('\n\n');
   const year = new Date().getUTCFullYear();
 
+  // Our own route when the caller supplies it, Mailjet's substitution token
+  // otherwise. The token is emitted RAW (it is not a URL and `safeUrl` would
+  // collapse it to `#`), which is also why the two branches are spelled out
+  // rather than folded through one helper.
+  const unsubHtmlHref = input.unsubscribeUrl ? safeUrl(input.unsubscribeUrl) : '[[UNSUB_LINK_EN]]';
+  const unsubTextHref = input.unsubscribeUrl ?? '[[UNSUB_LINK_EN]]';
+
   const unsubscribePart = showUnsubscribe
-    ? ` &middot; <a href="[[UNSUB_LINK_EN]]" style="color:${c.muted};text-decoration:underline;">Unsubscribe</a>`
+    ? ` &middot; <a href="${unsubHtmlHref}" style="color:${c.muted};text-decoration:underline;">Unsubscribe</a>`
     : '';
   const unsubscribeRowText = showUnsubscribe
-    ? `\n\nDon't want emails like this? Unsubscribe: [[UNSUB_LINK_EN]]`
+    ? `\n\nDon't want emails like this? Unsubscribe: ${unsubTextHref}`
     : '';
 
   const shell = promo ? renderPromotionalShell : renderTransactionalShell;

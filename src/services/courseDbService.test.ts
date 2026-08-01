@@ -19,7 +19,8 @@ import mongoose from 'mongoose';
 import { describe, test, expect } from 'vitest';
 import { setupTestDb } from '../../test-helpers/db';
 import { makeUser, makeCourse } from '../../test-helpers/factories';
-import { getUserCourse, getUserCourseLean } from '@services/courseDbService';
+import { getUserCourse, getUserCourseLean, omitServerOnlyCourseFields } from '@services/courseDbService';
+import type { ICourse } from '@models/CourseModel';
 
 setupTestDb();
 
@@ -125,5 +126,27 @@ describe('getUserCourseLean — same boundary, .lean() variant', () => {
     await expect(
       getUserCourseLean({ userId: userB._id.toString(), courseId: HEX_ID_SHAPED_SLUG }),
     ).rejects.toThrow('Course not found');
+  });
+});
+
+describe('omitServerOnlyCourseFields — lean-path server-only stripping', () => {
+  test('strips sourceDigest and suggestedDesignPrompts; keeps sourceAssessment and the rest', () => {
+    const lean = {
+      goal: 'Learn algebra',
+      source: 'documents',
+      sourceFidelity: 'guided',
+      sourceAssessment: { topics: ['algebra'] },
+      sourceDigest: { topicTree: [] },
+      suggestedDesignPrompts: ['prompt'],
+    } as unknown as Partial<ICourse>;
+
+    const out = omitServerOnlyCourseFields(lean) as Record<string, unknown>;
+
+    expect(out).not.toHaveProperty('sourceDigest');
+    expect(out).not.toHaveProperty('suggestedDesignPrompts');
+    expect(out.goal).toBe('Learn algebra');
+    expect(out.source).toBe('documents');
+    expect(out.sourceFidelity).toBe('guided');
+    expect(out.sourceAssessment).toEqual({ topics: ['algebra'] });
   });
 });

@@ -1,13 +1,17 @@
 import mongoose, { HydratedDocument, Schema, Types } from 'mongoose';
 import {
   COURSE_DOMAINS,
+  COURSE_SOURCES,
   COURSE_STATUSES,
   CourseDomain,
+  CourseSource,
   CourseStatus,
   GOAL_TYPES,
   GOAL_TYPE_CONFIDENCES,
   GoalType,
   GoalTypeConfidence,
+  SOURCE_FIDELITIES,
+  SourceFidelity,
 } from '@lib/constants';
 
 // ── Types ──────────────────────────────────────────────────
@@ -79,6 +83,22 @@ export interface ICourse {
    * Mirrors `LessonContent.suggestedMentorPrompts`.
    */
   suggestedDesignPrompts: string[];
+  // Course origin. Null on every pre-feature row and on goal-typed courses;
+  // `'documents'` marks a course built from user uploads (same back-compat
+  // idiom as `goalType`).
+  source: CourseSource | null;
+  // How tightly generation sticks to the uploaded material (strict /
+  // guided / enrich). Only meaningful when `source === 'documents'`.
+  sourceFidelity: SourceFidelity | null;
+  // Coarse, client-safe assessment of the uploaded corpus (SourceAnalysis
+  // shape: topic map, size band, suggested goal, per-doc summaries). The
+  // ingest job persists only the coarse shape here — never extracted text.
+  sourceAssessment: Record<string, unknown> | null;
+  // Map-reduce topic tree with source-span ids, consumed by the design
+  // stages. SERVER-ONLY: stripped by the `toJSON` transform below and by
+  // SERVER_ONLY_COURSE_FIELDS on the lean path — returning it verbatim
+  // would hand out a free document-summarization service.
+  sourceDigest: Record<string, unknown> | null;
   currentStep: number;
   activeJobId: Types.ObjectId | null;
   // Set whenever a `generate_lesson` job is submitted and cleared when the
@@ -174,6 +194,24 @@ const schema = new Schema<ICourse>(
       type: [{ type: String, maxlength: 200 }],
       default: [],
     },
+    source: {
+      type: String,
+      enum: [...COURSE_SOURCES],
+      default: null,
+    },
+    sourceFidelity: {
+      type: String,
+      enum: [...SOURCE_FIDELITIES],
+      default: null,
+    },
+    sourceAssessment: {
+      type: Schema.Types.Mixed,
+      default: null,
+    },
+    sourceDigest: {
+      type: Schema.Types.Mixed,
+      default: null,
+    },
     currentStep: { type: Number, default: 1 },
     activeJobId: {
       type: Schema.Types.ObjectId,
@@ -196,6 +234,10 @@ const schema = new Schema<ICourse>(
     toJSON: {
       transform(_doc, ret: Record<string, unknown>) {
         delete ret.__v;
+        // Server-only: the digest is design-stage input, not API surface
+        // (see the ICourse comment). The lean path strips it separately
+        // via SERVER_ONLY_COURSE_FIELDS in courseDbService.
+        delete ret.sourceDigest;
         return ret;
       },
     },

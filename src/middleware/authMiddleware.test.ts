@@ -1,7 +1,18 @@
 /**
- * Tests for the auth gates: `protect` and `requireVerified`. These are the
- * single entry points for token-based session management; bugs here surface
- * as session-hijack or unauthorized data access.
+ * Tests for the auth gates: `protect`, `requireVerified` and `requireAdmin`.
+ * These are the single entry points for token-based session management; bugs
+ * here surface as session-hijack or unauthorized data access.
+ *
+ * `requireAdmin` had ZERO references in any test file in this repo until
+ * PLAN Phase 5, while being the last gate in front of
+ * `POST /api/admin/marketing/send` — which mass-mails the entire contact
+ * ledger. The two bugs this block exists to prevent:
+ *   1. the role check inverted or dropped, so a verified non-admin sends the
+ *      campaign (irreversible, with consent/GDPR consequences); and
+ *   2. the refusal returned as 401 instead of 403, which trips the client's
+ *      axios auto-sign-out interceptor and evicts a legitimately signed-in
+ *      user for touching an admin URL. That is why the negative assertion
+ *      `not.toHaveBeenCalledWith(401)` is here and not just the positive one.
  *
  * Strategy:
  *   - Real in-memory Mongo so tokenVersion + emailVerified live on real User
@@ -20,7 +31,7 @@ import jwt from 'jsonwebtoken';
 import { setupTestDb } from '../../test-helpers/db';
 import { makeUser, UserModel } from '../../test-helpers/factories';
 import { generateAuthToken, decodeAuthToken } from '@lib/auth';
-import { protect, requireVerified } from '@middleware/authMiddleware';
+import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
 import { JWT_SECRET } from '@conf/env';
 import { AuthProvider } from '@lib/constants';
 
@@ -247,6 +258,70 @@ describe('requireVerified', () => {
     const { req, res, next } = buildReqRes({ userId });
     await expect(runMiddleware(requireVerified, req, res, next)).rejects.toThrow('Unauthorized');
     expect(res.status).toHaveBeenCalledWith(401);
+  });
+});
+
+// ── requireAdmin middleware ────────────────────────────
+//
+// Gate order is `protect → requireVerified → requireAdmin`, so by the time
+// this runs `req.userId` is set and the row exists in the common case. The
+// only legitimate 401 is a row that vanished between gates.
+
+describe('requireAdmin', () => {
+  test('isAdmin: true → next() with no error', async () => {
+    const user = await makeUser({ isAdmin: true });
+    const { req, res, next } = buildReqRes({ userId: user._id.toString() });
+    await runMiddleware(requireAdmin, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  test('a verified NON-ADMIN is refused with 403 — and is NOT signed out (401)', async () => {
+    const user = await makeUser({ isAdmin: false, emailVerified: true });
+    const { req, res, next } = buildReqRes({ userId: user._id.toString() });
+
+    let caughtErr: unknown;
+    try {
+      await runMiddleware(requireAdmin, req, res, next);
+    } catch (e) {
+      caughtErr = e;
+    }
+    expect(res.status).toHaveBeenCalledWith(403);
+    // 403 not 401 is the whole point: the client's axios interceptor signs
+    // the user out on 401 only. A non-admin poking an admin URL must stay
+    // signed in.
+    expect(res.status).not.toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+    expect((caughtErr as Error).message).toMatch(/admin access required/i);
+    expect((caughtErr as { errorCode?: string }).errorCode).toBe('CUSTOM_ERROR');
+  });
+
+  test('user row missing (deleted between gates) → 401, the one legitimate 401', async () => {
+    const userId = 'aaaaaaaaaaaaaaaaaaaaaaaa'; // 24-hex, no row
+    const { req, res, next } = buildReqRes({ userId });
+    await expect(runMiddleware(requireAdmin, req, res, next)).rejects.toThrow('Unauthorized');
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.status).not.toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('isAdmin defaults to false on a freshly created user (factory must not hand out admins)', async () => {
+    // Guards the arrange step of every test above: if `makeUser` ever
+    // defaulted `isAdmin` to true, the 403 cases would silently become
+    // no-ops that pass for the wrong reason.
+    const user = await makeUser();
+    const row = await UserModel.findById(user._id).select('isAdmin').lean();
+    expect(row?.isAdmin).toBe(false);
+  });
+
+  test('an UNVERIFIED admin still passes requireAdmin — verification is requireVerified\'s job, not this gate\'s', async () => {
+    // Pins the separation of concerns in the `protect → requireVerified →
+    // requireAdmin` chain. If requireAdmin grew its own verification check,
+    // the 403 reason surfaced to the client would become ambiguous.
+    const user = await makeUser({ isAdmin: true, emailVerified: false });
+    const { req, res, next } = buildReqRes({ userId: user._id.toString() });
+    await runMiddleware(requireAdmin, req, res, next);
+    expect(next).toHaveBeenCalledOnce();
   });
 });
 

@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: CI
+
+# The merge gate. Before this workflow existed, the ONLY place `yarn tsc` and
+# `yarn test` ran was CodeBuild (`buildspec.yml`) — i.e. on *deploy*, after
+# merge. A broken test blocked the release, and rollback was the only remedy.
+#
+# The toolchain below mirrors `buildspec.yml` exactly (Node 22, yarn 1.22.22 via
+# corepack, `--frozen-lockfile`) so CI and CodeBuild cannot disagree about what
+# "green" means. `buildspec.yml` is deliberately left in place as the
+# belt-and-braces pre-deploy run.
+#
+# ⚠ MANUAL STEP, NOT IN THIS FILE: making the `verify` check *required* is a
+# GitHub branch-protection setting on `dev` and `master`. Until someone sets it,
+# this workflow reports but does not block a merge.
+
+on:
+  pull_request:
+  push:
+    branches: [dev, master]
+
+# A new push to the same PR cancels the previous run — the older result is
+# never the one that matters.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: tsc + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches `engines.node` and buildspec.yml's runtime-versions.
+          node-version: 22
+          cache: yarn
+
+      - name: Pin yarn to the version buildspec.yml uses
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn --version
+
+      # The test suite boots one mongod (a single-member replica set) via
+      # test-globalSetup.ts. Without this cache every run re-downloads the
+      # ~200 MB binary — 30-60s and a network-blip flake source. Keyed on the
+      # resolved mongodb-memory-server version so a bump invalidates it.
+      - name: Cache mongodb-memory-server binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            mongodb-binaries-${{ runner.os }}-
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      # `api/` has no lint script — tsc is half the gate and is not optional.
+      - name: Type check
+        run: yarn tsc
+
+      - name: Test
+        run: yarn test

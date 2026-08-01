@@ -1,2 +1,3 @@
 export * from './sendPromotionalTestEmail';
-export * from './relaunchRecipients';
+export * from './sendMarketingCampaign';
+export * from './marketingCampaignClaims';

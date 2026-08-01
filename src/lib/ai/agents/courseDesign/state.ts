@@ -53,6 +53,20 @@ export const StateAnnotation = Annotation.Root({
     default: () => undefined,
   }),
 
+  // Documents-course grounding (FEEDBACK-1). Set only when the course was
+  // built from uploaded documents AND its assessment carries a clamping
+  // size band — the chat prompt then states the allowed lesson range and
+  // fidelity posture (pairs with modify_structure's band enforcement).
+  // Undefined on goal courses and legacy rows; the prompt handles absence.
+  sourceFidelity: Annotation<string | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+  sourceLessonRange: Annotation<[number, number] | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
+
   // Current structure — replace-reducer so modify_structure tool can update it
   currentStructure: Annotation<{
     reasoning: {

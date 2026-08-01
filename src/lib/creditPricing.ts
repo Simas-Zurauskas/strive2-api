@@ -90,15 +90,22 @@ const MAX_CONCURRENT_JOBS = 3;
 // Editorial blurbs for the Stripe product description / pricing card.
 // Not derived from PRICING_CONFIG because they're marketing copy, not
 // numeric. Update alongside the Stripe product descriptions.
+//
+// Cut to one or two sentences at review: the previous versions ran to
+// three clauses each and, set in a pricing card, read as a paragraph the
+// visitor had to work through rather than a line they could scan. Each now
+// says who the plan is for and what its allowance affords — nothing else.
+// Allowance is spoken of in courses and lessons; the word "credits" never
+// appears in customer-facing copy.
 const PLAN_DESCRIPTIONS: Record<PlanKey, string> = {
   free:
-    'Get started at no cost. A modest recurring AI-generation allowance to try personalized course building, lesson generation, quizzes, and code-execution practice.',
+    'Try Strive end to end at no cost. A small monthly allowance for course building, lessons, quizzes and code practice.',
   starter:
-    'Monthly plan for occasional learners. Recurring AI-generation allowance sized for building a few personalized courses each month, plus regular lesson generation, quizzes, and code-execution practice.',
+    'For occasional learners. A monthly allowance sized for a few courses, with lessons, quizzes and code practice throughout.',
   pro:
-    'Monthly plan for active learners. Substantially larger recurring AI-generation allowance — comfortable headroom for ongoing course building, frequent lesson regeneration, and intensive review and code practice.',
+    'For active learners. A substantially larger monthly allowance, with headroom for ongoing course building and frequent lesson regeneration.',
   studio:
-    'Monthly plan for power users and educators. Our largest recurring AI-generation allowance, designed for heavy continuous use — building several courses in parallel and frequent re-generation across the platform.',
+    'For power users and educators. Our largest monthly allowance, for building several courses in parallel and heavy continuous use.',
 };
 
 const PLAN_DISPLAY_NAMES: Record<PlanKey, string> = {

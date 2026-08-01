@@ -9,6 +9,7 @@ import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import RecallCardModel from '@models/RecallCardModel';
 import { searchLessonContent } from '@services/lessonRagService';
 import { searchProductKb } from '@services/productKbRagService';
+import { searchSourceDocuments } from '@services/sourceDocRagService';
 import { readUrl } from '@lib/jinaReader';
 import { emitHandoffTool } from '../shared/emitHandoffTool';
 import { wrapExternalContent, wrapExternalSnippets } from '../shared/externalContent';
@@ -340,6 +341,55 @@ export const searchLessonContentTool = tool(
   },
 );
 
+// ── search_user_documents ─────────────────────────────────
+//
+// Vector search over the documents the learner uploaded to create this
+// course (course-from-documents, Phase 5 stretch). Follows
+// search_lesson_content's exact shape: courseId comes from the tool
+// context (never from the model — the isolation boundary), results are
+// wrapped as untrusted snippets, and the empty case returns the
+// honest-note idiom. On a goal-based course the corpus is simply empty,
+// so the empty-note path answers "this course has no uploaded documents"
+// without a separate Course lookup.
+
+export const searchUserDocumentsTool = tool(
+  async (input, config) => {
+    const { courseId } = config?.configurable ?? {};
+    if (!courseId) {
+      return JSON.stringify({ error: 'Missing courseId in tool context' });
+    }
+
+    const results = await searchSourceDocuments(courseId, input.query, { topK: 5 });
+
+    if (results.length === 0) {
+      return JSON.stringify({
+        results: [],
+        note: 'No uploaded source documents matched. Either this course was not created from documents, its documents have not been ingested yet, or the query is too far from any chunk.',
+      });
+    }
+
+    return wrapExternalSnippets({
+      origin: 'rag:user-doc',
+      snippets: results.map((r) => ({
+        documentId: r.documentId,
+        heading: r.headingPath.join(' > '),
+        ...(r.pageRange ? { pages: `${r.pageRange.start}-${r.pageRange.end}` } : {}),
+        chunkType: r.chunkType,
+        score: Math.round(r.score * 1000) / 1000,
+        text: r.text.length > 1200 ? r.text.slice(0, 1200) + '…' : r.text,
+      })),
+    });
+  },
+  {
+    name: 'search_user_documents',
+    description:
+      "Search the source documents the learner uploaded to create this course (their own PDFs, notes, slides, audio transcripts, article snapshots) via vector similarity. Use when the learner asks what THEIR material says, wants a claim checked against their documents, or references their uploaded files. Returns up to 5 ranked excerpts with document location. On courses not created from documents this returns an empty result — say so honestly.",
+    schema: z.object({
+      query: z.string().describe('The natural-language question or concept to search for in the uploaded documents.'),
+    }),
+  },
+);
+
 // ── search_product_kb ─────────────────────────────────────
 //
 // Vector search over Strive's product help center. Use when the learner
@@ -395,6 +445,8 @@ export const searchProductKbTool = tool(
 const READ_URL_ERROR_MESSAGES: Record<string, string> = {
   invalid_url: 'The URL is missing or malformed.',
   unsafe_url: 'That URL is not safe to fetch (private network or non-http(s) scheme).',
+  reserved:
+    'That site asks automated systems not to read this page (robots.txt / TDM reservation), or its rules could not be read, so we did not fetch it.',
   timeout: 'The page took too long to load (>10s).',
   http_error: 'The page returned an HTTP error.',
   empty_body: 'The page returned no readable content.',
@@ -438,4 +490,4 @@ export const fetchUrlTool = tool(
 
 // ── Export all tools ──────────────────────────────────────
 
-export const TOOLS = [webSearch, getUserProgress, searchLessonContentTool, searchProductKbTool, fetchUrlTool, emitHandoffTool];
+export const TOOLS = [webSearch, getUserProgress, searchLessonContentTool, searchUserDocumentsTool, searchProductKbTool, fetchUrlTool, emitHandoffTool];

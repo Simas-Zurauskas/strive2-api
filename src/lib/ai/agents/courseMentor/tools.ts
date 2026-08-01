@@ -19,7 +19,8 @@ import {
   webSearch,
   getUserProgress,
   searchLessonContentTool,
+  searchUserDocumentsTool,
 } from '../lessonMentor/tools';
 import { emitHandoffTool } from '../shared/emitHandoffTool';
 
-export const TOOLS = [webSearch, getUserProgress, searchLessonContentTool, emitHandoffTool];
+export const TOOLS = [webSearch, getUserProgress, searchLessonContentTool, searchUserDocumentsTool, emitHandoffTool];

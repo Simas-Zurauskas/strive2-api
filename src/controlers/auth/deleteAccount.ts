@@ -1,5 +1,7 @@
 import asyncHandler from 'express-async-handler';
+import mongoose from 'mongoose';
 import UserModel from '@models/UserModel';
+import MarketingContactModel from '@models/MarketingContactModel';
 import CourseModel from '@models/CourseModel';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import JobModel from '@models/JobModel';
@@ -12,7 +14,10 @@ import UserRecallProgressModel from '@models/UserRecallProgressModel';
 import UserGamificationModel from '@models/UserGamificationModel';
 import UsageEventModel from '@models/UsageEventModel';
 import SecurityActionTokenModel from '@models/SecurityActionTokenModel';
-import { cleanupCourseContent } from '@services/courseCleanupService';
+import SourceDocumentModel from '@models/SourceDocumentModel';
+import { cleanupCourseContent, cleanupCourseSources } from '@services/courseCleanupService';
+import { deleteSourceChunksForUser } from '@services/sourceDocRagService';
+import { deleteByPrefix } from '@services/s3Service';
 import { recordAccountDeletion } from '@services/abuseLogService';
 import { cancelAllSubscriptionsForCustomer } from '@services/stripeService';
 import { consumeSecurityActionCode } from '@services/securityActionService';
@@ -147,14 +152,30 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
     );
   }
 
-  // Delegate per-course cleanup to the same primitive `deleteCourse` uses so
+  // Delegate per-course cleanup to the same primitives `deleteCourse` uses so
   // the two deletion paths can't drift when new course-scoped models are added.
-  // Covers lesson content, quiz content, chat, progress, recall cards,
-  // recall-progress, and S3 assets under `lessons/{courseId}/`.
-  await Promise.all(courseIds.map((id) => cleanupCourseContent(id.toString())));
+  // `cleanupCourseContent` covers lesson content, quiz content, chat, progress,
+  // recall cards, recall-progress, and S3 assets under `lessons/{courseId}/`;
+  // `cleanupCourseSources` covers the course-from-documents corpus
+  // (SourceDocument rows, chunk rows + Pinecone vectors via the Mongo
+  // manifest, and the `uploads/{userId}/{courseId}/` S3 prefix).
+  const userIdStr = user._id.toString();
+  await Promise.all(
+    courseIds.flatMap((id) => [
+      cleanupCourseContent(id.toString()),
+      cleanupCourseSources({ courseId: id.toString(), userId: userIdStr }),
+    ]),
+  );
 
   await Promise.all([
     JobModel.deleteMany({ userId: user._id }),
+    // Course-from-documents FK-drift backstops — the per-course pass above
+    // covers rows whose course still exists; these user-scoped wipes catch
+    // strays. The chunk backstop goes through the RAG service (Mongo-
+    // manifest-first) so any drifted rows take their Pinecone vectors with
+    // them instead of orphaning them.
+    deleteSourceChunksForUser(userIdStr),
+    SourceDocumentModel.deleteMany({ userId: user._id }),
     UserLessonProgressModel.deleteMany({ userId: user._id }),
     UserModuleQuizProgressModel.deleteMany({ userId: user._id }),
     UserRecallProgressModel.deleteMany({ userId: user._id }),
@@ -190,6 +211,23 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
   ]);
   await CourseModel.deleteMany({ userId: user._id });
 
+  // Wipe the user's WHOLE upload prefix — belt over the per-course wipes
+  // above, and the only cover for uploads whose course row already drifted
+  // away. Awaited-but-tolerant: an S3 blip must not block the user's right
+  // to erasure on our primary stores; the failure is loud for ops retry.
+  //
+  // Deliberately NOT deleted (declared REPORT-Act exception, data-protection
+  // §4.2): ContentFlag rows and their `quarantine/` S3 objects — CSAM
+  // hash-match evidence must be preserved for 1 year (18 U.S.C. §2258A;
+  // the rows TTL out via `retentionUntil`, quarantine cleanup is manual per
+  // the L1 runbook). `quarantine/` sits outside `uploads/` by design, so
+  // this prefix wipe structurally cannot touch it.
+  try {
+    await deleteByPrefix(`uploads/${userIdStr}/`);
+  } catch (err) {
+    bgError('s3.deleteUploadsOnAccountDelete')(err);
+  }
+
   // Cancel ALL active Stripe subscriptions on this customer so the user
   // isn't billed next period. We list-and-cancel rather than relying on
   // the single id we cached in DB — historical drift or manual Stripe
@@ -208,6 +246,34 @@ export const deleteAccountController = asyncHandler(async (req, res) => {
     } catch (err) {
       bgError('stripe.cancelOnAccountDelete')(err);
     }
+  }
+
+  // Marketing ledger erasure (F13). Without this the deleted user's email
+  // survives inside the send audience — they would keep receiving campaigns
+  // after asking us to erase them, which is the exact opposite of what the
+  // cascade promises.
+  //
+  // Matched on userId OR email: rows seeded from the existing user base
+  // carry the link, but a row written before the link existed (or after a
+  // re-signup) is only findable by address. Runs BEFORE the User row drop
+  // so `user.email` is still readable.
+  try {
+    await MarketingContactModel.deleteMany({
+      $or: [{ userId: user._id }, { email: user.email }],
+    });
+  } catch (err) {
+    bgError('marketingContact.deleteOnAccountDelete')(err);
+  }
+
+  // Per-campaign send log. The model is Phase 4's and does not exist yet, so
+  // this goes through the driver rather than a Mongoose model: a
+  // `deleteMany` against an absent collection is a no-op, and this way the
+  // cascade covers the rows the moment that collection appears instead of
+  // waiting for someone to remember to come back here.
+  try {
+    await mongoose.connection.db?.collection('MarketingSend').deleteMany({ email: user.email });
+  } catch (err) {
+    bgError('marketingSend.deleteOnAccountDelete')(err);
   }
 
   // GDPR right-to-erasure on the marketing sub-processor. Done BEFORE the

@@ -136,6 +136,44 @@ test('haiku is cheaper per token than sonnet', () => {
   assert.ok(haikuCost < sonnetCost, 'haiku must price below sonnet for the same token mix');
 });
 
+// ── claude-sonnet-5 (2026-08 migration) ───────────────────
+// Sticker rates, deliberately equal to sonnet-4-6 per-token (the intro
+// $2/$10 pricing lapses 2026-08-31 and must NOT be in this table).
+
+test('sonnet-5 entry exists and prices identically to sonnet-4-6 per token', () => {
+  const s5 = LLM_PRICING['claude-sonnet-5'];
+  const s46 = LLM_PRICING['claude-sonnet-4-6'];
+  assert.ok(s5, 'claude-sonnet-5 must be in LLM_PRICING before any call site emits it');
+  assert.deepEqual(s5, s46, 'sonnet-5 sticker rates must equal sonnet-4-6 rates');
+});
+
+test('sonnet-5 uncached input priced at $3/MTok (nonzero — no silent free metering)', () => {
+  const cost = priceLlmUsage({
+    model: 'claude-sonnet-5',
+    ...zeroTokens,
+    uncached: 1_000_000,
+  });
+  assert.equal(cost, 3_000_000);
+  assert.ok(cost > 0, 'a priced model must never meter 0');
+});
+
+test('sonnet-5 cache economics: read < input < 5m write < 1h write (2× input)', () => {
+  const s5 = LLM_PRICING['claude-sonnet-5'];
+  assert.ok(s5.cacheReadMicroCentsPerMTok < s5.inputMicroCentsPerMTok);
+  assert.ok(s5.inputMicroCentsPerMTok < s5.cacheWrite5mMicroCentsPerMTok);
+  assert.ok(s5.cacheWrite5mMicroCentsPerMTok < s5.cacheWrite1hMicroCentsPerMTok);
+  assert.equal(s5.cacheWrite1hMicroCentsPerMTok, 2 * s5.inputMicroCentsPerMTok);
+});
+
+test('sonnet-5 output priced at $15/MTok', () => {
+  const cost = priceLlmUsage({
+    model: 'claude-sonnet-5',
+    ...zeroTokens,
+    output: 1_000_000,
+  });
+  assert.equal(cost, 15_000_000);
+});
+
 test('always returns an integer', () => {
   const cost = priceLlmUsage({
     model: 'claude-sonnet-4-6',

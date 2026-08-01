@@ -4,6 +4,10 @@ import asyncHandler from 'express-async-handler';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { chatStreamSchema } from './validation';
 import { getUserCourseLean } from '@services/courseDbService';
+import { extractSourceSizeBand, getTierScope } from '@services/courseService';
+import { detectSoftnessHint } from '@services/softness';
+import { CourseDepth } from '@lib/constants';
+import { DEFAULT_SOURCE_FIDELITY } from '@lib/ai/agents/shared/sourceFidelity';
 import { courseDesignAgent } from '@src/lib/ai/agents/courseDesign';
 import { sanitizePromptInput } from '@lib/sanitize';
 import { getUtilityModel } from '@lib/langchain';
@@ -202,6 +206,25 @@ export const chatStreamController = asyncHandler(async (req, res) => {
     return typeof a === 'number' && typeof b === 'number' ? [a, b] : undefined;
   };
   const recommendedDepth = readStr(previews?.recommended);
+  // Documents-course grounding for the design chat (FEEDBACK-1): when the
+  // course has a clamping size band, the chat prompt states the allowed
+  // lesson range for the CHOSEN depth (via THE shared tier-scope function
+  // — identical numbers to the preview cards and the structure/refine
+  // enforcement) plus the fidelity posture. Goal courses and band-less /
+  // multi_course doc courses leave both undefined — the prompt's generic
+  // scope guidance applies there.
+  const sizeBand = extractSourceSizeBand(course);
+  const clampingBand = sizeBand && sizeBand.mode !== 'multi_course' ? sizeBand : null;
+  const sourceGrounding = clampingBand
+    ? {
+        sourceFidelity: course.sourceFidelity ?? DEFAULT_SOURCE_FIDELITY,
+        sourceLessonRange: getTierScope({
+          depth: (course.depth ?? 'comprehensive') as CourseDepth,
+          isSoft: detectSoftnessHint({ answers: formatAnswersFromCourse(course.answers) }).isSoft,
+          sizeBand: clampingBand,
+        }).lessonCountRange,
+      }
+    : {};
   const courseContext = {
     courseId,
     userId,
@@ -230,6 +253,8 @@ export const chatStreamController = asyncHandler(async (req, res) => {
           (previews?.[recommendedDepth] as Record<string, unknown> | undefined)?.estimatedHoursRange,
         )
       : undefined,
+    // Documents-course grounding — see sourceGrounding above.
+    ...sourceGrounding,
   };
 
   // ── SSE headers ──────────────────────────────────────────

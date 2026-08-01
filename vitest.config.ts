@@ -9,6 +9,12 @@ export default defineConfig({
     // shipped api/src/. Its co-located tests still need to run; include
     // them here so vitest picks them up after the move from src/scripts/.
     include: ['src/**/*.test.ts', 'test-helpers/**/*.test.ts', 'scripts/**/*.test.ts'],
+    // ONE shared, transaction-capable mongod for the whole run (replacing 46
+    // per-file boots). It is also what makes `session.withTransaction` — and
+    // therefore the money-path proof in creditService.transaction.test.ts —
+    // executable at all: transactions need a replica set. See
+    // test-globalSetup.ts and test-helpers/db.ts.
+    globalSetup: ['./test-globalSetup.ts'],
     environment: 'node',
     reporters: ['default'],
     setupFiles: ['./test-setup.ts'],

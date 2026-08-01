@@ -5,35 +5,20 @@
  * Run: yarn test logout
  */
 
-import assert from 'node:assert/strict';
-import { describe, test, expect, vi } from 'vitest';
+import { describe, test, expect } from 'vitest';
 import type { Request, Response } from 'express';
 import { setupTestDb } from '../../../test-helpers/db';
+import { buildReqRes, invokeController } from '../../../test-helpers/express';
 import { makeUser, UserModel } from '../../../test-helpers/factories';
 import { logoutController } from '@controlers/auth/logout';
 
 setupTestDb();
 
-const buildReqRes = (params: { userId?: string }) => {
-  const req = { userId: params.userId } as unknown as Request;
-  const status = vi.fn(function (this: Response, _code: number) {
-    return this;
-  });
-  const json = vi.fn(function (this: Response, _body: unknown) {
-    return this;
-  });
-  const res = { status, json } as unknown as Response;
-  return { req, res, status, json };
-};
-
-const callLogout = async (req: Request, res: Response) => {
-  return new Promise<void>((resolve, reject) => {
-    Promise.resolve(logoutController(req, res, ((err?: unknown) => {
-      if (err) reject(err);
-      else resolve();
-    }))).then(() => resolve(), reject);
-  });
-};
+// This file's local `buildReqRes` was shape-identical to the shared helper —
+// the one genuine duplicate of the five. The other four are specialisations
+// with incompatible shapes and stay local on purpose; see the header note in
+// `test-helpers/express.ts`.
+const callLogout = (req: Request, res: Response) => invokeController(logoutController, req, res);
 
 describe('logoutController', () => {
   test('happy path: increments tokenVersion + responds 200', async () => {

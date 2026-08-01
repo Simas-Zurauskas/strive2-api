@@ -85,6 +85,8 @@ export const webSearch = tool(
 const READ_URL_ERROR_MESSAGES: Record<string, string> = {
   invalid_url: 'The URL is missing or malformed.',
   unsafe_url: 'That URL is not safe to fetch (private network or non-http(s) scheme).',
+  reserved:
+    'That site asks automated systems not to read this page (robots.txt / TDM reservation), or its rules could not be read, so we did not fetch it.',
   timeout: 'The page took too long to load (>10s).',
   http_error: 'The page returned an HTTP error.',
   empty_body: 'The page returned no readable content.',

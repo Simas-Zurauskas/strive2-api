@@ -1,6 +1,6 @@
 import { OpenAPIV3 } from 'openapi-types';
 import { ERROR_CODES } from '@middleware/errorMiddleware';
-import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_STATUSES, GOAL_TYPES, GOAL_TYPE_CONFIDENCES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS } from '@lib/constants';
+import { AUTH_PROVIDERS, COURSE_DEPTHS, COURSE_DOMAINS, COURSE_SOURCES, COURSE_STATUSES, GOAL_TYPES, GOAL_TYPE_CONFIDENCES, JOB_TYPES, JOB_STATUSES, LESSON_PROGRESS_STATUSES, QUESTION_TYPES, QUIZ_MASTERY_TIERS, SOURCE_ANALYSIS_MODES, SOURCE_DOCUMENT_KINDS, SOURCE_DOCUMENT_STATUSES, SOURCE_FIDELITIES } from '@lib/constants';
 import { ACHIEVEMENT_CATEGORIES, XP_SOURCES } from '@lib/gamificationConstants';
 import { BLOCK_TYPES } from '@models/LessonContentModel';
 import { RECALL_CARD_KINDS, RECALL_MODES, RECALL_RATINGS, RECALL_STATES } from '@lib/recallConstants';
@@ -92,6 +92,31 @@ export const schemas: SchemaMap = {
   UsageService: {
     type: 'string',
     enum: [...USAGE_SERVICES],
+  },
+
+  CourseSource: {
+    type: 'string',
+    enum: [...COURSE_SOURCES],
+  },
+
+  SourceDocumentStatus: {
+    type: 'string',
+    enum: [...SOURCE_DOCUMENT_STATUSES],
+  },
+
+  SourceDocumentKind: {
+    type: 'string',
+    enum: [...SOURCE_DOCUMENT_KINDS],
+  },
+
+  SourceFidelity: {
+    type: 'string',
+    enum: [...SOURCE_FIDELITIES],
+  },
+
+  SourceAnalysisMode: {
+    type: 'string',
+    enum: [...SOURCE_ANALYSIS_MODES],
   },
 
   // ── Object schemas ───────────────────────────────────────
@@ -485,7 +510,12 @@ export const schemas: SchemaMap = {
         minItems: 2,
         maxItems: 2,
         description:
-          'Optional. [min, max] estimated total learner-facing hours for this tier. Derived from lessonCountRange × ~25 minutes per lesson, rounded up, with a floor of 1 hour. Absent on legacy courses.',
+          'Optional. [min, max] estimated total learner-facing hours for this tier. Goal courses: derived from lessonCountRange × ~25 minutes per lesson, rounded up, with a floor of 1 hour. Documents courses with a clamping size band: derived from the band-clamped lessonCountRange × a per-tier depth factor (overview ~15 min, comprehensive ~30 min, deep_dive ~45 min per lesson), so tiers sharing a lesson count still differ visibly in hours. Absent on legacy courses.',
+      },
+      sourceTierNote: {
+        type: 'string',
+        description:
+          'Optional; documents courses whose lesson counts are clamped to the corpus size band only. Short learner-facing note explaining the depth-of-treatment differentiation (e.g. "Same source scope, deeper treatment per lesson") — rendered on the depth card so equal lesson counts across tiers read as deliberate. Absent on goal courses, multi_course corpora, and legacy rows.',
       },
     },
   },
@@ -1022,6 +1052,17 @@ export const schemas: SchemaMap = {
     },
   },
 
+  LessonProgressDocumentStatusEvent: {
+    type: 'object',
+    required: ['type', 'documentId', 'status'],
+    properties: {
+      type: { type: 'string', enum: ['document_status'] },
+      documentId: { type: 'string' },
+      status: { $ref: '#/components/schemas/SourceDocumentStatus' },
+      warnings: { type: 'array', items: { type: 'string' } },
+    },
+  },
+
   LessonProgressEvent: {
     oneOf: [
       { $ref: '#/components/schemas/LessonProgressBlockEvent' },
@@ -1031,6 +1072,7 @@ export const schemas: SchemaMap = {
       { $ref: '#/components/schemas/LessonProgressRecallCardsSavedEvent' },
       { $ref: '#/components/schemas/LessonProgressNarrationStartedEvent' },
       { $ref: '#/components/schemas/LessonProgressNarrationReadyEvent' },
+      { $ref: '#/components/schemas/LessonProgressDocumentStatusEvent' },
     ],
     discriminator: {
       propertyName: 'type',
@@ -1042,6 +1084,7 @@ export const schemas: SchemaMap = {
         recall_cards_saved: '#/components/schemas/LessonProgressRecallCardsSavedEvent',
         narration_started: '#/components/schemas/LessonProgressNarrationStartedEvent',
         narration_ready: '#/components/schemas/LessonProgressNarrationReadyEvent',
+        document_status: '#/components/schemas/LessonProgressDocumentStatusEvent',
       },
     },
   } as unknown as OpenAPIV3.SchemaObject,
@@ -1259,6 +1302,11 @@ export const schemas: SchemaMap = {
       structure: { $ref: '#/components/schemas/GenerateStructureResponse' },
       feedbackHistory: { type: 'array', items: { type: 'string' } },
       pendingFeedback: { type: 'string' },
+      // Course-from-documents provenance. Null on goal-based and
+      // pre-feature rows. `sourceAssessment` is deliberately NOT declared
+      // yet — nothing writes it until the ingest job ships.
+      source: nullableRef('#/components/schemas/CourseSource'),
+      sourceFidelity: nullableRef('#/components/schemas/SourceFidelity'),
       currentStep: { type: 'number' },
       activeJobId: { type: 'string' },
       activeLesson: {
@@ -1818,6 +1866,113 @@ export const schemas: SchemaMap = {
       dedupedFromExisting: {
         type: 'boolean',
         description: 'True when this exact file (sha256 match) was already on the session.',
+      },
+    },
+  },
+
+  // ── Source documents ─────────────────────────────────────
+
+  SourceDocument: {
+    type: 'object',
+    required: ['id', 'kind', 'filename', 'mimeType', 'byteSize', 'status', 'warnings', 'createdAt'],
+    properties: {
+      id: { type: 'string' },
+      kind: { $ref: '#/components/schemas/SourceDocumentKind' },
+      sourceUrl: {
+        type: 'string',
+        nullable: true,
+        description: 'For url-kind documents — the public article URL. Null for file uploads.',
+      },
+      filename: { type: 'string' },
+      mimeType: { type: 'string' },
+      byteSize: { type: 'integer' },
+      status: { $ref: '#/components/schemas/SourceDocumentStatus' },
+      rejectionReason: {
+        type: 'string',
+        nullable: true,
+        description: 'Category-level reason when status is rejected — never echoes document content.',
+      },
+      pageCount: { type: 'integer', nullable: true },
+      scannedPageCount: {
+        type: 'integer',
+        nullable: true,
+        description: 'Pages detected as scanned (image-only). Compare with escalatedPages.length: a surplus means paid vision extraction is still outstanding (prepare-corpus).',
+      },
+      escalatedPages: {
+        type: 'array',
+        items: { type: 'integer' },
+        description: '1-based scanned pages already put through vision escalation — including pages that came back blank, which are never re-escalated. scannedPageCount > escalatedPages.length ⇒ the document needs the prepare-corpus pass.',
+      },
+      audioDurationSec: {
+        type: 'number',
+        nullable: true,
+        description: 'Total audio duration (audio documents only).',
+      },
+      transcribedSec: {
+        type: 'number',
+        nullable: true,
+        description: 'Seconds actually transcribed. transcribedSec < audioDurationSec ⇒ the document needs the prepare-corpus pass.',
+      },
+      reservationSignal: {
+        type: 'string',
+        nullable: true,
+        description:
+          'url-kind documents only — the machine-readable rights-reservation signal honoured before fetching (no_reservation | robots_disallow | tdm_reservation | robots_unavailable | tdm_unavailable | tdm_malformed | unsafe_host | host_unresolvable). Null for file uploads and for documents ingested before the gate existed.',
+      },
+      reservationCheckedAt: {
+        type: 'string',
+        format: 'date-time',
+        nullable: true,
+        description: 'When that reservation signal was read. May predate the fetch by the per-host cache TTL.',
+      },
+      warnings: { type: 'array', items: { type: 'string' } },
+      createdAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  SourceAnalysis: {
+    type: 'object',
+    required: ['topics', 'sizeBand', 'teachableDensity', 'suggestedGoal', 'questions', 'warnings', 'perDocument'],
+    description:
+      'Coarse, client-safe assessment of the uploaded corpus. Deliberately metadata-only — it never contains extracted document text.',
+    properties: {
+      topics: { type: 'array', items: { type: 'string' } },
+      sizeBand: {
+        type: 'object',
+        required: ['minLessons', 'maxLessons', 'mode'],
+        properties: {
+          minLessons: { type: 'integer' },
+          maxLessons: { type: 'integer' },
+          mode: { $ref: '#/components/schemas/SourceAnalysisMode' },
+        },
+      },
+      teachableDensity: {
+        type: 'number',
+        description: '0–1 score of how much teachable substance the corpus holds.',
+      },
+      suggestedGoal: {
+        type: 'string',
+        description: 'Editable course-goal suggestion synthesized from the corpus.',
+      },
+      questions: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Up to 3 clarifying questions the assessment wants answered before design.',
+      },
+      warnings: { type: 'array', items: { type: 'string' } },
+      perDocument: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['documentId', 'filename', 'status', 'warnings'],
+          properties: {
+            documentId: { type: 'string' },
+            filename: { type: 'string' },
+            status: { $ref: '#/components/schemas/SourceDocumentStatus' },
+            rejectionReason: { type: 'string', nullable: true },
+            warnings: { type: 'array', items: { type: 'string' } },
+          },
+        },
       },
     },
   },

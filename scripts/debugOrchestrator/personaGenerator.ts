@@ -2,11 +2,11 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 import { withRetry } from '@lib/retry';
-import { MODEL_IDS } from '@lib/langchain';
 import { makeLlmCacheCallback } from '@lib/ai/cacheLogger';
 import { ANTHROPIC_API_KEY } from '@conf/env';
-import { GOAL_TYPES } from '@lib/constants';
+import { GOAL_TYPES, SOURCE_FIDELITIES } from '@lib/constants';
 import type { GoalType } from '@lib/constants';
+import { summarizeSetForPersona, type LoadedDocumentSet } from './documentSets';
 import type { Persona } from './types';
 
 const PERSONA_SYSTEM_PROMPT = `You are generating realistic test personas for an AI-powered course creation platform. These personas will walk through the wizard (clarifying questions → depth choice → structure → optional chat refinement → accept), then through the learning experience (lessons → module quizzes → spaced-repetition recall reviews).
@@ -120,52 +120,96 @@ Set the persona's:
 
 5. **goalType coverage** — when generating ≥5 personas, ensure each predictedGoalType (master, monetize, pass, build, fluency) is represented at least once across the cohort. For smaller cohorts (1-4) coverage is unenforced — diversity over completeness. At least one persona total should have a non-null goalTypeOverrideTarget so the override path gets exercised when the orchestrator opts into it.`;
 
+const basePersonaShape = {
+  name: z.string(),
+  background: z.string(),
+  goal: z.string(),
+  personality: z.string(),
+  priorities: z.string(),
+  wizardBehavior: z.object({
+    surveyStyle: z.string(),
+    depthChoice: z.string(),
+    structureReview: z.string(),
+    quizAttemptStyle: z.string(),
+    recallReviewStyle: z.string(),
+  }),
+  quizStyleFlags: z.object({
+    rushes: z.boolean(),
+    secondGuesses: z.boolean(),
+    eliminates: z.boolean(),
+    guessesWhenUnsure: z.boolean(),
+  }),
+  recallStyleFlags: z.object({
+    struggles: z.boolean(),
+    articulate: z.boolean(),
+    generous: z.boolean(),
+    harsh: z.boolean(),
+  }),
+  predictedGoalType: z.enum(GOAL_TYPES),
+  predictedGoalTypeReasoning: z.string(),
+  goalTypeOverrideTarget: z.enum(GOAL_TYPES).nullable(),
+} as const;
+
 const personaOutputSchema = z.object({
+  personas: z.array(z.object(basePersonaShape)),
+});
+
+// Docs-mode variant: same persona shape + a REQUIRED documentsProfile.
+// A separate schema (rather than an optional field on the base) keeps
+// goal-mode structured-output byte-identical to pre-feature behavior and
+// makes a docs-run persona missing its profile a schema violation that
+// withRetry can react to, not a silent null.
+const documentsPersonaOutputSchema = z.object({
   personas: z.array(
     z.object({
-      name: z.string(),
-      background: z.string(),
-      goal: z.string(),
-      personality: z.string(),
-      priorities: z.string(),
-      wizardBehavior: z.object({
-        surveyStyle: z.string(),
-        depthChoice: z.string(),
-        structureReview: z.string(),
-        quizAttemptStyle: z.string(),
-        recallReviewStyle: z.string(),
+      ...basePersonaShape,
+      documentsProfile: z.object({
+        ownershipStory: z.string(),
+        predictedFidelity: z.enum(SOURCE_FIDELITIES),
+        predictedFidelityReasoning: z.string(),
+        suggestedGoalStance: z.enum(['accept', 'edit']),
+        suggestedGoalStanceReasoning: z.string(),
       }),
-      quizStyleFlags: z.object({
-        rushes: z.boolean(),
-        secondGuesses: z.boolean(),
-        eliminates: z.boolean(),
-        guessesWhenUnsure: z.boolean(),
-      }),
-      recallStyleFlags: z.object({
-        struggles: z.boolean(),
-        articulate: z.boolean(),
-        generous: z.boolean(),
-        harsh: z.boolean(),
-      }),
-      predictedGoalType: z.enum(GOAL_TYPES),
-      predictedGoalTypeReasoning: z.string(),
-      goalTypeOverrideTarget: z.enum(GOAL_TYPES).nullable(),
     }),
   ),
 });
 
+const DOCUMENTS_MODE_ADDENDUM = `
+## DOCUMENTS MODE (active for this cohort)
+
+These personas are NOT typing a goal into a text box. Each persona OWNS a set of real documents (listed per-persona in the user message: filenames, a one-line description, short content previews) and uses the platform's "build a course from your documents" flow: they upload the files, the platform analyzes them and suggests a course goal, and the persona confirms or edits that goal plus picks a source-fidelity level.
+
+Additional rules:
+
+1. **Ownership plausibility.** Each persona must be someone who would REALISTICALLY possess exactly these documents (a student with lecture notes, a hobbyist with saved articles, an employee with internal handbooks…). Their background must explain how the documents came to be on their disk. Do not invent documents that aren't in the listing.
+2. **goal still matters.** The "goal" field is what the persona HOPES to get out of these documents (their private intent — it drives the goal-type axis exactly as in goal mode). It is not typed into the product in this mode, but the persona will compare the platform's suggested goal against it.
+3. **documentsProfile (REQUIRED per persona)**:
+   - **ownershipStory**: 1-2 sentences — why this persona owns this document set. Must reference the actual files.
+   - **predictedFidelity**: which fidelity they'd pick on the analysis screen. "strict" = stick to my materials only (revision/compliance types); "guided" = follow my materials but fill small gaps (the default most people keep); "enrich" = use my materials as a seed and add context (curious/expansive types).
+   - **predictedFidelityReasoning**: one sentence tying the pick to the persona.
+   - **suggestedGoalStance**: "accept" (trusts the suggestion, most users) or "edit" (rewrites it to match their real intent — skeptics, people with a sharp deadline or a different angle than the documents' framing).
+   - **suggestedGoalStanceReasoning**: one sentence — if "edit", say HOW they'd change it (narrower? exam-focused? project-focused?).
+4. **Keep goalTypeOverrideTarget null** for docs-mode personas unless the persona is a genuinely torn archetype — the docs flow already adds steps and the override doubles the clarify cost.
+5. All other rules (behavior specificity, realism, topic honesty) still apply — but the persona's topic is DICTATED by their document set. Do not give a persona goals unrelated to their documents.`;
+
 // Temp 0.9 for creative persona diversity — PERSONA_SYSTEM_PROMPT is
 // calibrated to high-variance output.
+//
+// Pinned to sonnet-4-6, NOT MODEL_IDS.SONNET: the app moved to
+// claude-sonnet-5 (2026-08), which rejects `temperature` — but persona
+// variance is the point of this dev-only call, so it stays on the last
+// temperature-capable Sonnet. Revisit if/when 4.6 retires.
+const ORCHESTRATOR_MODEL = 'claude-sonnet-4-6';
 let _model: ChatAnthropic | null = null;
 function getModel(): ChatAnthropic {
   if (!_model) {
     _model = new ChatAnthropic({
-      model: MODEL_IDS.SONNET,
+      model: ORCHESTRATOR_MODEL,
       temperature: 0.9,
       anthropicApiKey: ANTHROPIC_API_KEY,
       maxTokens: 8192,
       clientOptions: { timeout: 120000 },
-      callbacks: [makeLlmCacheCallback({ defaultLabel: 'orchestrator:persona-gen', model: MODEL_IDS.SONNET })],
+      callbacks: [makeLlmCacheCallback({ defaultLabel: 'orchestrator:persona-gen', model: ORCHESTRATOR_MODEL })],
     });
   }
   return _model;
@@ -174,8 +218,12 @@ function getModel(): ChatAnthropic {
 export async function generatePersonas(
   count: number = 5,
   distribution: Partial<Record<GoalType, number>> | null = null,
+  personaSets: LoadedDocumentSet[] | null = null,
 ): Promise<Persona[]> {
-  console.log(`${'[PersonaGen]'.magenta} Generating ${count} personas via Sonnet...`);
+  const documentsMode = personaSets !== null && personaSets.length > 0;
+  console.log(
+    `${'[PersonaGen]'.magenta} Generating ${count} personas via Sonnet...${documentsMode ? ' (documents mode)' : ''}`,
+  );
 
   // Cohort-bias constraint — when an operator pins the distribution via
   // --goal-type or --goal-type-distribution, hard-constrain the generator
@@ -183,6 +231,17 @@ export async function generatePersonas(
   // that bucket. This OVERRIDES the default "≥5 → cover all buckets"
   // soft-coverage rule documented in the system prompt.
   let humanMessage = `Generate exactly ${count} personas.`;
+
+  // Documents mode: hand the generator each persona's set summary
+  // (filenames + manifest note + ~400-char previews) so the persona
+  // plausibly owns exactly that corpus. Index-aligned: persona #i must
+  // own set #i.
+  if (documentsMode) {
+    const setBlocks = personaSets!
+      .map((set, i) => `### Persona #${i + 1} owns this document set:\n${summarizeSetForPersona(set)}`)
+      .join('\n\n');
+    humanMessage += `\n\nDOCUMENTS MODE — per-persona document sets (persona #i MUST plausibly own set #i and their goal MUST be about this material):\n\n${setBlocks}`;
+  }
   if (distribution) {
     const lines = (Object.entries(distribution) as [GoalType, number][])
       .filter(([, n]) => n > 0)
@@ -199,13 +258,15 @@ export async function generatePersonas(
   // withStructuredOutput enforces the schema via Anthropic tool-use, so a
   // shape miss throws and `withRetry` re-invokes (3 retries, exponential
   // backoff). Without the retry, a single flaky structured-output call
-  // tanks the whole orchestrator run.
+  // tanks the whole orchestrator run. Docs mode swaps in the schema whose
+  // personas carry a REQUIRED documentsProfile.
+  const systemPrompt = documentsMode ? PERSONA_SYSTEM_PROMPT + DOCUMENTS_MODE_ADDENDUM : PERSONA_SYSTEM_PROMPT;
   const parsed = await withRetry(() =>
     getModel()
-      .withStructuredOutput(personaOutputSchema)
+      .withStructuredOutput(documentsMode ? documentsPersonaOutputSchema : personaOutputSchema)
       .invoke(
         [
-          new SystemMessage(PERSONA_SYSTEM_PROMPT),
+          new SystemMessage(systemPrompt),
           new HumanMessage(humanMessage),
         ],
         { metadata: { llmLabel: 'orchestrator:persona-gen' } },
@@ -248,9 +309,22 @@ export async function generatePersonas(
       );
       p.goalTypeOverrideTarget = null;
     }
+    // Docs mode: the schema already requires documentsProfile, but guard
+    // the free-text fields the same way predictedGoalTypeReasoning is
+    // guarded — an empty ownership story leaves the D4 decision step and
+    // the assessor with nothing to anchor on.
+    const documentsProfile = (p as Persona).documentsProfile ?? null;
+    if (documentsMode) {
+      if (!documentsProfile || !documentsProfile.ownershipStory.trim() || !documentsProfile.predictedFidelityReasoning.trim()) {
+        throw new Error(`Persona "${p.name}" is missing documentsProfile fields (documents mode)`);
+      }
+    }
     const overrideStr = p.goalTypeOverrideTarget ? ` → override:${p.goalTypeOverrideTarget}` : '';
+    const docsStr = documentsProfile
+      ? `, fidelity: ${documentsProfile.predictedFidelity}, goal-stance: ${documentsProfile.suggestedGoalStance}`
+      : '';
     console.log(
-      `${'[PersonaGen]'.magenta}   → ${p.name} [quiz: ${describeQuizFlags(p.quizStyleFlags)}, recall: ${describeRecallFlags(p.recallStyleFlags)}, goalType: ${p.predictedGoalType}${overrideStr}]`,
+      `${'[PersonaGen]'.magenta}   → ${p.name} [quiz: ${describeQuizFlags(p.quizStyleFlags)}, recall: ${describeRecallFlags(p.recallStyleFlags)}, goalType: ${p.predictedGoalType}${overrideStr}${docsStr}]`,
     );
   }
 

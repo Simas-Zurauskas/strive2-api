@@ -19,6 +19,21 @@ export interface LlmPrice {
 // here (not SERVICE_PRICING) because it bills per token returned. Missing keys
 // log once and return 0 — loud rather than silently under-billing.
 export const LLM_PRICING: Record<string, LlmPrice> = {
+  // Sticker rates deliberately, not the $2/$10 intro pricing that lapses
+  // 2026-08-31 — intro rates would silently under-bill from Sep 1. Same
+  // per-token price as sonnet-4-6, but the Sonnet 5 tokenizer emits
+  // ~1.36× (prose) to ~1.44× (code) as many tokens for the same text, so
+  // equivalent generations meter higher. See
+  // wiki-strive/notes/WORKING/ai-upgrade/research-pricing-analysis.md.
+  'claude-sonnet-5': {
+    inputMicroCentsPerMTok: 3_000_000,
+    outputMicroCentsPerMTok: 15_000_000,
+    cacheWrite5mMicroCentsPerMTok: 3_750_000,
+    cacheWrite1hMicroCentsPerMTok: 6_000_000,
+    cacheReadMicroCentsPerMTok: 300_000,
+  },
+  // Kept after the 2026-08 Sonnet 5 migration: rollback target + historical
+  // UsageEvent comparability.
   'claude-sonnet-4-6': {
     inputMicroCentsPerMTok: 3_000_000,
     outputMicroCentsPerMTok: 15_000_000,
@@ -63,6 +78,11 @@ export const SERVICE_PRICING = {
   judge0_rapidapi: { perUnitMicroCents: 2_000 },
   pinecone_write_unit: { perUnitMicroCents: 4 },
   pinecone_read_unit: { perUnitMicroCents: 16 },
+  // OpenAI gpt-4o-mini-transcribe ≈ $0.003/min (research-document-parsing
+  // §6); billed per minute of audio actually transcribed (fractional
+  // units allowed — priceFlatUnit rounds). Used by documentExtraction/
+  // audio.ts with action 'doc:transcribe'.
+  openai_transcribe_minute: { perUnitMicroCents: 3_000 },
 } as const;
 
 // Per-1M-chars (not per-char) because cheap providers are sub-microcent

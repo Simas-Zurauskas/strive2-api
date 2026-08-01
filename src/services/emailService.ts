@@ -1,38 +1,40 @@
 import Mailjet from 'node-mailjet';
-import { MAILJET_API_KEY, MAILJET_API_SECRET } from '@conf/env';
+import {
+  MAILJET_API_KEY,
+  MAILJET_API_SECRET,
+  SENDER_EMAIL_ACCOUNT,
+  SENDER_EMAIL_PROMOTIONAL,
+} from '@conf/env';
 import { integrationLog } from '@lib/loggers';
 import { captureError } from '@lib/errorReporter';
 import {
   buildVerificationEmail,
   buildPasswordResetEmail,
   buildSecurityActionCodeEmail,
-  buildOldUserRelaunchEmail,
-  buildOldPayingUserThanksEmail,
+  buildDocumentsFeatureEmail,
   type EmailPayload,
   type SecurityActionKind,
 } from '@lib/email/templates';
 
-// Transactional sender — verification, password reset, security codes.
-// Anything users implicitly opted into by performing an account action.
-export const SENDER_EMAIL_ACCOUNT = 'accounts@strive-learning.com';
-
-// Promotional sender — relaunch announcements, marketing campaigns,
-// anything that requires opt-out. Kept separate so spam complaints and
-// soft-bounces on the marketing stream don't drag down deliverability of
-// password reset / verification mail. Until the new domain is verified
-// in Mailjet (see MAILJET_SETUP.md / TODO note in adminRoutes), this can
-// share the transactional address — set both to the same value.
+// Sender identities now live in `@conf/env` so the promotional stream can be
+// moved to its own marketing subdomain without a deploy (PLAN A7). Re-exported
+// here because every existing caller imports them from this module.
 //
-// Mailjet setup required before flipping this to a separate address:
-//   1. Add `hello@strive-learning.com` (or your chosen handle) as a
-//      verified sender in Mailjet → Senders & Domains.
-//   2. Confirm SPF + DKIM DNS records cover the new sender (the
-//      `strive-learning.com` domain DKIM almost certainly already does;
-//      verify in Mailjet's domain auth panel).
-//   3. Optional but recommended: create a dedicated sub-account or a
-//      separate Mailjet API key scoped to the promotional sender so
-//      transactional throughput isn't affected by marketing rate limits.
-export const SENDER_EMAIL_PROMOTIONAL = 'hello@strive-learning.com';
+//   - Transactional (`SENDER_EMAIL_ACCOUNT`) — verification, password reset,
+//     security codes. Anything users implicitly opted into by performing an
+//     account action.
+//   - Promotional (`SENDER_EMAIL_PROMOTIONAL`) — campaigns, anything that
+//     carries an opt-out. Kept separate so spam complaints and soft bounces
+//     on the marketing stream don't drag down the deliverability of
+//     password-reset / verification mail.
+//
+// Mailjet prerequisites for the promotional address (operator, not code):
+//   1. it is a verified sender in Mailjet → Senders & Domains;
+//   2. SPF + DKIM DNS records cover it — for a dedicated marketing
+//      subdomain that is a fresh pair of records, not the apex domain's;
+//   3. optionally a sub-account / separate API key so marketing rate limits
+//      cannot throttle transactional throughput.
+export { SENDER_EMAIL_ACCOUNT, SENDER_EMAIL_PROMOTIONAL };
 
 const mailjet = new Mailjet({
   apiKey: MAILJET_API_KEY,
@@ -55,6 +57,16 @@ const send = async (params: {
   // don't pay the parse cost / surface a render error if a stray bracket
   // pair sneaks into copy.
   templateLanguage?: boolean;
+  // Extra SMTP headers. Used for RFC 8058 `List-Unsubscribe` +
+  // `List-Unsubscribe-Post` on promotional mail, which is what turns the
+  // mail client's own "unsubscribe" affordance into a one-click POST at our
+  // route instead of a spam report.
+  headers?: Record<string, string>;
+  // PLAN A10 / F6. Mailjet's account default decides tracking when these are
+  // unset, so "we don't use tracking pixels" was previously a dashboard
+  // setting nobody could see from the code. Set explicitly per send, and
+  // asserted in `emailService.test.ts`.
+  disableTracking?: boolean;
 }): Promise<void> => {
   const fromEmail = params.from ?? SENDER_EMAIL_ACCOUNT;
   await mailjet.post('send', { version: 'v3.1' }).request({
@@ -66,6 +78,10 @@ const send = async (params: {
         HTMLPart: params.payload.html,
         TextPart: params.payload.text,
         ...(params.templateLanguage ? { TemplateLanguage: true } : {}),
+        ...(params.headers ? { Headers: params.headers } : {}),
+        ...(params.disableTracking
+          ? { TrackOpens: 'disabled', TrackClicks: 'disabled' }
+          : {}),
       },
     ],
   });
@@ -123,6 +139,70 @@ const sendAsyncWithRetry = (params: {
       fingerprint: ['email_delivery', params.template],
     });
   });
+};
+
+// **Awaited** delivery with retry — the batch-campaign counterpart to
+// `sendAsyncWithRetry`, and a deliberately separate function rather than a
+// refactor of it (F12). Three reasons the harness above cannot be reused:
+//
+//   1. it is fire-and-forget (`setImmediate`, returns `void`), so a batch
+//      loop could never learn whether a send landed, and the claim-then-send
+//      CAS in `sendMarketingCampaign` has nothing to roll back on;
+//   2. its inner call is `send({ to, payload })` — it **drops `from` and
+//      `templateLanguage`**, so a promotional template routed through it
+//      would ship from the transactional address with the literal string
+//      `[[UNSUB_LINK_EN]]` where the opt-out link should be;
+//   3. it is a protected surface: five transactional call sites depend on
+//      its exact behaviour.
+//
+// The ladder is deliberately shorter than the transactional one. Worst-case
+// wall time is `batchSize × (attempts−1 delays + round trips)` inside a
+// single HTTP request, so a 1s/4s ladder at batch 250 would blow past any
+// reverse-proxy timeout. Two retries at 1s and 3s bound a failing recipient
+// at ~4s of delay, and `sendMarketingCampaign` additionally stops claiming
+// once its own time budget is spent.
+const PROMO_RETRY_DELAYS_MS = [1_000, 3_000];
+
+export const sendWithRetry = async (params: {
+  to: string;
+  payload: EmailPayload;
+  template: string;
+  from?: string;
+  templateLanguage?: boolean;
+  headers?: Record<string, string>;
+  disableTracking?: boolean;
+}): Promise<void> => {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= PROMO_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      await send({
+        to: params.to,
+        payload: params.payload,
+        from: params.from,
+        templateLanguage: params.templateLanguage,
+        headers: params.headers,
+        disableTracking: params.disableTracking,
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      // No recipient address in the line — a campaign log is a list of who
+      // we mailed, which is exactly the PII a log should not accumulate.
+      integrationLog.warn(
+        `mailjet:send fail template=${params.template} attempt=${attempt + 1}/${PROMO_RETRY_DELAYS_MS.length + 1} reason=${message}`,
+      );
+      if (attempt < PROMO_RETRY_DELAYS_MS.length) {
+        await new Promise((r) => setTimeout(r, PROMO_RETRY_DELAYS_MS[attempt]));
+      }
+    }
+  }
+
+  // Thrown, not swallowed: the caller owns the claim for this recipient and
+  // must roll it back. Sentry reporting is the caller's call too — a whole
+  // batch failing is one incident, not N.
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 };
 
 // ── Public senders ───────────────────────────────────────
@@ -200,23 +280,43 @@ export const sendSecurityActionCodeAsync = (params: {
 // bulk campaigns (when we add them) should use a queued worker, not
 // loop over this function.
 
-export const sendOldUserRelaunchEmail = async (params: { to: string }): Promise<void> => {
-  await send({
+/**
+ * The documents-feature campaign sender.
+ *
+ * Everything a promotional message legally and operationally needs is set
+ * HERE rather than left to a caller, because every one of these has a
+ * silent-failure mode:
+ *
+ *   - `from: SENDER_EMAIL_PROMOTIONAL` — otherwise marketing goes out on
+ *     the transactional reputation;
+ *   - `templateLanguage: true` — without it Mailjet's `[[UNSUB_LINK_EN]]`
+ *     ships as literal text, which is the failure mode for a test send to
+ *     an address with no ledger row (no `unsubscribeUrl` to substitute);
+ *   - `List-Unsubscribe` + `List-Unsubscribe-Post` (RFC 8058) — the mail
+ *     client's own unsubscribe button. Without them the reader's only
+ *     available "make this stop" control is the spam button;
+ *   - `disableTracking` — PLAN A10: no open or click tracking in any new
+ *     email, enforced in code rather than in a vendor dashboard.
+ */
+export const sendDocumentsFeatureEmail = async (params: {
+  to: string;
+  /** Our own per-contact opt-out URL. Omitted only where no ledger row
+   *  exists (dev preview, ad-hoc admin test send) — the renderer then falls
+   *  back to Mailjet's hosted link so the footer is never dead. */
+  unsubscribeUrl?: string;
+}): Promise<void> => {
+  await sendWithRetry({
     to: params.to,
-    payload: buildOldUserRelaunchEmail(),
-    from: SENDER_EMAIL_PROMOTIONAL,
-    // Promotional sends rely on Mailjet's `[[UNSUB_LINK_EN]]` substitution
-    // for the unsubscribe footer — enabling the template language is what
-    // turns the raw `[[…]]` placeholder into a real per-recipient URL.
-    templateLanguage: true,
-  });
-};
-
-export const sendOldPayingUserThanksEmail = async (params: { to: string }): Promise<void> => {
-  await send({
-    to: params.to,
-    payload: buildOldPayingUserThanksEmail(),
+    payload: buildDocumentsFeatureEmail({ unsubscribeUrl: params.unsubscribeUrl }),
+    template: 'documents_feature',
     from: SENDER_EMAIL_PROMOTIONAL,
     templateLanguage: true,
+    headers: params.unsubscribeUrl
+      ? {
+          'List-Unsubscribe': `<${params.unsubscribeUrl}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        }
+      : undefined,
+    disableTracking: true,
   });
 };

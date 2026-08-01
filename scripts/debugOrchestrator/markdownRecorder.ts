@@ -24,7 +24,14 @@ import type {
   CostEvent,
   CostSummary,
   OrchestratorConfig,
+  DocumentUploadRecord,
+  SourceAnalysisView,
+  GoalFidelityRecord,
+  CorpusPreparationRecord,
+  BandAdherenceRecord,
 } from './types';
+import type { ClientSourceDocument } from '@services/sourceDocumentService';
+import type { LoadedDocumentSet } from './documentSets';
 import type { ApiClient } from './apiClient';
 import type { ClarifyCueAssertion, StructureConformanceAssertion } from './goalTypeAssertions';
 import type { GetRecallQueueResult, RecallStats } from '@services/recallQueueService';
@@ -198,6 +205,18 @@ export class MarkdownRecorder {
     const overrideLine = p.goalTypeOverrideTarget
       ? ` → would switch to **${p.goalTypeOverrideTarget}** via the chip if given the chance`
       : '';
+    // Docs-mode-only block (absent on goal-mode personas, so goal-mode
+    // reports stay byte-identical): the generator's predictions about how
+    // this persona treats the analysis screen. Scored against the actual
+    // D4 decision in the Goal & Fidelity Confirmation section.
+    const docsProfileBlock = p.documentsProfile
+      ? `
+### Documents Profile (predicted — documents mode)
+- **Ownership story:** ${p.documentsProfile.ownershipStory}
+- **Predicted fidelity:** \`${p.documentsProfile.predictedFidelity}\` — ${p.documentsProfile.predictedFidelityReasoning}
+- **Suggested-goal stance:** ${p.documentsProfile.suggestedGoalStance} — ${p.documentsProfile.suggestedGoalStanceReasoning}
+`
+      : '';
     this.sections.push(`# Debug Orchestrator Report: ${p.name}
 Generated: ${new Date().toISOString()}
 
@@ -211,7 +230,7 @@ Generated: ${new Date().toISOString()}
 ### Predicted Goal Type (ground truth for the classifier)
 - **predictedGoalType:** \`${p.predictedGoalType}\`${overrideLine}
 - **Reasoning:** ${p.predictedGoalTypeReasoning}
-
+${docsProfileBlock}
 ### Predicted Behavior
 - **Survey style:** ${p.wizardBehavior.surveyStyle}
 - **Depth choice:** ${p.wizardBehavior.depthChoice}
@@ -230,10 +249,14 @@ Generated: ${new Date().toISOString()}
    *
    * Kept compact — one-line list of toggles + lesson cap. No prose.
    */
-  addRunConfiguration(config: OrchestratorConfig): void {
+  addRunConfiguration(config: OrchestratorConfig, documentSetName?: string): void {
     const onOff = (v: boolean) => (v ? 'on' : 'off');
+    // Docs-mode-only line — goal-mode output stays byte-identical.
+    const modeLine = config.documentsMode
+      ? `- **Mode:** documents (set: ${documentSetName ?? 'unknown'})\n`
+      : '';
     this.sections.push(`## Run Configuration
-- **Lessons target:** ${config.maxLessons === 0 ? 'skipped (wizard only)' : String(config.maxLessons)}
+${modeLine}- **Lessons target:** ${config.maxLessons === 0 ? 'skipped (wizard only)' : String(config.maxLessons)}
 - **Structure-review chat:** ${onOff(config.enableChatReview)}
 - **Module quizzes:** ${onOff(config.enableQuiz)}
 - **Recall queue review:** ${onOff(config.enableRecall)}
@@ -248,6 +271,188 @@ Generated: ${new Date().toISOString()}
 ## Step 1: Create Course (${fmtDuration(result.durationMs)})
 **Course ID:** \`${courseId}\`
 **Goal submitted:** "${this.persona!.goal}"
+`);
+  }
+
+  // ── Documents-mode sections (only rendered in --documents runs) ──
+
+  /** Docs-mode replacement for the Step-1 block: shell course, no goal typed. */
+  addStep1_CreateDocumentsCourse({ result, courseId }: { result: StepResult; courseId: string }): void {
+    this.sections.push(`---
+
+## Step 1: Create Course — documents mode (${fmtDuration(result.durationMs)})
+**Course ID:** \`${courseId}\`
+**Request:** \`POST /api/course {source:'documents'}\` — no goal typed; the server persists a placeholder until the analysis suggests one.
+**Persona's private intent:** "${this.persona!.goal}"
+`);
+  }
+
+  /** "Source Document Set" — what the orchestrator is about to upload. */
+  addDocumentSet(set: LoadedDocumentSet): void {
+    let filesTable = '| File | Size | Preview |\n|------|------|---------|';
+    for (const f of set.files) {
+      const kb = `${(f.byteSize / 1024).toFixed(1)} KB`;
+      filesTable += `\n| ${escapeCell(f.filename)} | ${kb} | ${escapeCell(truncate({ str: f.preview || '(binary, no preview)', maxLen: 160 }))} |`;
+    }
+    const urls = set.manifest?.urls ?? [];
+    const urlLines = urls.length > 0 ? `\n**Manifest URLs:**\n${urls.map((u) => `- ${u}`).join('\n')}\n` : '';
+    const topics = set.manifest?.expectedTopics ?? [];
+    const topicsLine =
+      topics.length > 0
+        ? `**Expected topics (set author's ground truth for the K2 rubric row):** ${topics.join(', ')}\n`
+        : '';
+    this.sections.push(`---
+
+## Source Document Set
+- **Set name:** \`${set.name}\`
+- **Files:** ${set.files.length}${urls.length > 0 ? ` (+ ${urls.length} URL${urls.length === 1 ? '' : 's'})` : ''}
+- **Manifest note:** ${set.manifest?.note ?? '_none_'}
+
+${topicsLine}${filesTable}
+${urlLines}`);
+  }
+
+  /** "Upload & Ingest" — per-doc upload outcomes + ingest job + post-ingest rows. */
+  addUploadIngest({
+    uploads,
+    ingestJobMs,
+    documents,
+  }: {
+    uploads: DocumentUploadRecord[];
+    ingestJobMs: number;
+    documents: ClientSourceDocument[];
+  }): void {
+    const accepted = uploads.filter((u) => u.outcome === 'accepted').length;
+    const rejected = uploads.filter((u) => u.outcome === 'rejected').length;
+
+    let uploadTable = '| # | Kind | Name | Size | Outcome | Detail |\n|---|------|------|------|---------|--------|';
+    for (let i = 0; i < uploads.length; i++) {
+      const u = uploads[i];
+      const size = u.byteSize !== undefined ? `${(u.byteSize / 1024).toFixed(1)} KB` : '—';
+      const detail =
+        u.outcome === 'accepted'
+          ? `status \`${u.document?.status ?? '?'}\`${u.document?.warnings?.length ? `; warnings: ${u.document.warnings.join('; ')}` : ''}`
+          : (u.error ?? 'rejected');
+      uploadTable += `\n| ${i + 1} | ${u.kind} | ${escapeCell(u.name)} | ${size} | ${u.outcome === 'accepted' ? 'accepted' : '**REJECTED**'} | ${escapeCell(truncate({ str: detail, maxLen: 300 }))} |`;
+    }
+
+    let docsTable =
+      '| Document | Status | Pages | Scanned | Escalated | Audio (s) | Transcribed (s) | Warnings |\n|----------|--------|-------|---------|-----------|-----------|-----------------|----------|';
+    for (const d of documents) {
+      docsTable += `\n| ${escapeCell(d.filename)} | ${d.status}${d.rejectionReason ? ` (${escapeCell(d.rejectionReason)})` : ''} | ${d.pageCount ?? '—'} | ${d.scannedPageCount ?? '—'} | ${d.escalatedPages.length} | ${d.audioDurationSec ?? '—'} | ${d.transcribedSec ?? '—'} | ${d.warnings.length > 0 ? escapeCell(d.warnings.join('; ')) : '—'} |`;
+    }
+
+    this.sections.push(`---
+
+## Upload & Ingest
+- **Uploads:** ${accepted} accepted, ${rejected} rejected
+- **Ingest job (free):** ${fmtDuration(ingestJobMs)}
+
+### Upload outcomes
+${uploadTable}
+
+### Documents after ingest (GET /documents)
+${docsTable}
+`);
+  }
+
+  /** "Source Analysis" — the coarse SourceAnalysis persisted on the course. */
+  addSourceAnalysis({ analysis }: { analysis: SourceAnalysisView }): void {
+    let perDocTable = '| Document | Status | Rejection | Warnings |\n|----------|--------|-----------|----------|';
+    for (const d of analysis.perDocument) {
+      perDocTable += `\n| ${escapeCell(d.filename)} | ${d.status} | ${d.rejectionReason ? escapeCell(String(d.rejectionReason)) : '—'} | ${d.warnings.length > 0 ? escapeCell(d.warnings.join('; ')) : '—'} |`;
+    }
+    const questions =
+      analysis.questions.length > 0 ? analysis.questions.map((q) => `- ${q}`).join('\n') : '_none_';
+    const warnings =
+      analysis.warnings.length > 0 ? analysis.warnings.map((w) => `- ${w}`).join('\n') : '_none_';
+
+    this.sections.push(`---
+
+## Source Analysis
+- **Topics:** ${analysis.topics.join(', ') || '_none_'}
+- **Size band:** ${analysis.sizeBand.minLessons}–${analysis.sizeBand.maxLessons} lessons (mode: \`${analysis.sizeBand.mode}\`)
+- **Teachable density:** ${analysis.teachableDensity}
+- **Suggested goal:** "${analysis.suggestedGoal}"
+
+### Assessment questions
+${questions}
+
+### Assessment warnings
+${warnings}
+
+### Per-document analysis
+${perDocTable}
+`);
+  }
+
+  /** "Goal & Fidelity Confirmation" — the persona's analysis-screen decision + PATCH. */
+  addGoalFidelity(rec: GoalFidelityRecord): void {
+    this.sections.push(`---
+
+## Goal & Fidelity Confirmation (${fmtDuration(rec.durationMs)})
+- **Suggested goal:** "${rec.suggestedGoal}"
+- **Persona decision:** ${rec.acceptedSuggestedGoal ? 'accepted as-is' : 'EDITED'}
+- **Final goal (PATCHed):** "${rec.finalGoal}"
+- **Fidelity (PATCHed):** \`${rec.fidelity}\`
+- **AI Reasoning:** ${rec.aiReasoning}
+
+### Prediction vs actual
+| Dimension | Predicted | Actual | Match |
+|-----------|-----------|--------|-------|
+| Suggested-goal stance | ${rec.predictedStance} | ${rec.acceptedSuggestedGoal ? 'accept' : 'edit'} | ${rec.stanceMatchedPrediction ? 'YES' : 'NO'} |
+| Fidelity | \`${rec.predictedFidelity}\` | \`${rec.fidelity}\` | ${rec.fidelityMatchedPrediction ? 'YES' : 'NO'} |
+`);
+  }
+
+  /** "Corpus Preparation" — whether prepare_corpus fired and why. */
+  addCorpusPreparation(rec: CorpusPreparationRecord): void {
+    let perDocTable = '| Document | Needs preparation | Why |\n|----------|-------------------|-----|';
+    for (const d of rec.perDocument) {
+      perDocTable += `\n| ${escapeCell(d.name)} | ${d.needsPreparation ? 'YES' : 'no'} | ${escapeCell(d.reason)} |`;
+    }
+    const headline = rec.needed
+      ? `**prepare_corpus fired** — debited job completed in ${fmtDuration(rec.jobMs ?? 0)}.`
+      : `**No preparation needed** — every document was fully extracted during the free ingest pass; \`prepare_corpus\` was not submitted.`;
+
+    this.sections.push(`---
+
+## Corpus Preparation
+${headline}
+
+_Predicate (client contract): \`scannedPageCount > escalatedPages.length\` OR \`transcribedSec < audioDurationSec\`._
+
+${perDocTable}
+`);
+  }
+
+  /** "Band Adherence" — structure size vs the picked tier's displayed range vs sizeBand. */
+  addBandAdherence(rec: BandAdherenceRecord): void {
+    const verdictLabel =
+      rec.verdict === 'in-band'
+        ? 'IN BAND'
+        : rec.verdict === 'tolerated'
+          ? 'TOLERATED (min−1, inside the server-accepted band)'
+          : rec.verdict === 'out-of-band'
+            ? '**OUT OF BAND**'
+            : 'n/a (no tier range displayed)';
+
+    let perLessonTable = '| Lesson | sourceRefs | Grounding |\n|--------|-----------:|-----------|';
+    for (const l of rec.perLesson) {
+      perLessonTable += `\n| [${l.moduleIndex}/${l.lessonIndex}] ${escapeCell(l.name)} | ${l.sourceRefsCount} | ${l.sourceRefsCount > 0 ? 'from your documents' : 'AI-supplemented'} |`;
+    }
+
+    this.sections.push(`---
+
+## Band Adherence
+- **Tier picked:** \`${rec.depth}\`${rec.sourceTierNote ? ` — _${rec.sourceTierNote}_` : ''}
+- **Displayed tier range:** ${rec.tierRange ? `${rec.tierRange[0]}–${rec.tierRange[1]} lessons` : '_not present on the depth preview_'}
+- **Assessment size band:** ${rec.sizeBand ? `${rec.sizeBand.minLessons}–${rec.sizeBand.maxLessons} (mode: \`${rec.sizeBand.mode}\`)` : '_none_'}
+- **Structure lessons generated:** ${rec.totalLessons}
+- **Verdict:** ${verdictLabel}
+- **Grounding:** ${rec.groundedLessons} lesson(s) with sourceRefs, ${rec.supplementedLessons} AI-supplemented
+
+${perLessonTable}
 `);
   }
 
@@ -530,6 +735,13 @@ ${modulesList}
       generationMs: number;
       stats: LessonContentStats | null;
       mentorProbe?: LessonMentorRecord | null;
+      /**
+       * Docs mode only: sourceRefs count on the structure lesson this
+       * content was generated for. `undefined` (goal mode) renders
+       * nothing, keeping goal-mode reports byte-identical; `null` means
+       * docs mode but the structure lesson carried no sourceRefs field.
+       */
+      sourceRefsCount?: number | null;
     }[],
   ): void {
     if (lessons.length === 0) return;
@@ -537,7 +749,7 @@ ${modulesList}
     let md = `---\n\n## Steps 9-10: Lesson Generation (${lessons.length} lessons)\n\n`;
 
     for (const lesson of lessons) {
-      const { moduleIndex, lessonIndex, moduleName, lessonName, content, generationMs, stats, mentorProbe } = lesson;
+      const { moduleIndex, lessonIndex, moduleName, lessonName, content, generationMs, stats, mentorProbe, sourceRefsCount } = lesson;
       const blocks = content.blocks;
 
       // Prefer server-side counts when available (they include blocks that were
@@ -556,6 +768,12 @@ ${modulesList}
       if (stats) {
         md += `- **Recall cards extracted:** ${stats.recallCardCount}\n`;
         md += `- **Curated links:** ${stats.linkCount}\n`;
+      }
+      if (sourceRefsCount !== undefined) {
+        md +=
+          sourceRefsCount !== null && sourceRefsCount > 0
+            ? `- **Source grounding:** ${sourceRefsCount} sourceRef(s) — grounded in the uploaded documents\n`
+            : `- **Source grounding:** no sourceRefs — AI-supplemented lesson\n`;
       }
       md += `- **Summary:** ${content.summary ? truncate({ str: content.summary, maxLen: 200 }) : '_none_'}\n\n`;
 
@@ -740,6 +958,7 @@ ${modulesList}
     quizzesAttempted,
     recallReviewed,
     costSummary,
+    docsSummary,
   }: {
     totalDurationMs: number;
     course: CourseData | null;
@@ -750,6 +969,17 @@ ${modulesList}
     quizzesAttempted?: number;
     recallReviewed?: number;
     costSummary?: CostSummary;
+    /**
+     * Docs mode only — adds mode/set/fidelity/band/in-band rows to the
+     * Run Summary table. Omitted in goal mode so those reports stay
+     * byte-identical.
+     */
+    docsSummary?: {
+      setName: string;
+      fidelity: string | null;
+      band: string;
+      lessonsInBand: string;
+    };
   }): void {
     const totalLessons = course?.structure?.modules.reduce((sum, m) => sum + m.lessons.length, 0) ?? 0;
 
@@ -768,6 +998,12 @@ ${modulesList}
           : 'MISMATCH'
         : 'N/A';
 
+    // Docs-mode rows — rendered between the fixed rows and the optional
+    // tail rows. Empty string in goal mode (byte-identical output).
+    const docsRows = docsSummary
+      ? `| Mode | documents |\n| Document Set | \`${docsSummary.setName}\` |\n| Source Fidelity | ${docsSummary.fidelity ?? 'N/A'} |\n| Size Band | ${docsSummary.band} |\n| Lessons In Band | ${docsSummary.lessonsInBand} |\n`
+      : '';
+
     // Insert summary right after header
     const summary = `## Run Summary
 | Metric | Value |
@@ -781,7 +1017,7 @@ ${modulesList}
 | Depth Selected | ${course?.depth ?? 'N/A'} |
 | Modules | ${course?.structure?.modules.length ?? 'N/A'} |
 | Total Lessons | ${totalLessons || 'N/A'} |
-${failedStep ? `| Failed Step | ${failedStep.step} — ${failedStep.name} |\n` : ''}${lessonsGenerated !== undefined ? `| Lessons Generated | ${lessonsGenerated} |\n` : ''}${quizzesAttempted !== undefined ? `| Quizzes Attempted | ${quizzesAttempted} |\n` : ''}${recallReviewed !== undefined ? `| Recall cards Reviewed | ${recallReviewed} |\n` : ''}${costSummary ? `| Credits Spent (this persona) | ${fmtCredits(costSummary.totalSpent)} |\n` : ''}${error ? `| Error | ${escapeCell(truncate({ str: error, maxLen: 500 }))} |` : ''}
+${docsRows}${failedStep ? `| Failed Step | ${failedStep.step} — ${failedStep.name} |\n` : ''}${lessonsGenerated !== undefined ? `| Lessons Generated | ${lessonsGenerated} |\n` : ''}${quizzesAttempted !== undefined ? `| Quizzes Attempted | ${quizzesAttempted} |\n` : ''}${recallReviewed !== undefined ? `| Recall cards Reviewed | ${recallReviewed} |\n` : ''}${costSummary ? `| Credits Spent (this persona) | ${fmtCredits(costSummary.totalSpent)} |\n` : ''}${error ? `| Error | ${escapeCell(truncate({ str: error, maxLen: 500 }))} |` : ''}
 `;
 
     // Insert after the header (index 0)

@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, DeleteObjectsCommand, CopyObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { AWS_S3_BUCKET, AWS_S3_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } from '@conf/env';
 
@@ -67,6 +67,63 @@ export const resolveImageUrl = async (value: string | null): Promise<string | nu
   if (!value) return null;
   if (value.startsWith('data:')) return value;
   return getPresignedUrl({ key: value });
+};
+
+/**
+ * Server-side copy within the bucket. Used by the CSAM hash-screen
+ * quarantine path (`hashScreen.ts`) to preserve evidence under
+ * `quarantine/…` before the original is removed — the bytes never
+ * round-trip through this process.
+ */
+export const copyObject = async ({ sourceKey, destinationKey }: { sourceKey: string; destinationKey: string }): Promise<string> => {
+  await s3.send(new CopyObjectCommand({
+    Bucket: AWS_S3_BUCKET,
+    // CopySource is URL-encoded per the S3 API; keep the path slashes.
+    CopySource: `${AWS_S3_BUCKET}/${encodeURIComponent(sourceKey).replace(/%2F/g, '/')}`,
+    Key: destinationKey,
+  }));
+  return destinationKey;
+};
+
+/** Delete a single object by key (prefix-wide cleanup uses deleteByPrefix). */
+export const deleteObject = async ({ key }: { key: string }): Promise<void> => {
+  await s3.send(new DeleteObjectCommand({ Bucket: AWS_S3_BUCKET, Key: key }));
+};
+
+/**
+ * Fetch an object's full body as a Buffer. Used by the document-ingest job
+ * to pull raw uploads back for extraction (uploads are ≤50 MB by the
+ * multer cap, so buffering in memory matches the upload path's posture).
+ */
+export const getObjectBuffer = async ({ key }: { key: string }): Promise<Buffer> => {
+  const res = await s3.send(new GetObjectCommand({ Bucket: AWS_S3_BUCKET, Key: key }));
+  if (!res.Body) throw new Error(`S3 object ${key} has no body`);
+  const bytes = await res.Body.transformToByteArray();
+  return Buffer.from(bytes);
+};
+
+/**
+ * List all object keys under a prefix (paginated). Used by the
+ * debug-ingest harness's zero-orphan proof; keep results small — this
+ * loads every key into memory.
+ */
+export const listKeysByPrefix = async (prefix: string): Promise<string[]> => {
+  const keys: string[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const list = await s3.send(new ListObjectsV2Command({
+      Bucket: AWS_S3_BUCKET,
+      Prefix: prefix,
+      ContinuationToken: continuationToken,
+    }));
+    for (const obj of list.Contents ?? []) {
+      if (obj.Key) keys.push(obj.Key);
+    }
+    continuationToken = list.IsTruncated ? list.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  return keys;
 };
 
 /**

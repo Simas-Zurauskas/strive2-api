@@ -202,10 +202,20 @@ async function repairStructuralGaps({
       abortController.abort();
     }, VALIDATION_TIMEOUT_MS);
     try {
+      const isSonnet = modelId === MODEL_IDS.SONNET;
       const result = await generateObject({
         model: anthropic(modelId),
         schema: z.object({ blocks: z.array(lessonBlockSchema) }),
-        temperature: 0.3,
+        // Sonnet 5 rejects `temperature` (400) — only the Haiku attempt may
+        // send it. The Sonnet fallback also pins thinking off (omitted =
+        // adaptive-ON on Sonnet 5) and an explicit output cap so the SDK's
+        // per-model default can never truncate a repair.
+        ...(isSonnet
+          ? {
+              maxOutputTokens: 8192,
+              providerOptions: { anthropic: { thinking: { type: 'disabled' as const } } },
+            }
+          : { temperature: 0.3 }),
         abortSignal: abortController.signal,
         messages: [
           { role: 'system' as const, content: systemPrompt },

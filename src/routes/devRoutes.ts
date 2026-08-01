@@ -3,8 +3,7 @@ import {
   buildVerificationEmail,
   buildPasswordResetEmail,
   buildSecurityActionCodeEmail,
-  buildOldUserRelaunchEmail,
-  buildOldPayingUserThanksEmail,
+  buildDocumentsFeatureEmail,
   type EmailPayload,
 } from '@lib/email/templates';
 
@@ -69,13 +68,17 @@ const SAMPLE_GROUPS: Array<{ title: string; samples: Record<string, Sample> }> =
   {
     title: 'Promotional',
     samples: {
-      'old-user-relaunch': {
-        label: 'Old user relaunch',
-        build: () => buildOldUserRelaunchEmail(),
-      },
-      'old-paying-user-thanks': {
-        label: 'Old paying user — thanks + apology',
-        build: () => buildOldPayingUserThanksEmail(),
+      'documents-feature': {
+        label: 'Documents feature announcement',
+        // A representative token, not a valid one — the preview must show
+        // the footer as recipients will see it (our route, not Mailjet's
+        // `[[UNSUB_LINK_EN]]`) without minting a working opt-out link for
+        // whoever opens the preview.
+        build: () =>
+          buildDocumentsFeatureEmail({
+            unsubscribeUrl:
+              'http://localhost:4000/api/auth/marketing/unsubscribe?token=PREVIEW_CONTACT_ID.PREVIEW_SIGNATURE',
+          }),
       },
     },
   },

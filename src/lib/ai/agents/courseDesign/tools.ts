@@ -1,12 +1,13 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { TavilySearch } from '@langchain/tavily';
-import { refineCourseStructure } from '@services/courseService';
+import { refineCourseStructure, buildCourseSourceContext, filterStructureSourceRefs } from '@services/courseService';
 import { cleanupCourseContent } from '@services/courseCleanupService';
 import { searchProductKb } from '@services/productKbRagService';
 import CourseModel from '@models/CourseModel';
 import LessonContentModel from '@models/LessonContentModel';
 import UserLessonProgressModel from '@models/UserLessonProgressModel';
+import SourceDocumentChunkModel from '@models/SourceDocumentChunkModel';
 import { TAVILY_API_KEY } from '@conf/env';
 import { CourseDepth, CourseDomain, GoalType } from '@lib/constants';
 import { generateUniqueSlug } from '@lib/slugify';
@@ -32,11 +33,19 @@ export const modifyStructure = tool(
     }
 
     try {
-      // Load feedback history, current domain, goalType, and check for existing content/progress
-      const course = await CourseModel.findById(courseId).select('feedbackHistory userId domain goalType').lean();
+      // Load feedback history, current domain, goalType, source-grounding
+      // fields, and check for existing content/progress
+      const course = await CourseModel.findById(courseId)
+        .select('feedbackHistory userId domain goalType source sourceDigest sourceAssessment sourceFidelity')
+        .lean();
       const feedbackHistory = (course?.feedbackHistory as string[]) ?? [];
       const currentDomain = (course?.domain as CourseDomain | null | undefined) ?? null;
       const goalType = ((course?.goalType as GoalType | null | undefined) ?? 'master') as GoalType;
+      // Documents courses: the chat refinement path carries the SAME source
+      // grounding (digest + size band + fidelity) as the refine_structure
+      // job — previously this second structure-writing path dropped it,
+      // letting chat refinements balloon past the band (FEEDBACK-1).
+      const sourceContext = course ? buildCourseSourceContext(course) : null;
 
       const [contentCount, progressCount] = await Promise.all([
         LessonContentModel.countDocuments({ courseId }),
@@ -54,14 +63,25 @@ export const modifyStructure = tool(
         currentDomain,
         feedback: input.instruction,
         feedbackHistory,
+        sourceContext,
       });
+
+      // Documents courses: never persist sourceRefs the model invented —
+      // validate against the course's real chunk vectorIds, exactly like
+      // the jobRunner refine_structure path (ai-features §4.4).
+      const modules = sourceContext
+        ? filterStructureSourceRefs(
+            result.modules,
+            new Set<string>(await SourceDocumentChunkModel.distinct('vectorId', { courseId })),
+          )
+        : result.modules;
 
       // Persist the updated structure and feedback history
       await CourseModel.findByIdAndUpdate(courseId, {
         name: result.courseName,
         slug: await generateUniqueSlug({ userId: course!.userId.toString(), name: result.courseName }),
         domain: result.domain,
-        structure: { reasoning: result.reasoning, modules: result.modules },
+        structure: { reasoning: result.reasoning, modules },
         feedbackHistory: [...feedbackHistory, input.instruction],
         pendingFeedback: null,
       });
@@ -73,7 +93,7 @@ export const modifyStructure = tool(
 
       // Update in-memory state for the next chat turn
       if (config?.configurable) {
-        config.configurable.currentStructure = { reasoning: result.reasoning, modules: result.modules };
+        config.configurable.currentStructure = { reasoning: result.reasoning, modules };
       }
 
       // Refresh the suggested chat prompts in the background — the
@@ -90,11 +110,39 @@ export const modifyStructure = tool(
       return JSON.stringify({
         success: true,
         courseName: result.courseName,
-        modules: result.modules,
+        modules,
         reasoning: result.reasoning,
         contentCleared: hasExistingContent,
       });
     } catch (error: unknown) {
+      // Documents courses: the refine enforcement rejected the change
+      // because it would leave the course outside the band-derived lesson
+      // range. Nothing was persisted — return a polite refusal carrying
+      // the allowed range so the agent can explain the limit instead of
+      // surfacing a raw error (FEEDBACK-1).
+      const structured = error as { errorCode?: unknown; meta?: unknown };
+      if (structured.errorCode === 'STRUCTURE_SIZE_VIOLATION') {
+        const meta = (structured.meta ?? {}) as {
+          producedLessons?: number;
+          minLessons?: number;
+          maxLessons?: number;
+        };
+        const range =
+          typeof meta.minLessons === 'number' && typeof meta.maxLessons === 'number'
+            ? `${meta.minLessons}-${meta.maxLessons}`
+            : 'the assessed range';
+        chatLog.warn(
+          `design:tool done name=modify_structure ms=${Date.now() - toolStart} ok=false refused=size-violation produced=${meta.producedLessons ?? '?'} allowed=${range}`,
+        );
+        return JSON.stringify({
+          success: false,
+          refused: true,
+          error:
+            `This course is built from the learner's uploaded documents, which support ${range} lessons in total. ` +
+            `The requested change would put the course outside that range, so it was NOT applied and the structure is unchanged. ` +
+            `Politely explain the source-derived limit to the learner and suggest consolidating, swapping, or deepening lessons instead of adding more.`,
+        });
+      }
       const message = error instanceof Error ? error.message : String(error);
       chatLog.error(
         `design:tool done name=modify_structure ms=${Date.now() - toolStart} ok=false err=${message}`,
