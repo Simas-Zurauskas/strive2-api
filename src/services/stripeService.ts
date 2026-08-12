@@ -18,6 +18,7 @@ import {
 import UserModel from '@models/UserModel';
 import {
   PlanKey,
+  PRICING_CONFIG,
   TOPUP_CREDITS_PER_USD,
   TOPUP_MAX_USD,
   TOPUP_MIN_USD,
@@ -139,9 +140,21 @@ export const ensureStripeCustomer = async ({ userId }: { userId: string }): Prom
 // Profile — the single canonical place for billing state. A `checkout`
 // query param marks the flow kind so the client can show a short welcome
 // toast ("Subscription active" / "Bonus credits added") and then strip
-// the param from the URL.
-const buildSuccessUrl = ({ kind }: { kind: 'subscription' | 'topup' }): string =>
-  `${FRONTEND_URL}/profile?tab=billing&checkout=${kind}`;
+// the param from the URL. The extra params feed the client's dataLayer
+// conversion push (BillingTab) for the GTM container; `value` is the list
+// price — promo codes and VAT are not reflected. `{CHECKOUT_SESSION_ID}`
+// is substituted by Stripe and must reach it verbatim, so it is appended
+// outside URLSearchParams' percent-encoding.
+const buildSuccessUrl = ({
+  kind,
+  params = {},
+}: {
+  kind: 'subscription' | 'topup';
+  params?: Record<string, string>;
+}): string => {
+  const qs = new URLSearchParams({ tab: 'billing', checkout: kind, ...params });
+  return `${FRONTEND_URL}/profile?${qs.toString()}&session_id={CHECKOUT_SESSION_ID}`;
+};
 const buildCancelUrl = (): string => `${FRONTEND_URL}/pricing`;
 
 /**
@@ -215,11 +228,22 @@ export const createSubscriptionCheckout = async ({
     replacingSubscriptionId = blocker.id;
   }
 
+  // List price actually charged at this cadence (annual bills 12 discounted
+  // months up front) — carried to the client for the conversion push only;
+  // the source of truth for money stays the Stripe price object.
+  const listUsd =
+    cadence === 'annual'
+      ? PRICING_CONFIG.planPricing[plan].annualMonthlyUsd * 12
+      : PRICING_CONFIG.planPricing[plan].monthlyUsd;
+
   const session = await stripe.checkout.sessions.create({
     customer,
     mode: 'subscription',
     line_items: [{ price: priceId, quantity: 1 }],
-    success_url: buildSuccessUrl({ kind: 'subscription' }),
+    success_url: buildSuccessUrl({
+      kind: 'subscription',
+      params: { plan, cadence, value: listUsd.toFixed(2), currency: 'USD' },
+    }),
     cancel_url: buildCancelUrl(),
     allow_promotion_codes: true,
     // Stripe Tax computes VAT automatically based on the customer's address.
@@ -315,7 +339,10 @@ export const createTopupCheckout = async ({
         quantity: 1,
       },
     ],
-    success_url: buildSuccessUrl({ kind: 'topup' }),
+    success_url: buildSuccessUrl({
+      kind: 'topup',
+      params: { value: amountUsd.toFixed(2), currency: 'USD' },
+    }),
     // Canceled top-up sends user back to where they probably clicked from —
     // the Billing tab under Profile.
     cancel_url: `${FRONTEND_URL}/profile?tab=billing`,
