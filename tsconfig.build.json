@@ -8,6 +8,7 @@
     "node_modules",
     "build",
     "src/**/*.test.ts",
-    "src/**/__tests__/**"
+    "src/**/__tests__/**",
+    "src/**/__fixtures__/**"
   ]
 }

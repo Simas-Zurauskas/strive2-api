@@ -31,6 +31,8 @@
  *                    attachment parsers, S3 cleanup) — transport-level
  *   llmLog           per-call LLM token usage + cache-hit telemetry
  *                    (audience: cost; bumps metrics + recordUsage)
+ *   pdfLog           lesson/course PDF export: diagram + maths rendering,
+ *                    hero-derivative cache hits, per-document render time
  *
  * Picking the right one
  * ---------------------
@@ -293,3 +295,22 @@ export const llmLog = createLogger({
   modifiers: ['dim'],
   enabled: true,
 });
+
+/**
+ * Lesson and course PDF export. The export path is a pure read — it writes
+ * nothing to Mongo — so when it goes wrong there is no row to inspect
+ * afterwards and no job record to read. This logger is the whole trail.
+ *
+ * The number that matters most is `fallback`: diagrams that could not be
+ * rendered and were replaced by a text placeholder. A renderer regression
+ * (a `beautiful-mermaid` upgrade, an unseen diagram dialect) shows up as a
+ * rise in that count rather than as an error — nothing throws, the PDF is
+ * simply poorer. Same for `heroMiss`, which is the S3 + sharp cost a course
+ * export actually paid.
+ *
+ * Examples:
+ *   [pdf] lesson:render   course=68f… m=1 l=2 blocks=15 diagrams=1 fallback=0 hero=hit ms=94
+ *   [pdf] course:render   course=68f… lessons=26 diagrams=26 fallback=1 heroHit=24 heroMiss=2 ms=2840
+ *   [pdf] diagram:fallback course=68f… m=3 l=0 type=mindmap reason=degenerate
+ */
+export const pdfLog = createLogger({ tag: 'pdf', color: 'magenta', enabled: true });

@@ -22,6 +22,19 @@ const DISPLAY_MATH_RE = /\$\$([\s\S]+?)\$\$/g;
 const INLINE_MATH_RE = /(?<![\\a-zA-Z0-9])\$(?!\s)([^\n$]+?)(?<!\s)\$(?![a-zA-Z0-9])/g;
 
 /**
+ * Fresh `RegExp` objects built from the same sources.
+ *
+ * The module-level constants above carry the `g` flag, so `lastIndex` is
+ * per-object state. `sanitizeLatex` gets away with sharing them because
+ * `String.prototype.replace` resets it, but a caller that uses `.test()` or
+ * an `.exec()` loop would leave the index dirty for the next caller and
+ * silently skip a match. Everything outside this file goes through these
+ * factories instead of importing the objects.
+ */
+export const displayMathRe = (): RegExp => new RegExp(DISPLAY_MATH_RE.source, DISPLAY_MATH_RE.flags);
+export const inlineMathRe = (): RegExp => new RegExp(INLINE_MATH_RE.source, INLINE_MATH_RE.flags);
+
+/**
  * Validate every LaTeX span in `text` by attempting a server-side KaTeX render.
  * Spans that fail to parse are replaced with inline-code fallbacks (e.g. `` `x^2` ``),
  * so malformed LaTeX from the LLM never crashes the client renderer.

@@ -17,6 +17,25 @@ const nullableRef = (ref: string): OpenAPIV3.SchemaObject => ({
 } as unknown as OpenAPIV3.SchemaObject);
 
 export const schemas: SchemaMap = {
+  // ── Export / download ────────────────────────────────────
+
+  NarrationDownload: {
+    type: 'object',
+    required: ['url', 'filename', 'transcriptMatchesAudio'],
+    properties: {
+      url: {
+        type: 'string',
+        description: 'Short-lived presigned URL that saves the MP3 rather than streaming it.',
+      },
+      filename: { type: 'string' },
+      transcriptMatchesAudio: {
+        type: 'boolean',
+        description:
+          'False when the lesson was regenerated after the audio was made, so the recording no longer matches the lesson text.',
+      },
+    },
+  },
+
   // ── Enum schemas ─────────────────────────────────────────
 
   ErrorCode: {

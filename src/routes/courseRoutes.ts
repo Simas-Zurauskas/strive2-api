@@ -53,12 +53,17 @@ import {
   deleteDocumentController,
   ingestDocumentsController,
   prepareCorpusController,
+  getCoursePdfController,
+  getLessonPdfController,
+  getNarrationDownloadController,
+  getNarrationTranscriptController,
 } from '@controlers/course';
 import { ENVIRONMENT } from '@conf/env';
 import { protect, requireAdmin, requireVerified } from '@middleware/authMiddleware';
 import { usageContextMiddleware } from '@middleware/usageContext';
 import { requireCredits } from '@middleware/requireCredits';
 import { limitChatStreamConcurrency } from '@middleware/streamConcurrency';
+import { limitPdfConcurrency } from '@middleware/pdfConcurrency';
 import { validateObjectId } from '@middleware/validateObjectId';
 import {
   attachmentUpload,
@@ -90,6 +95,64 @@ const executeCodeLimiter = rateLimit({
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   message: { message: 'Too many code-execution requests — slow down.' },
+  keyGenerator: (req) => req.userId ?? req.ip ?? 'anon',
+  validate: { keyGeneratorIpFallback: false },
+});
+
+// PDF export is the only endpoint here that does real CPU work on the
+// request thread. pdfmake's layout pass and the mermaid renderer are both
+// synchronous, so the work does not yield, and this service is
+// single-instance by design — the same process carries every Socket.io
+// lesson stream and the in-process job runner.
+//
+// Measured with the real builders (six prose sections with maths, one
+// production flowchart and a code block per lesson):
+//
+//   26 lessons @  8k chars   1.9 s,  346 MB RSS
+//   26 lessons @ 25k chars   2.1 s,  494 MB RSS
+//   69 lessons @ 25k chars   4.9 s,  906 MB RSS
+//
+// Seconds, not the sub-second an earlier version of this comment claimed.
+// TWO bounds, because they stop different things: the per-user limiters
+// below stop one account exporting in a loop, and `limitPdfConcurrency`
+// (global, per process) stops N users' renders stacking into an N× stall.
+// A per-user limit alone does not prevent that.
+//
+// ORDER MATTERS: the global gate runs FIRST. `express-rate-limit` counts
+// in the middleware and `skipFailedRequests` defaults to false, so with the
+// limiter first a request refused because SOMEONE ELSE was rendering would
+// still consume one of this user's hourly exports — ten unlucky collisions
+// would lock them out of a resource they never used.
+const coursePdfLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { message: 'Too many course exports — try again shortly.' },
+  keyGenerator: (req) => req.userId ?? req.ip ?? 'anon',
+  validate: { keyGeneratorIpFallback: false },
+});
+
+// The transcript route recomputes the narration script and a SHA over the
+// full lesson on every call and returns an unbounded text/plain body. Cheap
+// next to a PDF, but it was the only export route with nothing in front of
+// it beyond the global 100/min.
+const narrationDownloadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 120,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { message: 'Too many narration downloads — try again shortly.' },
+  keyGenerator: (req) => req.userId ?? req.ip ?? 'anon',
+  validate: { keyGeneratorIpFallback: false },
+});
+
+const lessonPdfLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 60,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { message: 'Too many lesson exports — try again shortly.' },
   keyGenerator: (req) => req.userId ?? req.ip ?? 'anon',
   validate: { keyGeneratorIpFallback: false },
 });
@@ -224,6 +287,27 @@ router.delete(
   deleteLessonNarrationController,
 );
 router.get('/:courseId/lesson-content/:moduleIndex/:lessonIndex', getLessonContentController);
+
+// Export / download. No requireCredits: nothing here calls a paid vendor —
+// these routes re-serve content the learner already paid to generate. The
+// PDF routes are rate limited instead (see the limiters above).
+router.get('/:courseId/pdf', limitPdfConcurrency, coursePdfLimiter, getCoursePdfController);
+router.get(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/pdf',
+  limitPdfConcurrency,
+  lessonPdfLimiter,
+  getLessonPdfController,
+);
+router.get(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/narration/download',
+  narrationDownloadLimiter,
+  getNarrationDownloadController,
+);
+router.get(
+  '/:courseId/lesson/:moduleIndex/:lessonIndex/narration/transcript',
+  narrationDownloadLimiter,
+  getNarrationTranscriptController,
+);
 
 // Progress tracking
 router.get('/:courseId/progress', getCourseProgressController);
