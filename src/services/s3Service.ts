@@ -29,10 +29,34 @@ export const uploadBuffer = async ({ key, body, contentType }: { key: string; bo
   return key;
 };
 
-export const getPresignedUrl = async ({ key, expiresIn = SEVEN_DAYS }: { key: string; expiresIn?: number }): Promise<string> => {
+/**
+ * Presigned GET.
+ *
+ * `downloadFilename` is optional and additive: when present it signs
+ * `ResponseContentDisposition` so the browser saves the object instead of
+ * opening it, under a name we choose rather than the S3 key. Omitting it
+ * produces exactly the URL this function has always produced — no
+ * `response-content-disposition` parameter at all.
+ *
+ * The caller is responsible for sanitising the filename; it is signed into
+ * a response header, so a raw CR/LF or `"` would be a header-injection
+ * vector. See `lib/pdf/filename.ts`.
+ */
+export const getPresignedUrl = async ({
+  key,
+  expiresIn = SEVEN_DAYS,
+  downloadFilename,
+}: {
+  key: string;
+  expiresIn?: number;
+  downloadFilename?: string;
+}): Promise<string> => {
   return getSignedUrl(s3, new GetObjectCommand({
     Bucket: AWS_S3_BUCKET,
     Key: key,
+    ...(downloadFilename
+      ? { ResponseContentDisposition: `attachment; filename="${downloadFilename}"` }
+      : {}),
   }), { expiresIn });
 };
 

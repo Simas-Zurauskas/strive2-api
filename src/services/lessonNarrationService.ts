@@ -65,7 +65,14 @@ export interface RunLessonNarrationResult {
   rate: number;
 }
 
-const buildContentHash = ({
+/**
+ * Exported so the transcript endpoint can tell whether the audio a learner
+ * is about to download still corresponds to the lesson text. Regenerating a
+ * lesson replaces `blocks` and leaves every audio field untouched, so the
+ * two can drift. Nothing else about this function changes — its output is
+ * the S3 cache key and must stay byte-stable.
+ */
+export const buildContentHash = ({
   script,
   voiceId,
   rate,

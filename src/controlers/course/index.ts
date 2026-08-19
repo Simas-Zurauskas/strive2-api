@@ -50,3 +50,11 @@ export { prepareCorpusController } from './prepareCorpus';
 export { courseMentorChatController } from './courseMentorChat';
 export { getCourseMentorHistoryController } from './getCourseMentorHistory';
 export { clearCourseMentorController } from './clearCourseMentor';
+
+// Export / download surface (PDF, narration audio + transcript).
+export {
+  getCoursePdfController,
+  getLessonPdfController,
+  getNarrationDownloadController,
+  getNarrationTranscriptController,
+} from './export';
