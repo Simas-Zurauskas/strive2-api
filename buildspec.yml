@@ -22,6 +22,11 @@ phases:
   build:
     commands:
       - yarn build
+      # EB refuses to run a .platform hook that isn't executable, and a lost
+      # mode bit is silent — the hook is simply skipped and the instance comes
+      # up without Caddy. Git already stores these 755; this is belt-and-braces
+      # against the checkout or the artifact zip dropping the bit.
+      - chmod +x .platform/hooks/*/*.sh .platform/confighooks/*/*.sh .platform/caddy/*.sh
 
 artifacts:
   files:
