@@ -56,7 +56,17 @@ cat > /etc/caddy/Caddyfile <<CADDYFILE
 # Managed by .platform/caddy/configure.sh — edits here are lost on the next
 # deploy. Change the EB environment properties instead.
 {
-	admin off
+	# The admin API is deliberately left at its default, 127.0.0.1:2019. It is
+	# loopback-only and never reachable from outside the instance, and the
+	# reload subcommand — how this script applies config changes without
+	# dropping in-flight streams and WebSocket connections — talks to it.
+	# Turning the admin endpoint off here would make the unit's ExecReload
+	# fail and take every subsequent deploy down with it.
+	#
+	# NOTE: this block is written by an unquoted heredoc, so backticks and
+	# dollar signs in these comments would be executed by the shell. Keep
+	# prose plain.
+	#
 	# Caddy's automatic HTTPS otherwise stands up an HTTP->HTTPS redirect
 	# listener on :80, which EB's nginx already owns — Caddy would fail to
 	# bind and take the whole service down with it. Certificate management is

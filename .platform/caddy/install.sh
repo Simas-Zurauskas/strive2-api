@@ -74,6 +74,11 @@ RestartSec=5s
 LimitNOFILE=1048576
 PrivateTmp=true
 ProtectSystem=full
+# Caddy derives its data directory (ACME account keys and issued certificates)
+# from HOME. Set it explicitly rather than relying on systemd populating it
+# from the passwd entry — if it ever resolved elsewhere, Caddy would silently
+# re-issue certificates on every restart and burn Let's Encrypt rate limit.
+Environment=HOME=/var/lib/caddy
 # Lets an unprivileged process bind 443 without granting it root.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
