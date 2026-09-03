@@ -1,11 +1,9 @@
 import UserModel from '@models/UserModel';
-import MarketingContactModel from '@models/MarketingContactModel';
 import { hashVerificationToken } from '@lib/auth';
 import { AppError } from '@middleware/errorMiddleware';
 import asyncHandler from 'express-async-handler';
 import { analytics } from '@lib/analytics';
-import { MARKETING_EVIDENCE } from '@lib/constants';
-import { bgError } from '@lib/bg';
+import { enrolVerifiedContact } from '@services/marketingContactService';
 import { verifyEmailSchema } from './validation';
 
 /**
@@ -112,24 +110,14 @@ export const verifyEmailController = asyncHandler(async (req, res) => {
   //
   // Best-effort: a ledger blip must never fail an email verification, which
   // is the user's route into the product.
-  try {
-    await MarketingContactModel.updateOne(
-      { email: user.email },
-      {
-        $setOnInsert: {
-          userId: user._id,
-          email: user.email,
-          basis: 'soft_opt_in',
-          source: 'signup',
-          evidence: MARKETING_EVIDENCE.SIGNUP_NOTICE,
-          optedOut: false,
-        },
-      },
-      { upsert: true },
-    );
-  } catch (err) {
-    bgError('marketingContact.upsertOnVerify')(err);
-  }
+  // Extracted to `enrolVerifiedContact` so the Google OAuth path — which sets
+  // emailVerified directly and never reaches this controller — can share it.
+  // Mechanism here is unchanged: same filter, same $setOnInsert, same
+  // swallow-and-report. One observable difference: the bgError context label
+  // moved from 'marketingContact.upsertOnVerify' to
+  // 'marketingContact.enrolVerifiedContact', so any alert keyed on the old
+  // string loses continuity at this deploy.
+  await enrolVerifiedContact({ userId: user._id, email: user.email });
 
   const userId = user._id.toString();
   const createdAtMs = user.createdAt instanceof Date ? user.createdAt.getTime() : null;

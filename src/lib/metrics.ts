@@ -318,6 +318,15 @@ export const bumpQuizDistractorLintLengthOnlyShipped = () => {
 // the task and we should revert the downshift.
 export let interactiveHaikuAttempts = 0;
 export let interactiveSonnetEscalations = 0;
+// Lessons that shipped an inline quiz with unusable MCQ metadata after every
+// retry and the Sonnet escalation were exhausted. Between 2026-08-01 and
+// 2026-09-02 this happened silently at ~25% of quiz blocks and nothing counted
+// it: the count-floor accepted a quiz by TYPE, so a metadata-less quiz never
+// tripped a retry, and the block rendered as nothing. Non-zero here means the
+// generator is drifting again — the client renders the block's prose as a
+// fallback, so it degrades rather than disappears, but the interactive quiz is
+// still lost.
+export let interactiveMalformedQuizShipped = 0;
 export let quizHaikuAttempts = 0;
 export let quizSonnetEscalations = 0;
 
@@ -332,6 +341,9 @@ export const bumpQuizHaikuAttempt = () => {
 };
 export const bumpQuizSonnetEscalation = () => {
   quizSonnetEscalations += 1;
+};
+export const bumpInteractiveMalformedQuizShipped = () => {
+  interactiveMalformedQuizShipped += 1;
 };
 
 // ── Tavily cross-lesson search dedup ──
@@ -772,6 +784,12 @@ export const renderMetrics = (live: MetricsSnapshot): string => {
     'Inline-quiz + exercise generations where Haiku failed (schema / count-floor / distractor-lint residual) and the code escalated to Sonnet — ratio >~10% means revert the downshift',
     'counter',
     interactiveSonnetEscalations,
+  );
+  metric(
+    'interactive_malformed_quiz_shipped_total',
+    'Inline quizzes that shipped with unusable MCQ metadata after all retries — the 2026-08 regression this counter exists to catch; sustained non-zero means the generator is drifting again',
+    'counter',
+    interactiveMalformedQuizShipped,
   );
   metric(
     'quiz_haiku_attempts_total',

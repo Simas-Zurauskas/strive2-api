@@ -43,15 +43,24 @@ vi.mock('@services/abuseLogService', () => ({
 }));
 
 import { googleAuthController } from '@controlers/auth/googleAuth';
+import { onboardingAllowanceCredits } from '@lib/pricingConfig';
+import MarketingContactModel from '@models/MarketingContactModel';
 
 setupTestDb();
 
 beforeEach(() => {
   fakeVerifyIdToken.mockReset();
   fakeResolveSignupAllowance.mockReset();
+  // Mirrors what the REAL resolver returns for a clean email since
+  // 2026-09-02 (pricingConfig KNOB 9). Previously this stub returned the
+  // 200cr monthly allowance, so the whole suite passed green while proving
+  // nothing about whether the Google path carries the onboarding grant —
+  // half of AC2 was unverified. abuseLogService.test.ts pins that the
+  // resolver returns this value; these tests pin that Google's plumbing
+  // delivers whatever it returns, unaltered.
   fakeResolveSignupAllowance.mockResolvedValue({
-    allowanceBalance: PLANS.free.monthlyAllowance,
-    allowanceGranted: PLANS.free.monthlyAllowance,
+    allowanceBalance: onboardingAllowanceCredits(),
+    allowanceGranted: onboardingAllowanceCredits(),
     blocked: false,
   });
 });
@@ -110,7 +119,77 @@ describe('googleAuthController — new user', () => {
     const googleEntries = user?.authProviders.filter((p) => p.provider === AuthProvider.GOOGLE);
     expect(googleEntries).toHaveLength(1);
     expect(googleEntries?.[0].providerId).toBe('g-uid-1');
-    expect(user?.credits.allowanceBalance).toBe(PLANS.free.monthlyAllowance);
+    // AC2, Google half: the grant reaches the created account intact, and is
+    // strictly larger than the recurring allowance it decays to.
+    expect(user?.credits.allowanceBalance).toBe(onboardingAllowanceCredits());
+    expect(user?.credits.allowanceGranted).toBe(onboardingAllowanceCredits());
+    expect(user?.credits.allowanceBalance).toBeGreaterThan(PLANS.free.monthlyAllowance);
+  });
+
+  test('new Google user is enrolled in MarketingContact — AC4, the Google half', async () => {
+    // The gap this closes: Google sets emailVerified directly and never
+    // reaches verifyEmail.ts, which was the only enrolment site. Every Google
+    // signup was therefore created outside the promotional audience — 20 of
+    // the 26 most recent signups when this was written.
+    mockGoogleTicket({
+      email: 'enrolme@example.com',
+      email_verified: true,
+      sub: 'g-enrol-1',
+      name: 'Enrol Me',
+    });
+
+    const { req, res } = buildReqRes({ body: { idToken: 'fresh-token' } });
+    await invokeController(googleAuthController, req, res);
+
+    const contact = await MarketingContactModel.findOne({ email: 'enrolme@example.com' }).lean();
+    expect(contact).not.toBeNull();
+    expect(contact?.optedOut).toBe(false);
+    expect(contact?.source).toBe('signup');
+    const user = await UserModel.findOne({ email: 'enrolme@example.com' });
+    expect(String(contact?.userId)).toBe(String(user?._id));
+  });
+
+  test('an EXISTING unverified credentials user is enrolled when Google completes them', async () => {
+    // The gap a `!existing` gate leaves. Someone signs up with credentials and
+    // never verifies; the real owner then completes the same address via
+    // Google. `existing` is truthy, so a row-creation-gated enrolment skips
+    // them — yet this is that person's first ever verification, which is
+    // exactly the event the credentials path (verifyEmail.ts) enrols on.
+    // Unlike the historical `marketing:seed` backfill, that leak would keep
+    // widening. Enrolment is therefore gated on successful auth, not on
+    // whether the User row happened to pre-exist.
+    await UserModel.create({
+      email: 'hijack-rescue@example.com',
+      password: 'irrelevant-hash',
+      emailVerified: false,
+      authProviders: [{ provider: AuthProvider.CREDENTIALS, providerId: 'hijack-rescue@example.com' }],
+    });
+    expect(await MarketingContactModel.countDocuments({ email: 'hijack-rescue@example.com' })).toBe(0);
+
+    mockGoogleTicket({
+      email: 'hijack-rescue@example.com',
+      email_verified: true,
+      sub: 'g-hijack-rescue',
+    });
+    const { req, res } = buildReqRes({ body: { idToken: 't' } });
+    await invokeController(googleAuthController, req, res);
+
+    const contact = await MarketingContactModel.findOne({ email: 'hijack-rescue@example.com' }).lean();
+    expect(contact).not.toBeNull();
+    expect(contact?.optedOut).toBe(false);
+  });
+
+  test('a RETURNING Google user does not get a second contact row', async () => {
+    // Sign in twice. Enrolment is NOT gated on `!existing` (that gate was the
+    // bug — see the hijack-rescue case above), so this runs on both sign-ins
+    // and idempotency rests entirely on the upsert being `$setOnInsert` with a
+    // unique index on `email`. That single layer is what keeps it at one row.
+    for (const sub of ['g-repeat', 'g-repeat']) {
+      mockGoogleTicket({ email: 'repeat@example.com', email_verified: true, sub });
+      const { req, res } = buildReqRes({ body: { idToken: 't' } });
+      await invokeController(googleAuthController, req, res);
+    }
+    expect(await MarketingContactModel.countDocuments({ email: 'repeat@example.com' })).toBe(1);
   });
 
   test('new user with abuse-log block: created with zero allowance', async () => {

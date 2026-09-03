@@ -48,6 +48,7 @@ vi.mock('@controlers/admin', () => {
       res.status(204).end();
     };
   return {
+    getFreeTierSpendController: make('getFreeTierSpend'),
     sendPromotionalTestEmailController: make('sendPromotionalTestEmail'),
     sendMarketingCampaignController: make('sendMarketingCampaign'),
     listMarketingCampaignClaimsController: make('listMarketingCampaignClaims'),
@@ -67,6 +68,7 @@ setupTestDb();
 
 /** Every route below the gate, with the sentinel it must reach when allowed. */
 const GATED_ROUTES = [
+  { method: 'get', path: '/metrics/free-tier-spend', controller: 'getFreeTierSpend' },
   { method: 'post', path: '/email/send-promotional-test', controller: 'sendPromotionalTestEmail' },
   { method: 'post', path: '/marketing/send', controller: 'sendMarketingCampaign' },
   { method: 'get', path: '/marketing/claims', controller: 'listMarketingCampaignClaims' },

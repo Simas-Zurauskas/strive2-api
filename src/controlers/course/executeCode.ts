@@ -1,8 +1,11 @@
+import { Types } from 'mongoose';
 import asyncHandler from 'express-async-handler';
 import { z } from 'zod';
 import { JUDGE0_API_KEY, JUDGE0_API_URL } from '@conf/env';
 import { priceFlatUnit } from '@lib/pricing';
 import { recordUsage } from '@services/usageService';
+import { debitActualSpend } from '@services/creditService';
+import { bgError } from '@lib/bg';
 import { integrationLog } from '@lib/loggers';
 
 // ── Judge0 language IDs ────────────────────────────────
@@ -173,6 +176,27 @@ export const executeCodeController = asyncHandler(async (req, res) => {
       time: result.time ?? null,
     },
   });
+
+  // The route is gated by `requireCredits()` but, until 2026-09-02, nothing
+  // here ever DEBITED — so the balance could never fall and that gate could
+  // never close. A user at 1 credit could run this indefinitely (bounded only
+  // by the 30/min rate limit) while Judge0 billed us for every call. Realised
+  // loss to date is negligible, but an unclosable credit gate is a structural
+  // defect, not a rounding error, and the one-time onboarding grant keeps it
+  // open ~5x longer per account.
+  //
+  // Debited AFTER success only: a 502 from Judge0 above returns before this
+  // point, and recordUsage never ran either, so a failed execution is free —
+  // matching how every other action treats provider failure.
+  //
+  // No minMicroCents floor: unlike a streamed mentor turn there is no
+  // partial-delivery case to forgive. The call either ran and cost us, or it
+  // did not happen at all.
+  await debitActualSpend({
+    userId: req.userId as string,
+    jobId: new Types.ObjectId(),
+    jobType: 'code_exec',
+  }).catch(bgError('executeCode.debit'));
 
   // Decode base64 outputs and clamp to a sane upper bound. A program that
   // logs megabytes would otherwise be decoded in full and buffered into the

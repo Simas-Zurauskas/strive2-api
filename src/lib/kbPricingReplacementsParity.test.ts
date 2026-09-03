@@ -60,6 +60,18 @@ itIfSnapshot('monthlyUsd matches for every plan', () => {
   }
 });
 
+itIfSnapshot('onboarding grant (KNOB 9) matches between api and client snapshot', () => {
+  // The Free plan card advertises the one-time signup grant, not the 200cr
+  // recurring allowance, so the client needs this number. It is a claim about
+  // what a *pre-signup* visitor will receive, so it is mirrored as a constant
+  // rather than fetched from the live catalog — and this assertion is the only
+  // thing stopping the two copies drifting.
+  expectInSnapshot(
+    `ONBOARDING_ALLOWANCE_CREDITS = ${PRICING_CONFIG.onboardingAllowanceCredits}`,
+    'onboardingAllowanceCredits',
+  );
+});
+
 itIfSnapshot('topup config matches', () => {
   expectInSnapshot(`creditsPerUsd: ${PRICING_CONFIG.topup.creditsPerUsd}`, 'topup.creditsPerUsd');
   expectInSnapshot(`minUsd: ${PRICING_CONFIG.topup.minUsd}`, 'topup.minUsd');

@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 import AbuseLogModel, { ABUSE_LOG_RETENTION_DAYS } from '@models/AbuseLogModel';
 import CreditLedgerModel from '@models/CreditLedgerModel';
 import { hashCanonicalEmail } from '@lib/emailHash';
-import { PLANS } from '@lib/creditPricing';
+import { onboardingAllowanceCredits } from '@lib/pricingConfig';
 import { bgError } from '@lib/bg';
 
 /**
@@ -12,7 +12,8 @@ import { bgError } from '@lib/bg';
  * silent, no credits, upgrade prompts on first generation attempt).
  *
  * Callers stamp the returned values onto the `User.credits` subdoc at create
- * time. When no abuse-log entry matches, returns the normal Free-plan grant.
+ * time. When no abuse-log entry matches, returns the ONE-TIME onboarding grant
+ * (KNOB 9), which the first free-period reset collapses to the monthly allowance.
  */
 export const resolveSignupAllowance = async (email: string): Promise<{
   allowanceBalance: number;
@@ -30,8 +31,12 @@ export const resolveSignupAllowance = async (email: string): Promise<{
     bgError('abuseLog.resolveSignupAllowance')(err);
   }
 
-  const freeAllowance = PLANS.free.monthlyAllowance;
-  return { allowanceBalance: freeAllowance, allowanceGranted: freeAllowance, blocked: false };
+  // ONE-TIME onboarding grant (KNOB 9), not the recurring monthly allowance.
+  // `applyFreePeriodReset` resets to the plan's monthlyAllowance at the first
+  // 30-day rollover, so this decays to the steady state on its own — there is
+  // deliberately no "has claimed" flag to keep in sync.
+  const onboardingGrant = onboardingAllowanceCredits();
+  return { allowanceBalance: onboardingGrant, allowanceGranted: onboardingGrant, blocked: false };
 };
 
 /**

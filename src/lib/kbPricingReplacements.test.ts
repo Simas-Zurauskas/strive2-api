@@ -38,6 +38,7 @@ test('builder produces all expected placeholders', () => {
     'topupMaxUsd',
     'topupVsStarterMarkupPct',
     'freePeriodDays',
+  'lessonsPerSignupGrant',
   ];
   for (const key of expected) {
     assert.ok(

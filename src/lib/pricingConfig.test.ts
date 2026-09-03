@@ -125,18 +125,43 @@ test('maxSavingsVsTopup is non-negative (may be 0 under uniform $/credit)', () =
 
 // ── Sonnet 5 migration parity (2026-08-01) ──────────────────
 
-test('base-lesson credit debit matches the pre-Sonnet-5 price (79 allowance / 103 bonus)', () => {
-  // The whole point of the 2026-08 MARKUP.lesson cut (6/8 → 4.73/6.35) is
-  // that users keep paying exactly what a base lesson cost before the
-  // claude-sonnet-5 upgrade — the ~1.36× tokenizer increase is absorbed in
-  // margin. If either number drifts, a knob was edited without re-solving
-  // the parity equation. Pre-migration values:
-  //   allowance: ceil((60_000×6 + 17_000×2) / 5_000) = 79
-  //   bonus:     ceil((60_000×8 + 17_000×2) / 5_000) = 103
-  assert.equal(PRICING_CONFIG.referenceCosts.lessonCredits[0], 79);
-  assert.equal(PRICING_CONFIG.referenceCosts.lessonCredits[1], 79);
-  assert.equal(PRICING_CONFIG.referenceCosts.lessonCreditsTopup[0], 103);
-  assert.equal(PRICING_CONFIG.referenceCosts.lessonCreditsTopup[1], 103);
+test('MARKUP.lesson holds the Sonnet-5 parity values (4.73 allowance / 6.35 bonus)', () => {
+  // Parity canary. The 2026-08 MARKUP.lesson cut (6/8 → 4.73/6.35) exists so
+  // users keep paying what a base lesson cost before the claude-sonnet-5
+  // upgrade — the ~1.36× tokenizer increase is absorbed in margin, by
+  // decision (see KNOB 5). These two numbers are what actually price every
+  // debit: `applyMarkup` multiplies MEASURED provider spend by them.
+  //
+  // 2026-09-02: this test previously asserted referenceCosts.lessonCredits
+  // === [79, 79] as a *proxy* for "MARKUP was not edited". That proxy
+  // conflated two independent things — what users are charged (MARKUP ×
+  // measured spend) and what the UI *estimates* (MARKUP × KNOB 6's
+  // BASE_VENDOR_COSTS_MICROCENTS). KNOB 6 is documented as feeding UI
+  // approximations only, and its own comment invites recalibration when
+  // medians drift >15%. Asserting on the derived estimate therefore made a
+  // sanctioned KNOB 6 recalibration look like a pricing regression while
+  // leaving the real lever unguarded. The canary now watches the lever.
+  assert.equal(PRICING_CONFIG.markup.lesson.allowance, 4.73);
+  assert.equal(PRICING_CONFIG.markup.lesson.bonus, 6.35);
+  // `other` was deliberately left at 2/2 in the same migration: Haiku-driven
+  // actions got no costlier, so cutting it would be a pure margin giveaway.
+  assert.equal(PRICING_CONFIG.markup.other.allowance, 2);
+  assert.equal(PRICING_CONFIG.markup.other.bonus, 2);
+});
+
+test('referenceCosts.lessonCredits reflects measured production cost (116 / 152)', () => {
+  // KNOB 6 is calibrated to what a lesson ACTUALLY costs, because every
+  // "≈ N lessons" figure in the product divides an allowance by this number.
+  // Measured from CreditLedger, actionType=generate_lesson, since 2026-07-01:
+  // n=86, median 116 credits (mean 112, p75 136, p90 156), trending up
+  // (May 94 → Aug 115). The previous 79 overstated every plan's capacity by
+  // ~47%, against KNOB 6's own ">15% drift ⇒ recalibrate" threshold.
+  //   allowance: ceil((109_000×4.73 + 32_000×2) / 5_000) = 116
+  //   bonus:     ceil((109_000×6.35 + 32_000×2) / 5_000) = 152
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCredits[0], 116);
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCredits[1], 116);
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCreditsTopup[0], 152);
+  assert.equal(PRICING_CONFIG.referenceCosts.lessonCreditsTopup[1], 152);
 });
 
 test('lesson markup differential still favors subscriptions after the Sonnet 5 cut', () => {
@@ -201,4 +226,50 @@ test('all referenceCosts ranges are non-negative [lo, hi] tuples with lo <= hi',
     assert.ok(lo >= 0, `${name} lo ${lo} must be >= 0`);
     assert.ok(hi >= lo, `${name} hi ${hi} must be >= lo ${lo}`);
   }
+});
+
+// ── KNOB 9: the one-time onboarding grant ───────────────────
+
+test('the onboarding grant EXCEEDS the recurring free allowance', () => {
+  // Without this, setting KNOB 9 below the monthly allowance would turn the
+  // "grant" into a silent downgrade for every new account, and every other
+  // test in the suite would still pass. The gap between the two numbers is
+  // the entire feature.
+  const grant = PRICING_CONFIG.onboardingAllowanceCredits;
+  assert.ok(grant > monthlyAllowanceFor('free'), `grant ${grant} must exceed the 200cr steady state`);
+});
+
+test('the onboarding grant is a positive integer', () => {
+  const grant = PRICING_CONFIG.onboardingAllowanceCredits;
+  assert.ok(Number.isInteger(grant) && grant > 0);
+  // Credits are whole units everywhere else; a fractional grant would render
+  // as "650.5" in any admin surface that shows the raw balance.
+  assert.equal(grant, Math.floor(grant));
+});
+
+test('the grant covers a complete first module, not a fraction of one', () => {
+  // Production module 1 is <= 5 lessons in 65 of 67 courses (mean 3.9), and
+  // the wizard costs ~47cr before any lesson exists. If a future
+  // recalibration of KNOB 6 pushes lesson cost up without KNOB 9 following,
+  // the grant quietly stops buying a module and the feature's whole
+  // rationale lapses — silently, because nothing else measures it.
+  const WIZARD_OVERHEAD_CREDITS = 47;
+  const usable = PRICING_CONFIG.onboardingAllowanceCredits - WIZARD_OVERHEAD_CREDITS;
+  const [, lessonHigh] = PRICING_CONFIG.referenceCosts.lessonCredits;
+  const lessons = Math.floor(usable / lessonHigh);
+  assert.ok(lessons >= 5, `grant buys only ${lessons} lesson(s) after wizard overhead; needs >= 5`);
+});
+
+test('the grant is denominated for the ALLOWANCE bucket, which is the cheaper rail', () => {
+  // The grant is written to `credits.allowanceBalance`. Had it been written
+  // as bonus, lessons would bill at MARKUP.lesson.bonus and buy ~24% fewer.
+  // This pins the premise that makes the allowance bucket the right home.
+  const [allowanceCost] = PRICING_CONFIG.referenceCosts.lessonCredits;
+  const [bonusCost] = PRICING_CONFIG.referenceCosts.lessonCreditsTopup;
+  assert.ok(bonusCost > allowanceCost, 'bonus lessons must cost more than allowance lessons');
+  const grant = PRICING_CONFIG.onboardingAllowanceCredits;
+  assert.ok(
+    Math.floor(grant / allowanceCost) > Math.floor(grant / bonusCost),
+    'the allowance rail must buy strictly more lessons for the same grant',
+  );
 });
