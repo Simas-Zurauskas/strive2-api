@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import {
+  getFreeTierSpendController,
   sendPromotionalTestEmailController,
   sendMarketingCampaignController,
   listMarketingCampaignClaimsController,
@@ -18,6 +19,12 @@ const router = Router();
 // New admin endpoints land here as routes are added. Keep them grouped by
 // resource (`/email/...`, `/users/...`, etc.) rather than flat.
 router.use(protect, requireVerified, requireAdmin);
+
+// ── Metrics ──────────────────────────────────────────────
+// Free-plan provider spend. This is the cost control for the 2026-09-02
+// onboarding grant (pricingConfig KNOB 9): the grant is one config integer
+// with a 30-day lag, so the only thing that makes it risky is not looking.
+router.get('/metrics/free-tier-spend', getFreeTierSpendController);
 
 // ── Email ────────────────────────────────────────────────
 router.post('/email/send-promotional-test', sendPromotionalTestEmailController);

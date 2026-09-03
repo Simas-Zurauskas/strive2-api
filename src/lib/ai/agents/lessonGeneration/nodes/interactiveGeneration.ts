@@ -14,6 +14,7 @@ import {
   bumpQuizDistractorLintLengthOnlyShipped,
   bumpInteractiveHaikuAttempt,
   bumpInteractiveSonnetEscalation,
+  bumpInteractiveMalformedQuizShipped,
 } from '@lib/metrics';
 import { withRetry } from '@lib/retry';
 import { shuffleOptionsWithCorrectIndex } from '@lib/ai/shuffleOptions';
@@ -272,6 +273,34 @@ const buildDistractorLintFeedback = ({
   );
 };
 
+/**
+ * Is this block a quiz the learner can actually answer?
+ *
+ * The 2026-08 regression that motivated this: the count-floor below used to
+ * accept a quiz by TYPE alone, and `interactiveBlockSchema.metadata` is
+ * `.nullable()` with every inner field `.optional()` — so a block typed
+ * `quiz`, carrying `metadata: null` and the whole question dumped into
+ * `content` as markdown, was fully schema-valid AND satisfied the floor. No
+ * retry fired, no escalation fired, every downstream guard (shuffle, LaTeX
+ * scrub, integrity lint, distractor repair) early-returned on the bad
+ * metadata, and the block reached the client as `return null` — invisible.
+ * Dead quiz blocks went from 1.1% of July's to 24.8% of August's.
+ *
+ * Mirrors the client's `parseQuizMetadata` acceptance rule. If the two ever
+ * disagree, the generator ships something the renderer refuses to draw.
+ */
+export const isWellFormedQuiz = (block: { type?: string; metadata?: unknown }): boolean => {
+  if (block.type !== 'quiz') return false;
+  const m = block.metadata as Record<string, unknown> | null | undefined;
+  if (!m || typeof m !== 'object') return false;
+  if (typeof m.question !== 'string' || m.question.trim().length === 0) return false;
+  if (!Array.isArray(m.options) || m.options.length < 2) return false;
+  if (!m.options.every((o) => typeof o === 'string' && o.trim().length > 0)) return false;
+  if (typeof m.correctIndex !== 'number' || !Number.isInteger(m.correctIndex)) return false;
+  if (m.correctIndex < 0 || m.correctIndex >= m.options.length) return false;
+  return true;
+};
+
 export const interactiveGeneration = async (state: LessonState, config?: RunnableConfig): Promise<Partial<LessonState>> => {
   const writer = config?.configurable?.writer as LessonProgressWriter | undefined;
 
@@ -361,16 +390,49 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
       // transient model failures). Distractor-lint retry lives here and
       // re-prompts with explicit feedback.
       let attemptOutput: z.infer<typeof interactiveOutputSchema>;
+      // Holds the most recent model response even when the floor rejects it,
+      // so an exhausted retry chain can DEGRADE (ship what we have, counted)
+      // instead of throwing. See the catch below.
+      let lastAttemptOutput: z.infer<typeof interactiveOutputSchema> | undefined;
       try {
+        // Labelled so `with_retry_total{label}` fires for this site. It was
+        // unlabelled, and the stricter floor below makes internal retries far
+        // more likely: `withRetry` defaults to maxRetries 3 (4 attempts) with
+        // exponential backoff, and it re-invokes with an UNCHANGED prompt, so a
+        // model that reliably emits one malformed quiz costs up to 4 calls per
+        // tier — 8 across the Haiku->Sonnet escalation — before the degrade
+        // path ships anyway. That is bounded but ~4x what
+        // MAX_DISTRACTOR_LINT_ATTEMPTS alone suggests, and without this label
+        // nothing measured it.
         attemptOutput = await withRetry(async () => {
           const output = await activeModel.invoke(messages, { metadata: { llmLabel: label } }) as z.infer<typeof interactiveOutputSchema>;
-          const quizCount = output.blocks.filter((b) => b.type === 'quiz').length;
+          lastAttemptOutput = output;
+          // Count only quizzes the learner can answer. Counting by TYPE is
+          // what let the 2026-08 regression through: a metadata-less quiz
+          // satisfied the floor, so `withRetry` never retried and the
+          // Haiku->Sonnet escalation below never fired.
+          const quizCount = output.blocks.filter(isWellFormedQuiz).length;
           const exerciseCount = output.blocks.filter((b) => b.type === 'exercise').length;
-          if (quizCount < 1 || exerciseCount < 1) {
-            throw new Error(`interactive count below floor: ${quizCount} quiz(zes), ${exerciseCount} exercise(s) — need ≥1 of each`);
+          // ...and reject ANY malformed quiz, not merely a shortfall of good
+          // ones. A pure count floor is an AGGREGATE test, so a response with
+          // one good quiz and one dead one passes it (count ≥ 1) and the dead
+          // block sails through untouched — `lintQuizBlocks` and
+          // `shuffleQuizBlockOptions` both `continue` past missing metadata by
+          // design. The prompt asks for "1-2 quiz blocks", so mixed batches are
+          // the common shape, and an aggregate-only fix would have missed most
+          // of the regression it was written for.
+          const malformedQuizCount = output.blocks.filter(
+            (b) => b.type === 'quiz' && !isWellFormedQuiz(b),
+          ).length;
+          if (quizCount < 1 || exerciseCount < 1 || malformedQuizCount > 0) {
+            throw new Error(
+              `interactive count below floor: ${quizCount} well-formed quiz(zes), ` +
+                `${exerciseCount} exercise(s), ${malformedQuizCount} malformed quiz(zes) — ` +
+                `need ≥1 quiz, ≥1 exercise, 0 malformed`,
+            );
           }
           return output;
-        });
+        }, { label: 'lesson:interactive.count-floor' });
       } catch (err) {
         // Haiku hit a schema / count-floor failure that withRetry couldn't
         // recover from. Escalate to Sonnet if we still have attempts left.
@@ -381,7 +443,32 @@ Generate 1-2 quiz blocks and 1 exercise block.`;
           lintFeedback = null;
           continue;
         }
-        throw err;
+        // Sonnet also failed the floor. If what it returned is structurally
+        // usable apart from a malformed quiz, SHIP IT rather than throwing.
+        //
+        // Why this guard is load-bearing — corrected 2026-09-02 after review:
+        // it is NOT that a throw here fails the lesson. It does not. The outer
+        // catch (see the end of this function) swallows anything thrown from
+        // this block and returns `{ interactiveBlocks: [] }`. So without this
+        // guard, tightening the floor would quietly trade "a lesson with one
+        // invisible quiz" for "a lesson with NO interactive blocks at all" —
+        // no quiz, and no exercise either, since one throw discards the whole
+        // batch. That is strictly worse for the learner and, unlike the dead
+        // block, the prose fallback cannot rescue it because nothing reaches
+        // the client to render. Shipping the degraded batch keeps the good
+        // exercise, keeps the good quiz if there was one, and leaves the dead
+        // block's text recoverable by the client fallback.
+        if (lastAttemptOutput && lastAttemptOutput.blocks.length > 0) {
+          bumpInteractiveMalformedQuizShipped();
+          genLog.warn(
+            `lesson:interactive malformed-quiz-shipped after ${attempt} attempt(s) — ` +
+              `reason=${err instanceof Error ? err.message : err} ` +
+              `blocks=${lastAttemptOutput.blocks.length} — shipping degraded (prose fallback renders client-side)`,
+          );
+          attemptOutput = lastAttemptOutput;
+        } else {
+          throw err;
+        }
       }
 
       quizLintViolations = lintQuizBlocks(attemptOutput.blocks);

@@ -315,6 +315,23 @@ export const schemas: SchemaMap = {
     },
   },
 
+  // Admin-only free-plan spend summary. Additive: no existing schema changes.
+  // `unattributedEvents` is deliberately part of the contract — UsageEvent's
+  // `planAtTime` is optional, so a consumer must be able to see how much
+  // spend in the window could not be attributed to a plan either way,
+  // instead of reading the free totals as if they were complete.
+  FreeTierSpend: {
+    type: 'object',
+    required: ['windowDays', 'vendorUsd', 'chargedUsd', 'events', 'users', 'unattributedEvents'],
+    properties: {
+      windowDays: { type: 'integer', minimum: 1, maximum: 365 },
+      vendorUsd: { type: 'number', minimum: 0 },
+      chargedUsd: { type: 'number', minimum: 0 },
+      events: { type: 'integer', minimum: 0 },
+      users: { type: 'integer', minimum: 0 },
+      unattributedEvents: { type: 'integer', minimum: 0 },
+    },
+  },
   /**
    * Empirical per-action credit ranges (measured from orchestrator cohorts).
    * NOT a billing contract — actual debits are real-cost metered. Used by

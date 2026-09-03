@@ -7,6 +7,7 @@ import { generateAuthToken } from '@lib/auth';
 import { FREE_PERIOD_DAYS } from '@lib/creditPricing';
 import { resolveSignupAllowance } from '@services/abuseLogService';
 import { awardSignupGrantIfAny } from '@services/signupCreditGrantService';
+import { enrolVerifiedContact } from '@services/marketingContactService';
 import { analytics } from '@lib/analytics';
 import { googleAuthSchema } from './validation';
 
@@ -168,6 +169,28 @@ export const googleAuthController = asyncHandler(async (req, res) => {
   if (!existing) {
     await awardSignupGrantIfAny({ userId, email });
   }
+
+  // Enrol on EVERY successful Google auth, deliberately NOT gated on
+  // `!existing`. Google sets `emailVerified: true` above and never reaches
+  // `verifyEmail.ts`, which was historically the only place a MarketingContact
+  // row was created — so every Google signup landed outside the promotional
+  // audience.
+  //
+  // The gate matters (corrected 2026-09-02 after review): `!existing` means
+  // "no row before this request", which is NOT the same event as "this person
+  // just became verified". The account-linking rescue documented above is the
+  // counter-example — someone signs up with credentials, never verifies, and
+  // the real owner then completes the same address via Google. `existing` is
+  // truthy, so a `!existing` gate would skip enrolment even though this is
+  // that person's first ever verification, which is precisely the event the
+  // credentials path enrols on. Gating on row-creation instead of verification
+  // would leave that population permanently unenrolled and, unlike the
+  // historical backfill, it would keep leaking.
+  //
+  // Safe to call unconditionally: the upsert is `$setOnInsert` only, so a
+  // returning user is a no-op and a prior opt-out is never resurrected. The
+  // function swallows and reports its own failures and can never throw.
+  await enrolVerifiedContact({ userId: user._id, email });
 
   // Fire `signup_completed` for new users and `signin_succeeded` for returning
   // ones so the funnel split (acquisition vs reactivation) stays clean.

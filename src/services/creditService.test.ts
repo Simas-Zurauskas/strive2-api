@@ -151,6 +151,36 @@ describe('getBalance', () => {
     expect(ledger[0].balanceAfter).toBe(PLANS.free.monthlyAllowance);
   });
 
+  test('free plan holding MORE than the monthly allowance: reset moves it DOWN to 200', async () => {
+    // AC3 / the one-time-ness of the onboarding grant. Before 2026-09-02 a
+    // free balance could never exceed PLANS.free.monthlyAllowance, so every
+    // reset was an increase and the negative-delta path was unreachable. The
+    // 650cr signup grant (pricingConfig KNOB 9) makes it reachable on every
+    // new account's first rollover: if this reset failed to move DOWN, or
+    // wrote a positive delta, the grant would silently become recurring —
+    // ~60 lessons/year instead of 5 — which is the exact property the
+    // resolver-level design was chosen to avoid.
+    const user = await makeUser();
+    const grant = PRICING_CONFIG.onboardingAllowanceCredits;
+    const yesterday = new Date(Date.now() - 86400_000);
+    await UserModel.updateOne(
+      { _id: user._id },
+      { $set: { 'credits.allowanceBalance': grant, 'credits.periodEnd': yesterday } },
+    );
+
+    const balance = await getBalance(user._id);
+    expect(grant).toBeGreaterThan(PLANS.free.monthlyAllowance); // guards the premise
+    expect(balance.allowance).toBe(PLANS.free.monthlyAllowance);
+
+    const ledger = await CreditLedgerModel.find({ userId: user._id }).lean();
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].reason).toBe('period_reset');
+    expect(ledger[0].balanceBefore).toBe(grant);
+    expect(ledger[0].balanceAfter).toBe(PLANS.free.monthlyAllowance);
+    expect(ledger[0].allowanceDelta).toBe(PLANS.free.monthlyAllowance - grant);
+    expect(ledger[0].allowanceDelta).toBeLessThan(0); // the new, negative-delta path
+  });
+
   test('free plan within period: no reset, no ledger row', async () => {
     const user = await makeUser();
     await UserModel.updateOne(

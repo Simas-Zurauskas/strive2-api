@@ -86,6 +86,16 @@ export const buildKbPricingReplacements = (): Record<string, string> => {
     );
   }
 
+  // ONE-TIME signup grant (KNOB 9) expressed in lessons. A placeholder rather
+  // than a number written into the article because it is a quotient of two
+  // knobs — the grant (KNOB 9) over the per-lesson reference cost (KNOB 6) —
+  // so either one moving changes it. Keeping it here is what makes a knob move
+  // change the substituted body, change the content hash, and re-index the
+  // affected articles; a hardcoded figure would go stale invisibly.
+  r['lessonsPerSignupGrant'] = fmtLessonRange(
+    lessonRangeFromCredits(PRICING_CONFIG.onboardingAllowanceCredits),
+  );
+
   r['topupMinUsd'] = fmtUsd(PRICING_CONFIG.topup.minUsd);
   r['topupMaxUsd'] = fmtUsd(PRICING_CONFIG.topup.maxUsd);
 

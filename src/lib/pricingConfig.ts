@@ -88,16 +88,28 @@ const BASE_VENDOR_COSTS_MICROCENTS = {
   //   baseLessonContent    → lesson:content Sonnet call → lesson markup
   //   baseLessonSupporting → interactive/validation/RAG/embed → other markup
   //
-  // Recalibrated 2026-08-01 for claude-sonnet-5 (~1.36× tokenizer):
-  //   baseLessonContent 60_000 → 74_000 — measured 73,871 μ¢/lesson avg
-  //     over a live 2-lesson debug:orchestrator run (mixed cold/warm cache).
-  //   baseLessonSupporting 17_000 → 22_000 — scaled ~1.3× for the Sonnet
-  //     share; deliberately NOT calibrated to the measured run, which hit
-  //     an anomalous 2/2 interactive Haiku→Sonnet escalation (watch
-  //     `interactive_sonnet_escalations_total`; recalibrate if the real
-  //     rate stays >~20%).
-  baseLessonContent: 74_000,
-  baseLessonSupporting: 22_000,
+  // Recalibrated 2026-09-02 against REAL production spend, superseding the
+  // 2026-08-01 estimate (74_000 / 22_000 → 79 credits). Those values were
+  // derived from a 2-lesson debug:orchestrator run; 86 real lesson jobs since
+  // 2026-07-01 put the actual debit at a median of 116 credits (mean 112,
+  // p75 136, p90 156) and rising — May 94 → Jul 111 → Aug 115. At 79 the
+  // product overstated every plan's capacity by ~47% (Pro advertised ≈55
+  // lessons, delivered ≈38), well past this knob's own ">15% drift ⇒
+  // recalibrate" threshold below.
+  //
+  // Both figures scale by 116/78.8 ≈ 1.472, preserving the 77:23
+  // content:supporting split, and solve:
+  //   allowance: ceil((109_000×4.73 + 32_000×2) / 5_000) = 116
+  //   bonus:     ceil((109_000×6.35 + 32_000×2) / 5_000) = 152
+  // Implied vendor cost 141_000 μ¢ = $0.141/lesson, just under the measured
+  // $0.151 mean — deliberately conservative, so the estimate cannot
+  // overstate capacity again.
+  //
+  // NOTE: this knob CANNOT change what anyone is billed. Real debits are
+  // `applyMarkup(measured provider spend)` in lib/pricing.ts; these constants
+  // feed REFERENCE_COSTS (UI approximations) and nothing else.
+  baseLessonContent: 109_000,
+  baseLessonSupporting: 32_000,
   recallExtraction_lo: 3_000,
   recallExtraction_hi: 6_000,
   // Course clarify + structure: wide range covers retry storms. Rebased
@@ -164,11 +176,30 @@ const REFERENCE_COSTS = {
 // KNOB 7 — pricing version stamped onto every UsageEvent and CreditLedger row
 // for historical billing audits. Bump on any MARKUP / ALLOWANCE / PLAN_PRICING
 // / TOPUP change. Format YYYY-MM-DD with optional `-vN` suffix; increment-only.
-const PRICING_VERSION = '2026-08-01';
+const PRICING_VERSION = '2026-09-02';
 
 // KNOB 8 — Free tier allowance refresh cadence. Paid tiers refresh on their
 // Stripe billing cycle and ignore this.
 const FREE_PERIOD_DAYS = 30;
+
+// KNOB 9 — ONE-TIME onboarding grant, stamped onto a brand-new account's
+// allowance balance at signup (see services/abuseLogService.resolveSignupAllowance).
+// This is NOT a recurring allowance: `applyFreePeriodReset` resets to
+// `PLANS.free.monthlyAllowance` (= ALLOWANCE.unit × 1 = 200) at the first
+// 30-day rollover, so the grant decays to the steady state by itself with no
+// extra state to track.
+//
+// Sized to carry a new learner through one COMPLETE first module rather than
+// a fraction of one: module 1 is ≤5 lessons in 65 of 67 production courses
+// (97%, mean 3.9), while the wizard itself costs ~47cr before any lesson
+// exists (measured means: clarify 3.0 + depth previews 8.5 + structure 35.5).
+//   47 + 5 × 116 = 627 → 650.
+// At 200 a free account reached ~2 lessons and was cut off mid-module.
+//
+// It lands in the ALLOWANCE bucket deliberately: allowance credits bill
+// lessons at MARKUP.lesson.allowance (4.73× ⇒ ~116cr), whereas bonus credits
+// bill at 6.35× ⇒ ~152cr, which would silently buy ~24% fewer lessons.
+const ONBOARDING_ALLOWANCE_CREDITS = 650;
 
 export const PRICING_CONFIG = {
   microcentsPerCredit: MICROCENTS_PER_CREDIT,
@@ -179,7 +210,11 @@ export const PRICING_CONFIG = {
   referenceCosts: REFERENCE_COSTS,
   pricingVersion: PRICING_VERSION,
   freePeriodDays: FREE_PERIOD_DAYS,
+  onboardingAllowanceCredits: ONBOARDING_ALLOWANCE_CREDITS,
 } as const;
+
+/** One-time signup grant. See KNOB 9 — not the recurring free allowance. */
+export const onboardingAllowanceCredits = (): number => ONBOARDING_ALLOWANCE_CREDITS;
 
 export type ActionCategory = keyof typeof MARKUP;
 export type CreditBucket = keyof (typeof MARKUP)[ActionCategory];

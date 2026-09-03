@@ -27,11 +27,20 @@ beforeEach(() => {
 // ── resolveSignupAllowance ─────────────────────────────
 
 describe('resolveSignupAllowance', () => {
-  test('unknown email: returns the normal Free-tier allowance grant, not blocked', async () => {
+  test('unknown email: returns the ONE-TIME onboarding grant, not the monthly allowance', async () => {
+    // 2026-09-02: a clean signup now gets a one-time onboarding grant (650cr
+    // ≈ 5 lessons at the measured 116/lesson), NOT the 200cr steady state.
+    // Asserted as a literal, deliberately: the previous version compared
+    // against `PLANS.free.monthlyAllowance`, so it would have kept passing
+    // unchanged no matter what this function returned.
     const result = await resolveSignupAllowance('new-user@example.com');
     expect(result.blocked).toBe(false);
-    expect(result.allowanceBalance).toBe(PLANS.free.monthlyAllowance);
-    expect(result.allowanceGranted).toBe(PLANS.free.monthlyAllowance);
+    expect(result.allowanceBalance).toBe(650);
+    expect(result.allowanceGranted).toBe(650);
+    // The grant must EXCEED the recurring allowance — that gap is the whole
+    // point, and `applyFreePeriodReset` collapsing it back to 200 at the
+    // first 30-day rollover is what makes the grant one-time.
+    expect(result.allowanceBalance).toBeGreaterThan(PLANS.free.monthlyAllowance);
   });
 
   test('email is in abuse log → returns 0 balance, blocked=true', async () => {
@@ -81,7 +90,12 @@ describe('resolveSignupAllowance', () => {
 
     const result = await resolveSignupAllowance('test@example.com');
     expect(result.blocked).toBe(false);
-    expect(result.allowanceBalance).toBe(PLANS.free.monthlyAllowance);
+    // Fail-open means "fall through to the grant a clean signup would get",
+    // which since 2026-09-02 is the one-time onboarding grant, not the 200cr
+    // monthly allowance. A Mongo outage must not silently downgrade the
+    // account it creates.
+    expect(result.allowanceBalance).toBe(650);
+    expect(result.allowanceBalance).toBeGreaterThan(PLANS.free.monthlyAllowance);
 
     spy.mockRestore();
   });
